@@ -1,6 +1,6 @@
 // Ayarlar penceresi + bas-konuş tuşu seçme penceresi.
 // Her değişiklik hemen kaydedilir (src/settings.js); canlı oturuma uygulamayı app.js yapar.
-import { getSettings, updateSettings, BITRATE_MIN, BITRATE_MAX } from '../settings.js'
+import { getSettings, updateSettings, BITRATE_MIN, BITRATE_MAX, UPLOAD_SECENEKLERI } from '../settings.js'
 import { keyLabel } from '../voice/ptt.js'
 import { isTauri } from '../desktop.js'
 import { openMicTest } from './micTest.js'
@@ -59,12 +59,13 @@ function satir(etiket, ...kontroller) {
   return r
 }
 
-async function cihazlariDoldur(girisSec, cikisSec, s) {
+async function cihazlariDoldur(girisSec, cikisSec, kameraSec, s) {
   try {
     const liste = await navigator.mediaDevices.enumerateDevices()
     for (const [tur, sec, secili, ad] of [
       ['audioinput', girisSec, s.inputDeviceId, 'Mikrofon'],
       ['audiooutput', cikisSec, s.outputDeviceId, 'Hoparlör'],
+      ['videoinput', kameraSec, s.cameraDeviceId, 'Kamera'],
     ]) {
       let n = 0
       for (const d of liste.filter((x) => x.kind === tur)) {
@@ -151,19 +152,45 @@ export function openSettings({ ptt, onProfile } = {}) {
   // Cihazlar
   const giris = document.createElement('select')
   const cikis = document.createElement('select')
-  for (const sec of [giris, cikis]) {
+  const kamera = document.createElement('select')
+  kamera.dataset.ayar = 'kamera'
+  for (const sec of [giris, cikis, kamera]) {
     const o = el('option', '', 'Varsayılan')
     o.value = ''
     sec.appendChild(o)
   }
   giris.onchange = () => updateSettings({ inputDeviceId: giris.value || null })
   cikis.onchange = () => updateSettings({ outputDeviceId: cikis.value || null })
+  kamera.onchange = () => updateSettings({ cameraDeviceId: kamera.value || null }) // açıksa app.js canlı geçirir
   const sinkVar = typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype
   if (!sinkVar) cikis.disabled = true // bu tarayıcı çıkış cihazı seçtirmiyor
-  cihazlariDoldur(giris, cikis, s)
+  cihazlariDoldur(giris, cikis, kamera, s)
 
   const girisNot = el('p', 'muted', 'Mikrofon değişikliği bir sonraki sesli kanala katılışta geçerli olur.')
   const cikisNot = el('p', 'muted', sinkVar ? '' : 'Bu tarayıcı hoparlör seçmeyi desteklemiyor.')
+
+  // Görüntü için toplam upload hızı (5/10/20 Mbps)
+  const upload = document.createElement('select')
+  upload.dataset.ayar = 'upload'
+  for (const mbps of UPLOAD_SECENEKLERI) {
+    const o = el('option', '', `${mbps} Mbps`)
+    o.value = String(mbps)
+    upload.appendChild(o)
+  }
+  upload.value = String(s.uploadMbps)
+  upload.onchange = () => updateSettings({ uploadMbps: Number(upload.value) })
+  const uploadNot = el('p', 'muted', 'Ekran paylaşımı ve kamera bu hızın bir kısmını kullanır')
+
+  // Ekran paylaşımı kalitesi: bir sonraki paylaşımda geçerli
+  const ekranKalite = document.createElement('select')
+  ekranKalite.dataset.ayar = 'ekran-kalite'
+  for (const [deger, yazi] of [['net', 'Net (1080p, 30 fps)'], ['akici', 'Akıcı (720p, 60 fps)']]) {
+    const o = el('option', '', yazi)
+    o.value = deger
+    ekranKalite.appendChild(o)
+  }
+  ekranKalite.value = s.screenMode
+  ekranKalite.onchange = () => updateSettings({ screenMode: ekranKalite.value })
 
   // Mikrofon testi
   const testBtn = el('button', 'secondary', 'Mikrofon testi')
@@ -185,6 +212,9 @@ export function openSettings({ ptt, onProfile } = {}) {
     satir('Ses kalitesi', kalite, kaliteYazi),
     satir('Giriş cihazı', giris), girisNot,
     satir('Çıkış cihazı', cikis), cikisNot,
+    satir('Kamera', kamera),
+    satir('Upload hızın', upload), uploadNot,
+    satir('Ekran paylaşımı', ekranKalite),
     testBtn, uyari, ...(yoneticiNotu ? [yoneticiNotu] : []), dugmeler,
   )
   arka.appendChild(kart)

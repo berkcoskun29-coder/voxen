@@ -3,6 +3,9 @@
 // Sürüm derlemesinde fazladan konsol penceresi açılmasın (SİLME):
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Kamera/mikrofon/ekran izinleri ve video tam ekranı (WebView2, yalnız Windows)
+#[cfg(windows)]
+mod goruntu;
 mod ptt_hook;
 
 use std::sync::{Arc, Mutex};
@@ -164,6 +167,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![set_ptt_key, ptt_hook_status, pending_update, install_update])
         .setup(move |app| {
             tepsi_kur(app)?;
+            #[cfg(windows)]
+            if let Some(pencere) = app.get_webview_window("main") {
+                // İsteğe bağlı özellik: kurulamazsa program yine açılır, yalnız log'a yazılır
+                if let Err(e) = goruntu::bagla(&pencere) {
+                    log::warn!("görüntü işleyicileri bağlanamadı: {e}");
+                }
+            }
             ptt_hook::start(app.handle().clone(), hook_filtresi.clone());
             guncelleme_denetle(app.handle().clone());
             Ok(())

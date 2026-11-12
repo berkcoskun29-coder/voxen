@@ -84,6 +84,13 @@ export function mountChat(container, { channel, profile }) {
 
   const enAltta = () => liste.scrollHeight - liste.scrollTop - liste.clientHeight < 40
 
+  // "Alta yapışık": kullanıcı en alttaysa liste boyu değişince de (ör. üstte görüntü bölmesi
+  // açılıp kapanınca, pencere boyutlanınca) en altta kalsın. Kaydırınca güncellenir.
+  let altaYapisik = true
+  const gozlemci = globalThis.ResizeObserver
+    ? new ResizeObserver(() => { if (altaYapisik && !kapandi) liste.scrollTop = liste.scrollHeight })
+    : null // eski tarayıcı / test ortamı: yalnız mesaj gelince inilir
+
   // Listeyi baştan çizer (ardışık mesaj gruplaması ve gün çizgileri burada).
   function ciz() {
     liste.innerHTML = ''
@@ -130,7 +137,10 @@ export function mountChat(container, { channel, profile }) {
     mesajlar = [...mesajlar, ...yeniler].sort((a, b) => Number(a.id) - Number(b.id))
     ciz()
     if (tur === 'basa') liste.scrollTop += liste.scrollHeight - eskiYukseklik // olduğu yerde kal
-    else if (altta || tur === 'ilk') liste.scrollTop = liste.scrollHeight // sadece alttaysa in
+    else if (altta || tur === 'ilk') {
+      liste.scrollTop = liste.scrollHeight // sadece alttaysa in
+      altaYapisik = true
+    }
   }
 
   // Yukarı kaydırınca 50 eski mesaj
@@ -148,7 +158,11 @@ export function mountChat(container, { channel, profile }) {
       yukleniyor = false
     }
   }
-  liste.addEventListener('scroll', () => { if (liste.scrollTop <= 0) eskileriYukle() })
+  liste.addEventListener('scroll', () => {
+    altaYapisik = enAltta()
+    if (liste.scrollTop <= 0) eskileriYukle()
+  })
+  gozlemci?.observe(liste)
 
   // Gönderme
   let gonderiyor = false
@@ -172,7 +186,7 @@ export function mountChat(container, { channel, profile }) {
       kutu.value = '' // sadece başarılı gönderimden sonra temizle
       sayacGuncelle()
       await ekle([sonuc.message], 'sona')
-      if (!kapandi) liste.scrollTop = liste.scrollHeight // kendi mesajımızda hep en alta in
+      if (!kapandi) { liste.scrollTop = liste.scrollHeight; altaYapisik = true } // kendi mesajımızda hep en alta in
     } catch {
       toast('Mesaj gönderilemedi')
     } finally {
@@ -201,6 +215,6 @@ export function mountChat(container, { channel, profile }) {
   return {
     // Profil değişince kendi mesajlarımız tazelensin
     updateProfile(p) { profile = p; profiller.set(p.id, p); ciz() },
-    destroy() { kapandi = true; abonelikiKapat() },
+    destroy() { kapandi = true; gozlemci?.disconnect(); abonelikiKapat() },
   }
 }

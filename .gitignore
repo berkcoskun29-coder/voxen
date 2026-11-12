@@ -9,3 +9,6 @@ src-tauri/target/
 src-tauri/gen/
 # güncelleme imza anahtarı asla repoya girmez
 *.key
+
+# tasarım masası test hesapları
+tasarim/_araclar/*.local.json

@@ -2,15 +2,18 @@
 // Sesli kanalların altında içerideki kişiler; sesli kanaldaysak altta ses paneli.
 import { avatarWithDot } from './memberList.js'
 import { renderVoicePanel } from './voicePanel.js'
-import { voiceStateIcon } from './icons.js'
+import { voiceStateIcon, cameraIcon, screenIcon } from './icons.js'
 
-// Kim hangi sesli kanalda? members: profil dizisi, presence: Map<userId, {voiceChannelId}>
+// Kim hangi sesli kanalda? members: profil dizisi, voiceStates: Map<userId, {channelId, ...}>
+// (voice_states tablosundan), presence: Map<userId, durum> (verilirse yalnız çevrimiçi olanlar gösterilir:
+// kapanan pencereden kalmış eski satır kimseyi kanalda gibi göstermesin).
 // Dönen: Map<kanalId, profil dizisi> (üye listesindeki sırayla)
-export function voiceMembersByChannel(members, presence) {
+export function voiceMembersByChannel(members, voiceStates, presence) {
   const gruplar = new Map()
   for (const kisi of members) {
-    const kanalId = presence.get(kisi.id)?.voiceChannelId
+    const kanalId = voiceStates.get(kisi.id)?.channelId
     if (!kanalId) continue
+    if (presence && !presence.has(kisi.id)) continue
     if (!gruplar.has(kanalId)) gruplar.set(kanalId, [])
     gruplar.get(kanalId).push(kisi)
   }
@@ -19,7 +22,8 @@ export function voiceMembersByChannel(members, presence) {
 
 // Sesli kanaldaki bir kişi: küçük avatar (resim ya da baş harf) + ad.
 // Konuşurken avatarın çevresinde yeşil halka (CSS: .voice-avatar.speaking)
-function sesliKisi(kisi, konusuyor, varlikGirdisi) {
+// sesDurumu: o kişinin voice_states satırı { muted, deafened, camera, screen }
+function sesliKisi(kisi, konusuyor, sesDurumu) {
   const satir = document.createElement('div')
   satir.className = 'voice-member'
   let av
@@ -38,9 +42,22 @@ function sesliKisi(kisi, konusuyor, varlikGirdisi) {
   ad.className = 'voice-member-name'
   ad.textContent = kisi.username
   satir.append(av, ad)
-  // Susturulmuş / sağırlaştırılmış kişinin yanında küçük çizili simge (herkes görür)
-  const simge = voiceStateIcon(varlikGirdisi?.voiceMuted, varlikGirdisi?.voiceDeafened)
-  if (simge) satir.appendChild(simge)
+  // Sağdaki küçük simgeler (herkes görür): susturma/sağırlık, kamera açık, ekran paylaşıyor
+  const simgeler = document.createElement('span')
+  simgeler.className = 'voice-member-icons'
+  const simge = voiceStateIcon(sesDurumu?.muted, sesDurumu?.deafened)
+  if (simge) simgeler.appendChild(simge)
+  if (sesDurumu?.camera) {
+    const k = cameraIcon()
+    k.dataset.state = 'camera'
+    simgeler.appendChild(k)
+  }
+  if (sesDurumu?.screen) {
+    const e = screenIcon()
+    e.dataset.state = 'screen'
+    simgeler.appendChild(e)
+  }
+  if (simgeler.childElementCount) satir.appendChild(simgeler)
   return satir
 }
 
@@ -53,7 +70,7 @@ export function updateSpeakingRings(panel, konusanlar) {
 
 // Bir kanal grubunu (başlık + kanallar) panele ekler.
 // sesli: { members: Map<kanalId, profil[]>, speaking: Set<userId> } (sadece sesli grupta)
-function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli) { // sesli.presence: Map<userId, girdi>
+function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli) { // sesli.voiceStates: Map<userId, durum>
   const baslikSatiri = document.createElement('div')
   baslikSatiri.className = 'section-head'
   const b = document.createElement('span')
@@ -83,7 +100,7 @@ function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli) 
       const kisiler = document.createElement('div')
       kisiler.className = 'voice-members'
       kisiler.dataset.voiceChannel = k.id
-      for (const kisi of sesli.members.get(k.id) ?? []) kisiler.appendChild(sesliKisi(kisi, sesli.speaking.has(kisi.id), sesli.presence?.get(kisi.id)))
+      for (const kisi of sesli.members.get(k.id) ?? []) kisiler.appendChild(sesliKisi(kisi, sesli.speaking.has(kisi.id), sesli.voiceStates?.get(kisi.id)))
       grup.appendChild(kisiler)
     }
   }
@@ -116,7 +133,7 @@ function kullaniciCubugu(profile, handlers, myStatus, voiceState) {
 }
 
 // ctx: { server, channels, profile, selectedChannelId, handlers,
-//        voiceMembers (Map<kanalId, profil[]>), speaking (Set<userId>),
+//        voiceMembers (Map<kanalId, profil[]>), speaking (Set<userId>), voiceStates (Map<userId, durum>),
 //        voice (sesli kanaldaysak: { channelName, state, handlers } -> ses paneli) }
 // handlers: onSelectChannel(id), onAddChannel(kind), onCopyInvite(), onSettings(), onMicTest(), onSignOut()
 export function renderChannelList(panel, ctx) {
@@ -153,7 +170,7 @@ export function renderChannelList(panel, ctx) {
     grupEkle(liste, 'Sesli kanallar', sesli, selectedChannelId, 'voice', handlers, sahip, {
       members: ctx.voiceMembers ?? new Map(),
       speaking: ctx.speaking ?? new Set(),
-      presence: ctx.presence,
+      voiceStates: ctx.voiceStates,
     })
   }
   panel.appendChild(liste)

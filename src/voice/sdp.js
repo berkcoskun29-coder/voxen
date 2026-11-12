@@ -40,6 +40,28 @@ export function tuneOpus(sdp, { bitrateKbps = 128, fec = true, stereo = false } 
   return satirlar.join(satirSonu)
 }
 
+// SDP birden çok "m-satırı" (medya bölümü) içerebilir: mikrofon, kamera, ekran, ekran sesi.
+// tuneOpusSection yalnız sıradaki 'index' numaralı bölüme tuneOpus uygular; diğerlerine dokunmaz.
+// (Bölüm yoksa SDP aynen döner.)
+export function tuneOpusSection(sdp, index, ayarlar) {
+  const satirSonu = sdp.includes('\r\n') ? '\r\n' : '\n'
+  const ayirac = satirSonu + 'm='
+  const parcalar = sdp.split(ayirac) // [0] = oturum başlığı, [1..] = m-satırları ('m=' öneki olmadan)
+  const i = index + 1
+  if (i >= parcalar.length) return sdp
+  parcalar[i] = tuneOpus('m=' + parcalar[i], ayarlar).slice(2)
+  return parcalar.join(ayirac)
+}
+
+// m-satırlarının mid değerleri, SDP'deki sırasıyla. Örn. ['0', '1', '2', '3']
+export function midOrder(sdp) {
+  const midler = []
+  for (const bolum of (sdp ?? '').split(/\r?\nm=/).slice(1)) {
+    midler.push(/^a=mid:(\S+)/m.exec(bolum)?.[1] ?? null)
+  }
+  return midler
+}
+
 // İki kişiden hangisi bağlantıyı başlatır (teklifi gönderir)?
 // Kimliği alfabetik olarak küçük olan. Böylece iki taraf aynı anda aramaz.
 export function shouldInitiate(myId, peerId) {

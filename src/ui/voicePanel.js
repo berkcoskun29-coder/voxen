@@ -7,7 +7,9 @@ export const VOICE_STATUS_TEXT = {
   failed: 'Doğrudan bağlantı kurulamadı',
 }
 
-import { micIcon, headphonesIcon } from './icons.js'
+import { micIcon, headphonesIcon, cameraIcon, screenIcon } from './icons.js'
+import { screenShareSupported, desktopScreenNotice } from '../voice/screenShare.js'
+import { isTauri } from '../desktop.js'
 
 // simge: SVG (ya da yok); aria: ekran okuyucu/ipucu metni. Yazı da durur, simge yanına eklenir.
 function dugme(yazi, basili, onClick, ek = '', simge = null, aria = '') {
@@ -38,10 +40,11 @@ export function renderVoicePanel({ channelName, state, handlers, pttHint }) {
 
   kutu.append(durum, ad)
 
-  if (state.micError) {
+  for (const metin of [state.micError, state.cameraError, state.screenError]) {
+    if (!metin) continue
     const hata = document.createElement('div')
     hata.className = 'voice-error'
-    hata.textContent = state.micError
+    hata.textContent = metin
     kutu.appendChild(hata)
   }
 
@@ -60,8 +63,33 @@ export function renderVoicePanel({ channelName, state, handlers, pttHint }) {
   const sustur = dugme('Sustur', state.muted, handlers.onToggleMute, '', micIcon(miksiz), state.muted ? 'Mikrofonu aç' : 'Mikrofonu kapat')
   sustur.disabled = !!state.listenOnly // mikrofon yoksa açılamaz
   const sagir = dugme('Sağırlaştır', state.deafened, handlers.onToggleDeafen, '', headphonesIcon(state.deafened), state.deafened ? 'Sesi aç' : 'Sesi kapat')
+  // Kamera: açıkken yeşil (active), yalnız simge
+  const kamera = dugme('', state.camera, handlers.onToggleCamera, ' camera-btn', cameraIcon(false), state.camera ? 'Kamerayı kapat' : 'Kamerayı aç')
+  // Bağlanırken kamera/ekran açılamaz (örgü henüz kurulmadı): düğmeler soluk ve tıklanamaz
+  const baglaniyor = state.status === 'connecting'
+  kamera.disabled = baglaniyor
   const ayril = dugme('Ayrıl', false, handlers.onLeave, ' leave')
-  dugmeler.append(sustur, sagir, ayril)
+  dugmeler.append(sustur, sagir, kamera)
+  // Ekran paylaşımı: açıkken yeşil; tarayıcı desteklemiyorsa düğme hiç görünmez
+  if (screenShareSupported()) {
+    const ekran = dugme('', state.screen, handlers.onToggleScreen, ' camera-btn screen-btn', screenIcon(), state.screen ? 'Paylaşımı durdur' : 'Ekranı paylaş')
+    ekran.disabled = baglaniyor
+    dugmeler.appendChild(ekran)
+  } else if (isTauri()) {
+    // Masaüstü programı ekran yakalamayı desteklemiyorsa düğme kalır ama soluk durur;
+    // üstüne gelince ipucu, tıklayınca panelde uyarı: "Bu özellik şimdilik tarayıcı sürümünde: …"
+    const not = desktopScreenNotice()
+    const b = dugme('', false, () => {
+      if (kutu.querySelector('.screen-notice')) return // bir kez yeter
+      const uyari = document.createElement('div')
+      uyari.className = 'voice-error screen-notice'
+      uyari.textContent = not
+      kutu.insertBefore(uyari, dugmeler)
+    }, ' camera-btn screen-btn unavailable', screenIcon(), not)
+    b.setAttribute('aria-disabled', 'true') // disabled değil: ipucu ve tıklama çalışsın diye
+    dugmeler.appendChild(b)
+  }
+  dugmeler.appendChild(ayril)
   kutu.appendChild(dugmeler)
   return kutu
 }

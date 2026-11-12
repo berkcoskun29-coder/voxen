@@ -24,7 +24,10 @@ vi.mock('../src/lib/supabase.js', () => {
 })
 
 import { computeStatus, clampStatusText, mergeEntries, STATUS_COLORS } from '../src/presence/status.js'
-import { startPresence, onPresenceChange, otherClientVoiceChannel, CLIENT_ID } from '../src/presence/presence.js'
+import { startPresence, onPresenceChange, isClientOnline, CLIENT_ID, resetPresenceLimiter } from '../src/presence/presence.js'
+
+// Varlık gönderim geçmişi modül düzeyinde (pencereler arası ortak): her test temiz başlasın
+beforeEach(() => resetPresenceLimiter())
 
 const DK = 60 * 1000
 // Kanal asenkron kurulur (önceki kapanış + oturum anahtarı beklenir): bekleyen işleri bitir
@@ -75,7 +78,8 @@ describe('startPresence', () => {
     const p = startPresence('u1', () => prefs)
     await akit()
     expect(fake.channel).toHaveBeenCalledWith('presence:voxen', { config: { private: true, presence: { key: 'u1' } } })
-    expect(fake.track).toHaveBeenCalledWith(expect.objectContaining({ status: 'online', statusText: '', voiceChannelId: null }))
+    // Varlık yalnız durum, yazı ve pencere kimliği taşır (sesli durum voice_states tablosunda)
+    expect(fake.track).toHaveBeenCalledWith({ status: 'online', statusText: '', clientId: CLIENT_ID })
     p.stop()
   })
 
@@ -98,9 +102,10 @@ describe('startPresence', () => {
     const p = startPresence('u1', () => prefs)
     await akit()
     fake.track.mockClear()
+    vi.advanceTimersByTime(1000) // bağlandıktan biraz sonra (aynı anda iki gönderim birleştirilir)
     prefs = { dnd: true, statusText: 'çalışıyorum' }
     p.refresh()
-    expect(fake.track).toHaveBeenCalledWith(expect.objectContaining({ status: 'dnd', statusText: 'çalışıyorum', voiceChannelId: null }))
+    expect(fake.track).toHaveBeenCalledWith({ status: 'dnd', statusText: 'çalışıyorum', clientId: CLIENT_ID })
     p.refresh() // aynı değerler: tekrar yayınlama
     expect(fake.track).toHaveBeenCalledTimes(1)
     p.stop()
@@ -134,18 +139,14 @@ describe('startPresence', () => {
 })
 
 describe('aynı hesabın başka penceresi', () => {
-  it('otherClientVoiceChannel: kendi penceremizin girdisini saymaz, başkasınınkini sayar', async () => {
+  it('isClientOnline: o pencere (clientId) varlıkta görünüyor mu', async () => {
     const p = startPresence('u1', () => ({ dnd: false, statusText: '' }))
     await akit()
-    fake.state = { u1: [{ status: 'online', voiceChannelId: 'v1', clientId: CLIENT_ID }] }
+    fake.state = { u1: [{ status: 'online', clientId: CLIENT_ID }, { status: 'online', clientId: 'baska' }] }
     fake.syncCb()
-    expect(otherClientVoiceChannel('u1')).toBeNull()
-    fake.state = { u1: [
-      { status: 'online', voiceChannelId: null, clientId: CLIENT_ID },
-      { status: 'online', voiceChannelId: 'v2', clientId: 'baska' },
-    ] }
-    fake.syncCb()
-    expect(otherClientVoiceChannel('u1')).toBe('v2')
+    expect(isClientOnline('u1', 'baska')).toBe(true)
+    expect(isClientOnline('u1', 'kapanmis')).toBe(false)
+    expect(isClientOnline('u2', 'baska')).toBe(false)
     expect(fake.track).toHaveBeenCalledWith(expect.objectContaining({ clientId: CLIENT_ID }))
     p.stop()
   })

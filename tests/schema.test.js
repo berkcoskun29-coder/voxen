@@ -116,3 +116,61 @@ describe('004_presence_auth_and_checks.sql', () => {
     expect(sql4).toContain('create unique index profiles_username_lower_key on public.profiles (lower(username))')
   })
 })
+
+// 005: sesli kanal durumu ayrı tabloda (varlık sınırına takılmasın diye presence'tan çıktı)
+const yol5 = 'supabase/migrations/005_voice_states.sql'
+const sql5 = existsSync(yol5) ? readFileSync(yol5, 'utf8').toLowerCase().replace(/\s+/g, ' ') : ''
+describe('005_voice_states.sql', () => {
+  it('dosya var', () => expect(existsSync(yol5)).toBe(true))
+  it('tablo: kişi başı tek satır, sunucu/kanal silinince satır da silinir', () => {
+    expect(sql5).toContain('create table public.voice_states')
+    expect(sql5).toContain('user_id uuid primary key references auth.users on delete cascade')
+    expect(sql5).toContain('server_id uuid not null references public.servers on delete cascade')
+    expect(sql5).toContain('channel_id uuid not null references public.channels on delete cascade')
+    expect(sql5).toContain('client_id text not null')
+    for (const s of ['muted', 'deafened', 'camera', 'screen']) {
+      expect(sql5).toContain(`${s} boolean not null default false`)
+    }
+    expect(sql5).toContain('updated_at timestamptz not null default now()')
+  })
+  it('RLS açık; okuma üyelere', () => {
+    expect(sql5).toContain('alter table public.voice_states enable row level security')
+    const sec = sql5.slice(sql5.indexOf('create policy voice_states_select'), sql5.indexOf('create policy voice_states_insert'))
+    expect(sec).toContain('for select to authenticated')
+    expect(sec).toContain('public.is_member(server_id)')
+  })
+  it('ekleme/güncelleme: kendi satırı + üyelik + kanal o sunucunun sesli kanalı', () => {
+    for (const [ad, son] of [['voice_states_insert', 'create policy voice_states_update'], ['voice_states_update', 'create policy voice_states_delete']]) {
+      const p = sql5.slice(sql5.indexOf(`create policy ${ad}`), sql5.indexOf(son))
+      expect(p).toContain('with check')
+      expect(p).toContain('user_id = auth.uid()')
+      expect(p).toContain('public.is_member(server_id)')
+      expect(p).toContain('public.is_voice_channel_of(channel_id, server_id)')
+    }
+    const guncelle = sql5.slice(sql5.indexOf('create policy voice_states_update'))
+    expect(guncelle).toMatch(/using \(user_id = auth\.uid\(\)\)/)
+  })
+  it('kanal denetimi: güvenli fonksiyon, kind = voice ve sunucu eşleşmesi', () => {
+    expect(sql5).toContain('function public.is_voice_channel_of(cid uuid, sid uuid)')
+    const f = sql5.slice(sql5.indexOf('function public.is_voice_channel_of'), sql5.indexOf('revoke all'))
+    expect(f).toContain('security definer')
+    expect(f).toContain('set search_path = public')
+    expect(f).toContain("c.kind = 'voice'")
+    expect(f).toContain('c.server_id = sid')
+    expect(sql5).toContain('revoke all on function public.is_voice_channel_of(uuid, uuid) from public')
+    expect(sql5).toContain('grant execute on function public.is_voice_channel_of(uuid, uuid) to authenticated')
+  })
+  it('silme: yalnız kendi satırı', () => {
+    const p = sql5.slice(sql5.indexOf('create policy voice_states_delete'))
+    expect(p).toContain('for delete to authenticated')
+    expect(p).toContain('using (user_id = auth.uid())')
+  })
+  it('updated_at sunucuda yenilenir', () => {
+    expect(sql5).toContain('before update on public.voice_states')
+    expect(sql5).toContain('new.updated_at := now()')
+  })
+  it('realtime yayınında; silme olayları için replica identity full', () => {
+    expect(sql5).toContain('alter table public.voice_states replica identity full')
+    expect(sql5).toContain('alter publication supabase_realtime add table public.voice_states')
+  })
+})

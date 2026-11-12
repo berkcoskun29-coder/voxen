@@ -1,8 +1,11 @@
 // Sesli oturum: bir sesli kanala katılınca gereken her şeyi bir araya getirir.
 //   mikrofon -> ses hattı (gürültü engelleme + kapı) -> örgü (PeerMesh) -> karşıdakiler
 //   karşıdakiler -> gizli <audio> elemanları -> hoparlör
+//   karşıdakilerin ekran sesi -> her eşe AYRI bir gizli <audio> (ses seviyesi kaydırıcısı bunu ayarlar)
 // Ayrıca: susturma, sağırlaştırma, konuşan halkaları, katılma/ayrılma bipleri.
 import { openMic, createVoicePipeline, MIC_MESSAGES } from './pipeline.js'
+import { openCamera, CAMERA_MESSAGES } from './camera.js'
+import { startScreenShare, SCREEN_HEADPHONE_WARNING } from './screenShare.js'
 import { PeerMesh, clampBitrate } from './mesh.js'
 import { supabaseSignal } from './signal.js'
 import { playBeep } from './sounds.js'
@@ -17,6 +20,8 @@ export const SELF_SPEAKING_POLL_MS = 100
 export function createVoiceSession({ channelId, userId, deps = {} }) {
   const d = {
     openMic,
+    openCamera,
+    startScreenShare,
     createVoicePipeline,
     createMesh: (opts) => new PeerMesh(opts),
     playBeep,
@@ -32,17 +37,31 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     listenOnly: false, // mikrofon yok: sadece dinliyoruz
     muted: false, // Sustur
     deafened: false, // Sağırlaştır
+    camera: false, // kamera açık mı
+    cameraError: null, // Türkçe kamera hatası (varsa)
+    screen: false, // ekran paylaşımı açık mı
+    screenError: null, // Türkçe ekran paylaşımı hatası (varsa)
     speaking: new Set(), // şu an konuşanların kimlikleri (biz dahil)
   }
   let transmitting = true // bas-konuş / sesle algılama (PttController) bunu değiştirir
   let cikisCihazi = null // hoparlör kimliği (null = varsayılan)
   let hat = null // ses hattı
+  let kameraIzi = null // açık kameranın izi
+  let kameraCihazi = null // açık kameranın cihazı (null = varsayılan)
+  let ekran = null // açık paylaşım: { video, audio, stop() }
   let mesh = null
   let bitti = false // leave() çağrıldı mı
   let sayac = 0
   let bitrate = null
+  let uploadMbps = null // görüntü upload bütçesi (ayarlardan)
+  let odadaEkran = false // kanalda başka biri ekran paylaşıyor mu (kamera bütçesi için)
   const sesler = new Map() // userId -> <audio>
-  const dinleyiciler = { change: new Set(), speaking: new Set() }
+  // Görüntü (2. aşama): karşıdan gelen izler ve ekran sesleri
+  const bagliEsler = new Set() // bağlantısı kurulmuş eşler (cap'lerini ancak bunlar için biliriz)
+  const uzakIzler = new Map() // userId -> { camera, screen, screenAudio } (gelen izler)
+  const ekranSesleri = new Map() // userId -> ekran sesi için <audio> (mikrofon sesinden ayrı)
+  const ekranAyari = new Map() // userId -> { volume: 0..1, hidden } (izleyenin kendi tercihi)
+  const dinleyiciler = { change: new Set(), speaking: new Set(), notice: new Set(), tracks: new Set() }
 
   function yay(olay) {
     for (const cb of dinleyiciler[olay]) cb(olay === 'speaking' ? state.speaking : state)
@@ -81,6 +100,52 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     a.srcObject = null
     a.remove()
     sesler.delete(peerId)
+  }
+
+  // --- Ekran sesi: her paylaşan için ayrı <audio> ---
+  // Mikrofon sesi sesEkle'deki <audio>'dan çalar; ekran sesi ayrı bir izdir (mikrofon akışında yok),
+  // bu yüzden iki kez çalmaz. Sağırken susar; "Görüntüyü gizle" ya da kaydırıcı ses seviyesini ayarlar.
+  function ekranAyariAl(peerId) {
+    return ekranAyari.get(peerId) ?? { volume: 1, hidden: false }
+  }
+  function ekranSesiniAyarla(peerId) {
+    const a = ekranSesleri.get(peerId)
+    if (!a) return
+    const { volume, hidden } = ekranAyariAl(peerId)
+    a.volume = hidden ? 0 : volume
+    a.muted = state.deafened
+  }
+  function ekranSesiKaldir(peerId) {
+    const a = ekranSesleri.get(peerId)
+    if (!a) return
+    a.srcObject = null
+    a.remove()
+    ekranSesleri.delete(peerId)
+  }
+  function ekranSesiKur(peerId, iz) {
+    ekranSesiKaldir(peerId)
+    if (!iz || !globalThis.MediaStream) return
+    const a = document.createElement('audio')
+    a.autoplay = true
+    a.hidden = true
+    a.dataset.screenAudio = peerId
+    a.srcObject = new MediaStream([iz])
+    if (cikisCihazi) a.setSinkId?.(cikisCihazi)?.catch?.(() => {})
+    document.body.appendChild(a)
+    ekranSesleri.set(peerId, a)
+    ekranSesiniAyarla(peerId)
+    try { a.play()?.catch?.(() => {}) } catch { /* otomatik oynatma engeli */ }
+  }
+
+  // Örgüden gelen 'peer-track': izi kaydet (track null = kalktı), ekran sesini çal, arayüze haber ver
+  function uzakIzGeldi({ peerId, slot, track }) {
+    const izler = uzakIzler.get(peerId) ?? {}
+    if (track) izler[slot] = track
+    else delete izler[slot]
+    if (Object.keys(izler).length) uzakIzler.set(peerId, izler)
+    else uzakIzler.delete(peerId)
+    if (slot === 'screenAudio') ekranSesiKur(peerId, track)
+    yay('tracks')
   }
 
   const internetGeldi = () => mesh?.reconnect()
@@ -132,17 +197,26 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
       signal: d.signal,
     })
     if (bitrate != null) mesh.setBitrate(bitrate)
+    if (uploadMbps != null) mesh.setUploadMbps?.(uploadMbps)
+    if (odadaEkran) mesh.setRoomScreenOn?.(true)
     mesh.setDeafened(state.deafened)
     mesh.on('ready', () => { baglandik = true; durumuGuncelle() })
     mesh.on('peer-joined', ({ userId: id, stream }) => {
       sesEkle(id, stream)
+      bagliEsler.add(id)
+      yay('tracks') // bu eşin görüntü cap'i artık belli (eski sürüm notu için)
       baglandik = true
       durumuGuncelle()
     })
     mesh.on('peer-left', ({ userId: id }) => {
       sesKaldir(id)
+      ekranSesiKaldir(id)
+      uzakIzler.delete(id)
+      bagliEsler.delete(id)
       konusmaAyarla(id, false)
+      yay('tracks')
     })
+    mesh.on('peer-track', uzakIzGeldi)
     mesh.on('peer-speaking', ({ userId: id, speaking }) => konusmaAyarla(id, speaking))
     mesh.on('connect-failed', durumuGuncelle)
     mesh.on('failed-change', durumuGuncelle)
@@ -169,9 +243,193 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     }
     mesh = null
     for (const id of [...sesler.keys()]) sesKaldir(id)
+    for (const id of [...ekranSesleri.keys()]) ekranSesiKaldir(id)
+    uzakIzler.clear()
+    bagliEsler.clear()
+    ekranAyari.clear()
     hat?.close()
     hat = null
+    kameraIzi?.stop() // kamera ışığı açık kalmasın (örgü zaten kapandı, yuvayı boşaltmaya gerek yok)
+    kameraIzi = null
+    ekran?.stop() // ekran paylaşımı da kapansın (örgü zaten kapandı)
+    ekran = null
+    state.screen = false
+    state.camera = false
     state.speaking.clear()
+  }
+
+  // Kamerayı açar (kayıtlı cihaz yoksa varsayılana döner ve eski seçimi unutur).
+  // { iz, id } döner: id = gerçekte kullanılan cihaz (null = varsayılan)
+  async function kameraAc() {
+    const kayitli = getSettings().cameraDeviceId
+    try {
+      return { iz: await d.openCamera(kayitli || undefined), id: kayitli }
+    } catch (e) {
+      if (kayitli && e?.code === 'no-camera') {
+        updateSettings({ cameraDeviceId: null })
+        return { iz: await d.openCamera(), id: null }
+      }
+      throw e
+    }
+  }
+
+  // Açık kamerayı bırakır: iz durur, örgüdeki yuva boşalır
+  async function kameraKapat() {
+    const iz = kameraIzi
+    kameraIzi = null
+    state.camera = false
+    iz?.stop()
+    await mesh?.setLocalTrack('camera', null)
+  }
+
+  // Yeni izi takar. Önce örgüye takılır; ancak başarılıysa "açık" sayılır, eski iz durdurulur.
+  // Başarısızsa yeni iz durdurulur, eski iz (varsa) yuvaya geri konur. Hata yukarı fırlar.
+  async function kameraTak(iz, id) {
+    const eski = kameraIzi
+    try {
+      await mesh.setLocalTrack('camera', iz)
+    } catch (e) {
+      iz.stop()
+      await mesh?.setLocalTrack('camera', eski)?.catch?.(() => {})
+      throw e
+    }
+    if (bitti) { iz.stop(); return } // takılırken ayrıldık
+    kameraIzi = iz
+    kameraCihazi = id
+    state.camera = true
+    if (eski && eski !== iz) eski.stop()
+    // Kullanıcı kamerayı sistemden keserse (ended) kendiliğinden kapanır
+    iz.addEventListener?.('ended', () => {
+      sirala(async () => {
+        if (kameraIzi !== iz || bitti) return
+        await kameraKapat()
+        yay('change')
+      })
+    })
+  }
+
+  // Aç/kapa/değiştir işlemleri tek sırada çalışır: art arda tıklamada ikinci kamera açılmaz,
+  // açılırken gelen "kapat" açılış bitince uygulanır (sonuç kapalı, iz durmuş).
+  let kuyruk = Promise.resolve()
+  function sirala(is) {
+    const sonuc = kuyruk.then(is)
+    kuyruk = sonuc.catch(() => {})
+    return sonuc
+  }
+
+  function setCamera(b) {
+    return sirala(async () => {
+      state.cameraError = null
+      if (!b) {
+        if (state.camera) await kameraKapat()
+        yay('change')
+        return
+      }
+      if (state.camera) return
+      // Henüz bağlanmadık (örgü yok) ya da ayrıldık: açamayız, ama arayüz yeniden çizilsin (tıklama kaybolmasın)
+      if (!mesh || bitti) { yay('change'); return }
+      try {
+        const { iz, id } = await kameraAc()
+        if (bitti) { iz.stop(); return }
+        await kameraTak(iz, id)
+      } catch (e) {
+        state.cameraError = CAMERA_MESSAGES[e?.code] ?? 'Kamera açılamadı'
+      }
+      yay('change')
+    })
+  }
+
+  // Kamera açıkken ayarlardan cihaz değişti: yeni kamerayı aç, izi değiştir, eskisini durdur.
+  // Seçili cihaz zaten kullanılıyorsa bir şey yapmaz (yedek cihaza dönüşte ikinci geçiş olmaz).
+  function switchCamera() {
+    return sirala(async () => {
+      if (!state.camera || !mesh || bitti) return
+      if ((getSettings().cameraDeviceId ?? null) === kameraCihazi) return
+      try {
+        const { iz, id } = await kameraAc()
+        if (bitti) { iz.stop(); return }
+        await kameraTak(iz, id)
+        state.cameraError = null
+      } catch (e) {
+        state.cameraError = CAMERA_MESSAGES[e?.code] ?? 'Kamera açılamadı' // eski kamera çalışmaya devam eder
+      }
+      yay('change')
+    })
+  }
+
+  // --- Ekran paylaşımı (kamerayla aynı kuyrukta: aynı anda tek işlem) ---
+
+  // Açık paylaşımı bırakır: izler durur, iki yuva da boşalır
+  async function ekranKapat() {
+    const e = ekran
+    ekran = null
+    state.screen = false
+    e?.stop()
+    try {
+      await mesh?.setLocalTrack('screen', null)
+    } finally {
+      await mesh?.setLocalTrack('screenAudio', null) // ilki hata verse de ses yuvası mutlaka boşalır
+    }
+  }
+
+  // Yeni paylaşımı örgüye takar; ancak ikisi de başarılıysa "açık" sayılır.
+  // Başarısızsa izler durur ve yuvalar boşaltılır. Hata yukarı fırlar.
+  async function ekranTak(yeni) {
+    try {
+      await mesh.setLocalTrack('screen', yeni.video)
+      await mesh.setLocalTrack('screenAudio', yeni.audio) // ses yoksa null
+    } catch (e) {
+      yeni.stop()
+      await mesh?.setLocalTrack('screen', null)?.catch?.(() => {})
+      await mesh?.setLocalTrack('screenAudio', null)?.catch?.(() => {})
+      throw e
+    }
+    if (bitti) { yeni.stop(); return false } // takılırken ayrıldık
+    ekran = yeni
+    state.screen = true
+    // Kullanıcı paylaşımı sistemden keserse (ended) ses ve görüntü birlikte kapanır
+    yeni.video.addEventListener?.('ended', () => {
+      sirala(async () => {
+        if (ekran !== yeni || bitti) return
+        await ekranKapat()
+        yay('change')
+      })
+    })
+    // Yalnız ses izi biterse (ses paylaşımı kesildi) ses yuvası boşalır, görüntü sürer
+    yeni.audio?.addEventListener?.('ended', () => {
+      sirala(async () => {
+        if (ekran !== yeni || bitti) return
+        await mesh?.setLocalTrack('screenAudio', null)
+      })
+    })
+    return true
+  }
+
+  function setScreenShare(b, mode) {
+    return sirala(async () => {
+      state.screenError = null
+      if (!b) {
+        if (state.screen) await ekranKapat()
+        yay('change')
+        return
+      }
+      if (state.screen) return
+      // Henüz bağlanmadık (örgü yok) ya da ayrıldık: başlatamayız, ama arayüz yeniden çizilsin
+      if (!mesh || bitti) { yay('change'); return }
+      try {
+        const yeni = await d.startScreenShare({ mode: mode ?? getSettings().screenMode })
+        if (bitti) { yeni.stop(); return }
+        if (await ekranTak(yeni) && yeni.audio) {
+          for (const cb of dinleyiciler.notice) cb(SCREEN_HEADPHONE_WARNING) // her paylaşımda bir kez
+        }
+      } catch (e) {
+        // Seçiciyi kapatmak hata değildir: sessizce vazgeç
+        // Masaüstünde desteklenmiyorsa (code 'unsupported') mesaj zaten Türkçe uyarıdır
+        if (e?.code === 'unsupported') state.screenError = e.message
+        else if (e?.code !== 'cancelled') state.screenError = 'Ekran paylaşımı başlatılamadı'
+      }
+      yay('change')
+    })
   }
 
   function setMuted(b) {
@@ -185,6 +443,7 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     state.deafened = !!b
     mesh?.setDeafened(state.deafened)
     for (const a of sesler.values()) a.muted = state.deafened
+    for (const id of ekranSesleri.keys()) ekranSesiniAyarla(id) // ekran sesi de susar
     kapiyiAyarla()
     yay('change')
   }
@@ -194,7 +453,8 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     join,
     leave,
     getState: () => state,
-    // olay: 'change' (durum/susturma/hata) ya da 'speaking' (konuşanlar kümesi)
+    // olay: 'change' (durum/susturma/hata), 'speaking' (konuşanlar kümesi)
+    // ya da 'tracks' (karşının kamera/ekran izleri ya da bir eşin bağlantısı değişti)
     on(olay, cb) {
       dinleyiciler[olay].add(cb)
       return () => dinleyiciler[olay].delete(cb)
@@ -203,6 +463,11 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     toggleMute: () => setMuted(!state.muted),
     setDeafened,
     toggleDeafen: () => setDeafened(!state.deafened),
+    setCamera,
+    toggleCamera: () => setCamera(!state.camera),
+    switchCamera,
+    setScreenShare,
+    toggleScreenShare: (mode) => setScreenShare(!state.screen, mode),
     // Görev 8: bas-konuş tuşu / sesle algılama kapıyı buradan sürer
     setTransmitting(b) {
       transmitting = !!b
@@ -214,12 +479,46 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
       mesh?.setBitrate(bitrate)
       return bitrate
     },
+    // Görüntü için toplam upload (5/10/20 Mbps); örgü bütçeyi yeniden hesaplar
+    setUploadMbps(mbps) {
+      uploadMbps = mbps
+      mesh?.setUploadMbps?.(mbps)
+    },
+    // Kanalda başka biri ekran paylaşıyor mu: kameramız 500 kbps / ≈360p'ye iner (bkz. videoBudget.js)
+    setRoomScreenOn(b) {
+      odadaEkran = !!b
+      mesh?.setRoomScreenOn?.(odadaEkran)
+    },
     // Mikrofon seviyesi 0..1 (kapıdan önce ölçülür; sesle algılama bunu okur)
     getLevel: () => hat?.getLevel() ?? 0,
     // Hoparlör seç (destekleyen tarayıcılarda); yeni gelen seslere de uygulanır
     setOutputDevice(id) {
       cikisCihazi = id || null
-      for (const a of sesler.values()) a.setSinkId?.(cikisCihazi ?? '')?.catch?.(() => {})
+      for (const a of [...sesler.values(), ...ekranSesleri.values()]) a.setSinkId?.(cikisCihazi ?? '')?.catch?.(() => {})
+    },
+    // --- Görüntü bölmesi için ---
+    // Kendi açık kamera/ekran izlerimiz (önizleme)
+    getLocalTracks: () => ({ camera: kameraIzi, screen: ekran?.video ?? null }),
+    // Karşının gelen izleri: { camera?, screen?, screenAudio? }
+    getRemoteTracks: (peerId) => ({ ...(uzakIzler.get(peerId) ?? {}) }),
+    // Eş görüntü alabiliyor mu? true/false; bağlantı henüz yoksa null (bilinmiyor)
+    peerHasVideo(peerId) {
+      if (!bagliEsler.has(peerId) || !mesh?.peerCaps) return null
+      return mesh.peerCaps(peerId).includes('video')
+    },
+    // Bu eşin ekran sesi tercihimiz: { volume: 0..1, hidden }
+    getScreenAudio: (peerId) => ({ ...ekranAyariAl(peerId) }),
+    // Ekran sesi seviyesi (0..1, aralık dışı sıkıştırılır)
+    setScreenVolume(peerId, v) {
+      const volume = Math.min(1, Math.max(0, Number(v) || 0))
+      ekranAyari.set(peerId, { ...ekranAyariAl(peerId), volume })
+      ekranSesiniAyarla(peerId)
+    },
+    // "Görüntüyü gizle": ekran sesi de kısılır (0). Not: P2P'de akış gelmeye devam eder,
+    // yalnız biz göstermeyiz/çalmayız; karşıya "gönderme" diyemeyiz.
+    setScreenHidden(peerId, b) {
+      ekranAyari.set(peerId, { ...ekranAyariAl(peerId), hidden: !!b })
+      ekranSesiniAyarla(peerId)
     },
     // Gürültü engelleme anahtarı (ayarlar ekranı için)
     setNoiseSuppression(b) { hat?.setNoiseSuppression(b) },

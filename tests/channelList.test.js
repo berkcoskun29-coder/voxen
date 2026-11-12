@@ -11,9 +11,14 @@ const kanallar = [
 ]
 const uyeler = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }, { id: 'u3', username: 'can', color: '#3be37a' }]
 const varlik = new Map([
-  ['u1', { status: 'online', voiceChannelId: 'v' }],
-  ['u2', { status: 'online', voiceChannelId: 'v' }],
-  ['u3', { status: 'idle', voiceChannelId: null }],
+  ['u1', { status: 'online' }],
+  ['u2', { status: 'online' }],
+  ['u3', { status: 'idle' }],
+])
+// Kim hangi sesli kanalda: voice_states tablosundan (Map<userId, durum>)
+const sesDurumlari = new Map([
+  ['u1', { channelId: 'v' }],
+  ['u2', { channelId: 'v' }],
 ])
 
 function ciz(ek = {}) {
@@ -23,7 +28,7 @@ function ciz(ek = {}) {
     channels: kanallar,
     profile: profil,
     selectedChannelId: 'a',
-    voiceMembers: voiceMembersByChannel(uyeler, varlik),
+    voiceMembers: voiceMembersByChannel(uyeler, sesDurumlari, varlik),
     handlers: {},
     ...ek,
   })
@@ -31,10 +36,15 @@ function ciz(ek = {}) {
 }
 
 describe('sesli kanaldaki kişiler', () => {
-  it('voiceMembersByChannel varlıktaki voiceChannelId ile gruplar', () => {
-    const g = voiceMembersByChannel(uyeler, varlik)
+  it('voiceMembersByChannel sesli durumdaki channelId ile gruplar', () => {
+    const g = voiceMembersByChannel(uyeler, sesDurumlari, varlik)
     expect(g.get('v').map((p) => p.username)).toEqual(['berk', 'ali'])
     expect(g.has('w')).toBe(false)
+  })
+
+  it('voiceMembersByChannel yalnız çevrimiçi olanları gösterir (kapanan pencereden kalan satır görünmez)', () => {
+    const g = voiceMembersByChannel(uyeler, sesDurumlari, new Map([['u2', { status: 'online' }]]))
+    expect(g.get('v').map((p) => p.username)).toEqual(['ali'])
   })
 
   it('kişiler kendi kanalının altında ad ve baş harfle listelenir', () => {

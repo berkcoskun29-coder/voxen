@@ -60,3 +60,19 @@ export function voiceStateIcon(muted, deafened) {
   }
   return null
 }
+
+// Kamera simgesi. kapali = true: üstü çizili ve kırmızı.
+export function cameraIcon(kapali = false) {
+  return svgKur(kapali, [
+    ['rect', { x: 2, y: 6, width: 14, height: 12, rx: 2 }],
+    ['path', { d: 'M16 10l6-3v10l-6-3z' }],
+  ])
+}
+
+// Ekran (monitör) simgesi
+export function screenIcon() {
+  return svgKur(false, [
+    ['rect', { x: 2, y: 4, width: 20, height: 13, rx: 2 }],
+    ['path', { d: 'M8 21h8M12 17v4' }],
+  ])
+}

@@ -13,12 +13,12 @@ vi.mock('../src/lib/supabase.js', () => ({
   },
 }))
 
-import { startPresence } from '../src/presence/presence.js'
+import { startPresence, resetPresenceLimiter } from '../src/presence/presence.js'
 
 async function akit() { for (let i = 0; i < 60; i++) await Promise.resolve() }
 const tercih = () => ({ dnd: false, statusText: '' })
 
-beforeEach(() => { h.rt = createFakeRealtime() })
+beforeEach(() => { h.rt = createFakeRealtime(); resetPresenceLimiter() })
 
 describe('varlık kanalı', () => {
   it('özel (private) kanal açar; abone olmadan önce oturum anahtarını (JWT) yeniler', async () => {
@@ -59,6 +59,8 @@ describe('varlık kanalı', () => {
     const yeni = h.rt.created[1]
     expect(yeni).not.toBe(h.rt.created[0])
     expect(yeni.state).toBe('joined')
+    // Gönderim geçmişi ortak: eskisinin untrack'inden en az 250 ms sonra gönderir
+    await new Promise((r) => setTimeout(r, 300))
     expect(yeni.tracked.at(-1)).toMatchObject({ status: 'online' })
     await p2.stop()
   })

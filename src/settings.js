@@ -6,14 +6,19 @@ const ESKI_GURULTU_ANAHTARI = 'voxen.settings.noiseSuppression' // eski tek ayar
 export const BITRATE_MIN = 32
 export const BITRATE_MAX = 128
 
+export const UPLOAD_SECENEKLERI = [5, 10, 20]
+
 export const DEFAULTS = {
   mode: 'ptt', // 'ptt' (bas-konuş) | 'vad' (sesle algılama)
   pttKey: null, // KeyboardEvent.code, örn. "KeyV"; null = henüz seçilmedi
   noiseSuppression: true,
   bitrateKbps: 128,
+  uploadMbps: 10, // görüntü için toplam upload bütçesi: 5 | 10 | 20
   vadThreshold: 0.02,
   inputDeviceId: null,
   outputDeviceId: null,
+  cameraDeviceId: null, // kamera cihazı; null = varsayılan
+  screenMode: 'net', // ekran paylaşımı kalitesi: 'net' (1080p/30) | 'akici' (720p/60)
 }
 
 let bellek = null // depolama kapalıysa ayarlar en azından bu oturum boyunca bellekte kalır
@@ -32,9 +37,12 @@ function temizle(ham) {
   s.pttKey = typeof s.pttKey === 'string' && s.pttKey ? s.pttKey : null
   s.noiseSuppression = s.noiseSuppression !== false
   s.bitrateKbps = Math.round(sinirla(s.bitrateKbps, BITRATE_MIN, BITRATE_MAX, DEFAULTS.bitrateKbps))
+  s.uploadMbps = UPLOAD_SECENEKLERI.includes(Number(s.uploadMbps)) ? Number(s.uploadMbps) : DEFAULTS.uploadMbps
   s.vadThreshold = sinirla(s.vadThreshold, 0.005, 0.2, DEFAULTS.vadThreshold)
   s.inputDeviceId = s.inputDeviceId || null
   s.outputDeviceId = s.outputDeviceId || null
+  s.cameraDeviceId = s.cameraDeviceId || null
+  s.screenMode = s.screenMode === 'akici' ? 'akici' : 'net'
   return s
 }
 

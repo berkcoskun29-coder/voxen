@@ -202,8 +202,11 @@ button:disabled { opacity: 0.6; cursor: default; }
 .voice-buttons { display: flex; gap: 4px; margin-top: 6px; }
 .voice-btn { flex: 1; padding: 5px 4px; font-size: 0.75em; background: var(--selected); color: var(--text); }
 .voice-btn.active { background: var(--danger); color: #fff; }
+.voice-btn.camera-btn { flex: 0 0 auto; padding: 5px 8px; }
+.voice-btn.camera-btn .icon { margin-right: 0; }
+.voice-btn.camera-btn.active { background: var(--accent); color: var(--on-accent); } /* kamera açık: yeşil */
 .voice-btn.leave { background: none; color: var(--danger); }
-.voice-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.voice-btn:disabled, .voice-btn.unavailable { opacity: 0.5; cursor: not-allowed; } /* unavailable: masaüstünde ekran paylaşımı yok */
 
 /* hidden özniteliği .row gibi display veren sınıflara karşı da çalışsın */
 [hidden] { display: none !important; }
@@ -211,7 +214,9 @@ button:disabled { opacity: 0.6; cursor: default; }
 /* Susturma / sağırlaştırma simgeleri */
 .icon { flex: none; vertical-align: middle; }
 .voice-btn .icon { margin-right: 4px; }
-.voice-member .icon { margin-left: auto; }
+/* Sesli kanaldaki kişinin sağındaki simgeler: susturma/sağırlık, 📷 kamera, 🖥 ekran */
+.voice-member-icons { margin-left: auto; display: flex; gap: 4px; flex: none; }
+.voice-member-icons .icon { width: 14px; height: 14px; }
 
 /* Giriş ekranı başlığı: küçük logo + Voxen */
 .brand { display: flex; align-items: center; gap: 10px; }
@@ -223,3 +228,43 @@ button:disabled { opacity: 0.6; cursor: default; }
   background: var(--selected); color: var(--text); padding: 8px 12px; border-radius: 6px;
   display: flex; align-items: center; gap: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.4);
 }
+
+/* Ana alan: üstte görüntü bölmesi, altında sohbet */
+.chat-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.video-host { flex: none; }
+
+/* Görüntü bölmesi (sesli kanaldayken; görüntü yoksa gizli) */
+.video-pane { border-bottom: 1px solid var(--server-rail); background: var(--bg); }
+.video-pane-toggle {
+  display: block; width: 100%; text-align: left; padding: 8px 16px;
+  background: none; color: var(--muted); font-size: 0.8em; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em; border-radius: 0;
+}
+.video-pane-toggle:hover { color: var(--text); }
+.video-pane-body { padding: 0 16px 12px; max-height: 60vh; overflow-y: auto; }
+/* Büyük kutucuklar (ekran / odaklanan) ve küçük kutucuklar (kameralar): dar pencerede alta kayar */
+.video-stage, .video-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.video-stage .video-tile { flex: 1 1 420px; max-width: 100%; }
+.video-strip .video-tile { flex: 0 1 200px; min-width: 140px; }
+.video-tile {
+  position: relative; aspect-ratio: 16 / 9; overflow: hidden; cursor: pointer;
+  background: #0f1013; border-radius: 8px; border: 2px solid transparent; transition: border-color 0.1s;
+}
+.video-tile.speaking { border-color: #3be37a; } /* konuşan: yeşil çerçeve */
+.video-tile video { width: 100%; height: 100%; display: block; object-fit: cover; }
+.video-tile.screen video { object-fit: contain; } /* ekran: kırpılmasın, metin okunsun */
+.video-stage .video-tile video { object-fit: contain; }
+.video-tile video.mirror { transform: scaleX(-1); } /* kendi kameramız ayna gibi */
+.video-tile:fullscreen { border: 0; border-radius: 0; }
+.video-tile:fullscreen video { object-fit: contain; } /* tam ekranda kırpma yok */
+.video-name {
+  position: absolute; left: 6px; bottom: 6px; max-width: calc(100% - 12px);
+  padding: 2px 8px; border-radius: 4px; background: rgba(15, 16, 19, 0.75); color: var(--text);
+  font-size: 0.8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.video-controls { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 6px; }
+.video-control { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: var(--muted); }
+.video-control-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.video-control input[type='range'] { width: 110px; accent-color: var(--accent); }
+.video-hide-btn { padding: 4px 10px; font-size: 0.9em; }
+.video-note { margin: 2px 0; font-size: 0.8em; color: var(--muted); }

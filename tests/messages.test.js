@@ -219,6 +219,40 @@ describe('mountChat', () => {
     expect([...document.querySelectorAll('.message')].map((e) => e.dataset.id)).toEqual(['1', '2', '3'])
   })
 
+  it('alta yapışıkken liste boyu değişince (görüntü bölmesi açıldı) en altta kalır; yukarıdaysa kalmaz', async () => {
+    const gozlemciler = []
+    globalThis.ResizeObserver = class {
+      constructor(cb) { this.cb = cb; this.izlenen = []; this.kesildi = false; gozlemciler.push(this) }
+      observe(e) { this.izlenen.push(e) }
+      disconnect() { this.kesildi = true }
+    }
+    try {
+      const chat = mountChat(document.getElementById('main'), { channel: { id: 'c1', name: 'genel' }, profile: ben })
+      await bosalt()
+      const liste = document.querySelector('.message-list')
+      const ro = gozlemciler.find((g) => g.izlenen.includes(liste))
+      expect(ro).toBeTruthy()
+      // Ölçüler: içerik 1000, görünen 300
+      Object.defineProperty(liste, 'scrollHeight', { configurable: true, value: 1000 })
+      Object.defineProperty(liste, 'clientHeight', { configurable: true, value: 300 })
+      liste.scrollTop = 700 // en altta
+      liste.dispatchEvent(new Event('scroll'))
+      // Bölme açıldı: liste kısaldı -> alttan kaydı; gözlemci yeniden en alta indirir
+      Object.defineProperty(liste, 'clientHeight', { configurable: true, value: 150 })
+      ro.cb([])
+      expect(liste.scrollTop).toBe(1000)
+      // Kullanıcı yukarı kaydırdı: artık yapışık değil
+      liste.scrollTop = 200
+      liste.dispatchEvent(new Event('scroll'))
+      ro.cb([])
+      expect(liste.scrollTop).toBe(200)
+      chat.destroy()
+      expect(ro.kesildi).toBe(true)
+    } finally {
+      delete globalThis.ResizeObserver
+    }
+  })
+
   it('destroy aboneliği kapatır ve sonraki realtime mesajı yok sayılır', async () => {
     const chat = mountChat(document.getElementById('main'), { channel: { id: 'c1', name: 'genel' }, profile: ben })
     await bosalt()

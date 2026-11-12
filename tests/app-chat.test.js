@@ -8,16 +8,34 @@ vi.mock('../src/lib/supabase.js', () => {
   fake.rows = {}
   fake.subs = 0 // açık abonelik sayısı
   fake.channelsGate = null // listChannels'ı bekletmek için
+  fake.vsOps = [] // voice_states yazmaları: ['upsert', satır] | ['delete', filtre]
   fake.from = vi.fn((tablo) => {
     // Bekletme ve satırlar, sorgu BAŞLADIĞI anda yakalanır (sonradan değişse de bu sorgu etkilenmez)
     const kapi = tablo === 'channels' ? fake.channelsGate : null
     const satirlar = fake.rows[tablo] ?? []
+    const filtre = {} // yalnız voice_states için uygulanır
+    let islem = 'select'
+    let deger = null
+    let tek = false
     const zincir = {
-      select: () => zincir, eq: () => zincir, lt: () => zincir, in: () => zincir,
+      select: () => zincir, eq: (k, v) => { filtre[k] = v; return zincir }, lt: () => zincir, in: () => zincir,
       order: () => zincir, limit: () => zincir,
+      maybeSingle: () => { tek = true; return zincir },
+      upsert: (v) => { islem = 'upsert'; deger = v; return zincir },
+      delete: () => { islem = 'delete'; return zincir },
       then: async (res) => {
         if (kapi) await kapi
-        return res({ data: satirlar, error: null })
+        if (tablo !== 'voice_states') return res({ data: satirlar, error: null })
+        const uyar = (r) => Object.entries(filtre).every(([k, v]) => r[k] === v)
+        if (islem === 'upsert') {
+          fake.vsOps.push(['upsert', deger])
+          fake.rows.voice_states = (fake.rows.voice_states ?? []).filter((r) => r.user_id !== deger.user_id).concat([deger])
+        } else if (islem === 'delete') {
+          fake.vsOps.push(['delete', { ...filtre }])
+          fake.rows.voice_states = (fake.rows.voice_states ?? []).filter((r) => !uyar(r))
+        }
+        const bulunan = satirlar.filter(uyar)
+        return res({ data: tek ? (bulunan[0] ?? null) : bulunan, error: null })
       },
     }
     return zincir
@@ -25,21 +43,34 @@ vi.mock('../src/lib/supabase.js', () => {
   fake.voice = 0 // açık sesli kanal (voice:<id>) sinyal aboneliği sayısı
   fake.voiceTopics = []
   fake.tracked = []
+  fake.vs = 0 // açık voice_states aboneliği sayısı
+  fake.vsTopics = []
+  fake.vsHandlers = [] // { server, cb } (sunucuya göre filtreli olaylar)
   fake.channel = vi.fn((ad) => {
-    // presence:voxen ve voice:<id> ayrı kanallar: sohbet abonelik sayacına katılmaz
+    // presence:voxen, voice:<id> ve voice_states:<sunucu> ayrı kanallar: sohbet abonelik sayacına katılmaz
     const sesli = ad.startsWith('voice:')
+    const vsKanal = ad.startsWith('voice_states:')
     const k = {
-      on: (_t, _f, cb) => { if (ad === 'presence:voxen') fake.syncCb = cb; return k },
-      // Varlık kanalı hemen bağlanır (track çağrılarını görebilmek için)
-      subscribe: (cb) => { if (ad === 'presence:voxen') cb?.('SUBSCRIBED'); return k },
+      on: (_t, f, cb) => {
+        if (ad === 'presence:voxen') fake.syncCb = cb
+        if (vsKanal && f.filter) fake.vsHandlers.push({ server: f.filter.replace('server_id=eq.', ''), cb, k })
+        return k
+      },
+      // Varlık ve sesli durum kanalları hemen bağlanır
+      subscribe: (cb) => {
+        if (ad === 'presence:voxen') cb?.('SUBSCRIBED')
+        if (vsKanal) Promise.resolve().then(() => { if (!k.kapandi) cb?.('SUBSCRIBED') })
+        return k
+      },
       send: () => Promise.resolve(),
       track: (d) => { fake.tracked.push(d) },
       untrack: () => {},
       presenceState: () => fake.presenceState ?? {},
       presence: ad === 'presence:voxen',
       sesli,
+      vsKanal,
     }
-    if (sesli) { fake.voice++; fake.voiceTopics.push(ad) } else if (!k.presence) fake.subs++
+    if (sesli) { fake.voice++; fake.voiceTopics.push(ad) } else if (vsKanal) { fake.vs++; fake.vsTopics.push(ad) } else if (!k.presence) fake.subs++
     return k
   })
   return {
@@ -47,12 +78,62 @@ vi.mock('../src/lib/supabase.js', () => {
       rpc: vi.fn(),
       from: (...a) => fake.from(...a),
       channel: (...a) => fake.channel(...a),
-      removeChannel: (k) => { if (k?.sesli) fake.voice--; else if (!k?.presence) fake.subs-- },
+      removeChannel: (k) => {
+        if (k?.sesli) fake.voice--
+        else if (k?.vsKanal) { fake.vs--; k.kapandi = true; fake.vsHandlers = fake.vsHandlers.filter((h) => h.k !== k) }
+        else if (!k?.presence) fake.subs--
+      },
     },
   }
 })
 
-import { startApp, stopApp } from '../src/ui/app.js'
+// Görüntü bölmesinin eş listesini (getPeers) testten okuyabilmek için kurulumu yakala
+vi.mock('../src/ui/videoPane.js', async (asil) => {
+  const m = await asil()
+  return { ...m, mountVideoPane: (kap, ayar) => { fake.paneOpts = ayar; return m.mountVideoPane(kap, ayar) } }
+})
+
+// Sesli oturumu yakala: odadaki ekran paylaşımı bildirimini (setRoomScreenOn) görmek için
+vi.mock('../src/voice/session.js', async (asil) => {
+  const m = await asil()
+  return {
+    ...m,
+    createVoiceSession: (o) => {
+      const s = m.createVoiceSession(o)
+      const asilFn = s.setRoomScreenOn
+      s.setRoomScreenOn = vi.fn((b) => asilFn?.(b))
+      fake.oturum = s
+      return s
+    },
+  }
+})
+
+// Çıkış: signOut çağrıldığı anda sesli durum silmesi gitmiş olmalı
+vi.mock('../src/auth/auth.js', async (asil) => ({
+  ...(await asil()),
+  signOut: vi.fn(async () => { fake.signOutAnindaOps = fake.vsOps.map(([o]) => o) }),
+}))
+
+import { startApp, stopApp, appTiming } from '../src/ui/app.js'
+import { presenceLimits, CLIENT_ID } from '../src/presence/presence.js'
+import { voiceStateTiming, resetVoiceStateWriter } from '../src/data/voiceStates.js'
+
+// Bu dosya varlık gönderim sınırını denemiyor (o: tests/presenceRateLimit.test.js);
+// burada her değişikliğin hemen gönderildiğini görmek için sınırı kaldırıyoruz.
+presenceLimits.maxCalls = Infinity
+presenceLimits.gapMs = 0
+voiceStateTiming.coalesceMs = 0 // sesli durum yazmaları beklemeden gitsin
+appTiming.staleWindowGraceMs = 0 // kapanan penceremizin satırını beklemeden sil
+
+// Sesli durum tablosuna gelen son yazma ve sunucudan gelen bir değişiklik olayı
+const sonYazma = () => fake.vsOps.at(-1)
+const vsSatir = (userId, ek = {}) => ({
+  user_id: userId, server_id: 's1', channel_id: 'v', client_id: 'c-' + userId,
+  muted: false, deafened: false, camera: false, screen: false, ...ek,
+})
+function vsOlay(eventType, satir) {
+  for (const h of fake.vsHandlers) if (h.server === satir.server_id) h.cb({ eventType, new: satir, old: { user_id: satir.user_id } })
+}
 
 const profil = { id: 'u1', username: 'berk', color: '#5b7cfa' }
 const bosalt = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)) }
@@ -76,6 +157,10 @@ beforeEach(async () => {
   fake.voiceTopics = []
   fake.tracked = []
   fake.channelsGate = null
+  fake.vsOps = []
+  fake.vsTopics = []
+  fake.presenceState = undefined
+  resetVoiceStateWriter()
   localStorage.clear()
   sessionStorage.clear()
   location.hash = ''
@@ -151,7 +236,7 @@ describe('sesli kanal', () => {
   const sesPaneli = () => document.querySelector('.voice-panel')
   const dugme = (ad) => [...sesPaneli().querySelectorAll('button')].find((b) => b.textContent === ad)
 
-  it('sesli kanala tıklayınca katılır: ses paneli, voice:<id> sinyali ve varlıkta voiceChannelId', async () => {
+  it('sesli kanala tıklayınca katılır: ses paneli, voice:<id> sinyali ve voice_states satırı', async () => {
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
     kanalaTikla('Lobi')
@@ -161,7 +246,9 @@ describe('sesli kanal', () => {
     expect(sesPaneli().textContent).toContain('Lobi')
     // jsdom'da mikrofon yok: sadece dinleyici, Türkçe hata panelde
     expect(sesPaneli().textContent).toContain('Mikrofon açılamadı')
-    expect(fake.tracked.at(-1).voiceChannelId).toBe('v')
+    expect(sonYazma()).toEqual(['upsert', expect.objectContaining({ user_id: 'u1', server_id: 's1', channel_id: 'v', client_id: CLIENT_ID })])
+    // Varlık (presence) artık sesli kanal bilgisi taşımaz
+    expect(fake.tracked.some((d) => 'voiceChannelId' in d || 'voiceMuted' in d)).toBe(false)
     // Aynı kanala tekrar tıklamak yeniden katılmaz
     kanalaTikla('Lobi')
     await bosalt()
@@ -179,10 +266,10 @@ describe('sesli kanal', () => {
     expect(fake.voiceTopics).toEqual(['voice:v', 'voice:w'])
     expect(fake.voice).toBe(1)
     expect(sesPaneli().textContent).toContain('Oyun')
-    expect(fake.tracked.at(-1).voiceChannelId).toBe('w')
+    expect(sonYazma()).toEqual(['upsert', expect.objectContaining({ channel_id: 'w' })])
   })
 
-  it('Ayrıl: panel kapanır, sinyal kanalı bırakılır, voiceChannelId null olur', async () => {
+  it('Ayrıl: panel kapanır, sinyal kanalı bırakılır, sesli durum satırı silinir', async () => {
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
     kanalaTikla('Lobi')
@@ -191,7 +278,7 @@ describe('sesli kanal', () => {
     await bosalt()
     expect(sesPaneli()).toBeNull()
     expect(fake.voice).toBe(0)
-    expect(fake.tracked.at(-1).voiceChannelId).toBeNull()
+    expect(sonYazma()).toEqual(['delete', { user_id: 'u1', client_id: CLIENT_ID }])
   })
 
   it('Sağırlaştır düğmesi basılı görünür', async () => {
@@ -203,30 +290,55 @@ describe('sesli kanal', () => {
     expect(dugme('Sağırlaştır').getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('Sustur / Sağırlaştır varlığa voiceMuted / voiceDeafened yazar; Ayrıl sıfırlar', async () => {
+  it('Sustur / Sağırlaştır voice_states satırına yazılır; Ayrıl satırı siler', async () => {
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
     kanalaTikla('Lobi')
     await bosalt()
     // jsdom'da mikrofon yok: dinleyici modu, zaten susturulmuş sayılır
     dugme('Sağırlaştır').click()
-    expect(fake.tracked.at(-1)).toMatchObject({ voiceChannelId: 'v', voiceDeafened: true })
+    await bosalt()
+    expect(sonYazma()).toEqual(['upsert', expect.objectContaining({ channel_id: 'v', deafened: true })])
     dugme('Sağırlaştır').click()
-    expect(fake.tracked.at(-1).voiceDeafened).toBe(false)
+    await bosalt()
+    expect(sonYazma()[1].deafened).toBe(false)
     dugme('Ayrıl').click()
     await bosalt()
-    expect(fake.tracked.at(-1)).toMatchObject({ voiceChannelId: null, voiceMuted: false, voiceDeafened: false })
+    expect(sonYazma()[0]).toBe('delete')
   })
 
-  it('varlıktaki kişiler sesli kanalın altında listelenir', async () => {
-    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
-    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+  it('kendi satırımız sunucudan gelmeden de kanal listesinde anında doğru simgeyle görünür', async () => {
+    fake.rows.server_members = [{ user_id: 'u1' }]
+    fake.rows.profiles = [profil]
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
-    fake.presenceState = { u2: [{ status: 'online', statusText: '', voiceChannelId: 'v' }] }
-    fake.syncCb()
+    kanalaTikla('Lobi')
+    await bosalt()
+    dugme('Sağırlaştır').click()
     const lobi = document.querySelector('[data-voice-channel="v"]')
-    expect(lobi.textContent).toContain('ali')
+    expect(lobi.textContent).toContain('berk')
+    expect(lobi.querySelector('svg[data-state="deafened"]')).not.toBeNull()
+  })
+
+  it('voice_states satırı olan ve çevrimiçi olan kişiler sesli kanalın altında listelenir', async () => {
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+    fake.rows.voice_states = [vsSatir('u2', { muted: true })]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.vsTopics.every((t) => t.startsWith('voice_states:s1:'))).toBe(true)
+    expect(fake.vs).toBe(1)
+    const lobi = () => document.querySelector('[data-voice-channel="v"]')
+    expect(lobi().textContent).not.toContain('ali') // satırı var ama çevrimiçi değil (eski satır)
+    fake.presenceState = { u2: [{ status: 'online', statusText: '', clientId: 'c-u2' }] } // satırı yazan pencere açık
+    fake.syncCb()
+    expect(lobi().textContent).toContain('ali')
+    expect(lobi().querySelector('svg[data-state="muted"]')).not.toBeNull()
+    // Canlı değişiklik: kamerasını açtı, sonra ayrıldı
+    vsOlay('UPDATE', vsSatir('u2', { camera: true }))
+    expect(lobi().querySelector('svg[data-state="camera"]')).not.toBeNull()
+    for (const h of fake.vsHandlers) h.cb({ eventType: 'DELETE', new: {}, old: { user_id: 'u2' } })
+    expect(lobi().textContent).not.toContain('ali')
   })
 
   it('uygulama yeniden başlarsa (çıkış/giriş) sesli kanaldan ayrılır', async () => {
@@ -287,6 +399,126 @@ describe('üye listesi canlı yenileme', () => {
   })
 })
 
+describe('sesli kanaldayken başka sunucuya bakmak', () => {
+  it('görüntü bölmesi sesli sunucunun kişilerini ve durumlarını göstermeye devam eder', async () => {
+    fake.rows.servers.push({ id: 's2', name: 'T', owner_id: 'u1', invite_code: 'k2' })
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+    fake.rows.voice_states = [vsSatir('u2', { camera: true })]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.presenceState = { u1: [{ status: 'online', clientId: CLIENT_ID }], u2: [{ status: 'online', clientId: 'c-u2' }] }
+    fake.syncCb()
+    kanalaTikla('Lobi')
+    await bosalt()
+    const kisiler = () => fake.paneOpts.getPeers().map((p) => [p.name, p.camera])
+    expect(kisiler()).toEqual([['berk', false], ['ali', true]])
+    // Başka sunucuya geç: orada ali üye değil
+    fake.rows.server_members = [{ user_id: 'u1' }]
+    fake.rows.profiles = [profil]
+    fake.rows.channels = [{ id: 'x', server_id: 's2', name: 'baska', kind: 'text', position: 0 }]
+    document.querySelectorAll('.server-icon')[1].click()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#baska kanalına mesaj yaz…')
+    expect(kisiler()).toEqual([['berk', false], ['ali', true]]) // bölme boşalmadı
+    expect(fake.vs).toBe(2) // seçili sunucu + sesli kanalımızın sunucusu dinleniyor
+    // Ayrılınca yalnız seçili sunucu dinlenir
+    ;[...document.querySelector('.voice-panel').querySelectorAll('button')].find((b) => b.textContent === 'Ayrıl').click()
+    await bosalt()
+    expect(fake.vs).toBe(1)
+  })
+})
+
+describe('odada ekran paylaşımı (kamera bütçesi)', () => {
+  it('kanalımızda biri ekran paylaşınca oturuma bildirilir; bitince kaldırılır; başka kanaldaki sayılmaz', async () => {
+    fake.rows.channels = [...kanallar, { id: 'w', server_id: 's1', name: 'Oyun', kind: 'voice', position: 3 }]
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }, { user_id: 'u3' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }, { id: 'u3', username: 'can', color: '#3be37a' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.presenceState = { u2: [{ status: 'online', clientId: 'c-u2' }], u3: [{ status: 'online', clientId: 'c-u3' }] }
+    fake.syncCb()
+    kanalaTikla('Lobi')
+    await bosalt()
+    const son = () => fake.oturum.setRoomScreenOn.mock.calls.at(-1)?.[0] ?? false
+    expect(son()).toBe(false)
+    vsOlay('INSERT', vsSatir('u3', { channel_id: 'w', screen: true })) // başka kanalda
+    expect(son()).toBe(false)
+    vsOlay('INSERT', vsSatir('u2', { screen: true })) // bizim kanalımızda
+    expect(son()).toBe(true)
+    vsOlay('UPDATE', vsSatir('u2', { screen: false }))
+    expect(son()).toBe(false)
+  })
+})
+
+describe('pencere başına hayalet', () => {
+  it('satırı yazan pencere kapandıysa kişi başka pencereden çevrimiçi olsa da kanalda görünmez ve ekranı sayılmaz', async () => {
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+    fake.rows.voice_states = [vsSatir('u2', { client_id: 'ali-A', screen: true })]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const lobi = () => document.querySelector('[data-voice-channel="v"]')
+    // ali'nin A penceresi açık: görünür
+    fake.presenceState = { u2: [{ status: 'online', clientId: 'ali-A' }, { status: 'online', clientId: 'ali-B' }] }
+    fake.syncCb()
+    expect(lobi().textContent).toContain('ali')
+    kanalaTikla('Lobi')
+    await bosalt()
+    const son = () => fake.oturum.setRoomScreenOn.mock.calls.at(-1)?.[0] ?? false
+    expect(son()).toBe(true)
+    // A kapandı (silmesi gidemedi), B açık: ali artık kanalda görünmez, ekranı sayılmaz
+    fake.presenceState = { u2: [{ status: 'online', clientId: 'ali-B' }] }
+    fake.syncCb()
+    expect(lobi().textContent).not.toContain('ali')
+    expect(son()).toBe(false)
+  })
+
+  it('kendi penceremizden biri varlıktan düşerse onun satırını biz sileriz', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.presenceState = { u1: [{ status: 'online', clientId: CLIENT_ID }, { status: 'online', clientId: 'masaustu' }] }
+    fake.syncCb()
+    await bosalt()
+    expect(fake.vsOps).toEqual([])
+    fake.presenceState = { u1: [{ status: 'online', clientId: CLIENT_ID }] } // masaüstü kapandı
+    fake.syncCb()
+    await bosalt()
+    expect(fake.vsOps).toEqual([['delete', { user_id: 'u1', client_id: 'masaustu' }]])
+  })
+
+  it('düşen pencere bekleme süresi içinde geri gelirse satırı silinmez', async () => {
+    appTiming.staleWindowGraceMs = 50
+    try {
+      await startApp(document.querySelector('#app'), profil)
+      await bosalt()
+      const iki = { u1: [{ status: 'online', clientId: CLIENT_ID }, { status: 'online', clientId: 'masaustu' }] }
+      fake.presenceState = iki
+      fake.syncCb()
+      fake.presenceState = { u1: [{ status: 'online', clientId: CLIENT_ID }] }
+      fake.syncCb()
+      fake.presenceState = iki // kısa kopukluk: geri geldi
+      fake.syncCb()
+      await new Promise((r) => setTimeout(r, 80))
+      expect(fake.vsOps).toEqual([])
+    } finally { appTiming.staleWindowGraceMs = 0 }
+  })
+})
+
+describe('çıkış', () => {
+  it('Çıkış: sesli durum satırı silindikten SONRA oturum kapanır', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    fake.signOutAnindaOps = null
+    document.querySelector('.user-bar button[title="Çıkış"]').click()
+    await bosalt()
+    expect(fake.signOutAnindaOps).not.toBeNull()
+    expect(fake.signOutAnindaOps.at(-1)).toBe('delete')
+  })
+})
+
 describe('oturum sonu (stopApp)', () => {
   it('stopApp sesli kanaldan ayrılır ve varlığı durdurur', async () => {
     const { presenceListenerCount } = await import('../src/presence/presence.js')
@@ -305,14 +537,47 @@ describe('oturum sonu (stopApp)', () => {
 
 describe('aynı hesap iki pencerede', () => {
   it('başka bir pencerede sesli kanaldaysa katılmaz ve uyarır', async () => {
+    // Kendi satırımızı BAŞKA bir pencere yazmış ve o pencere hâlâ açık (varlıkta görünüyor)
+    fake.rows.voice_states = [vsSatir('u1', { client_id: 'baska-pencere' })]
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
-    // Kendi hesabımızın BAŞKA bir istemciden gelen girdisi sesli kanalda
-    fake.presenceState = { u1: [{ status: 'online', voiceChannelId: 'v', clientId: 'baska-pencere' }] }
+    fake.presenceState = { u1: [{ status: 'online', clientId: 'baska-pencere' }] }
     fake.syncCb()
     kanalaTikla('Lobi')
     await bosalt()
     expect(fake.voice).toBe(0)
     expect(document.body.textContent).toContain('Bu hesap başka bir pencerede sesli kanalda')
+  })
+
+  it('satırı yazan pencere artık açık değilse (eski satır) katılır', async () => {
+    fake.rows.voice_states = [vsSatir('u1', { client_id: 'kapanmis-pencere' })]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(fake.voice).toBe(1)
+    expect(sonYazma()).toEqual(['upsert', expect.objectContaining({ client_id: CLIENT_ID })])
+  })
+
+  it('açılışta kapanmış pencereden kalan kendi satırımız silinir (açık penceresininki silinmez)', async () => {
+    fake.rows.voice_states = [vsSatir('u1', { client_id: 'kapanmis-pencere' })]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.vsOps).toEqual([]) // varlık gelmeden kimin açık olduğunu bilmiyoruz: dokunma
+    // Varlık geldi: kendimiz görünüyoruz, eski pencere görünmüyor
+    fake.presenceState = { u1: [{ status: 'online', clientId: CLIENT_ID }] }
+    fake.syncCb()
+    await bosalt()
+    expect(fake.vsOps).toEqual([['delete', { user_id: 'u1', client_id: 'kapanmis-pencere' }]])
+  })
+
+  it('açılışta kendi satırımızı açık olan başka pencere yazdıysa silinmez', async () => {
+    fake.rows.voice_states = [vsSatir('u1', { client_id: 'baska-pencere' })]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.presenceState = { u1: [{ status: 'online', clientId: CLIENT_ID }, { status: 'online', clientId: 'baska-pencere' }] }
+    fake.syncCb()
+    await bosalt()
+    expect(fake.vsOps).toEqual([])
   })
 })

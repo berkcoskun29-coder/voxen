@@ -25,25 +25,17 @@ export function computeStatus({ lastActivityMs, nowMs, manual }) {
 
 // Aynı kişi birden çok sekmede açıksa Supabase bir DİZİ verir; hepsini tek duruma indirir.
 // Kural: biri dnd ise dnd; yoksa biri online ise online; yoksa idle.
+// (Sesli kanal durumu artık burada değil: voice_states tablosunda, bkz. src/data/voiceStates.js)
 export function mergeEntries(entries) {
   const liste = entries ?? []
   if (liste.length === 0) return null
   const sira = ['dnd', 'online', 'idle']
   const status = sira.find((s) => liste.some((e) => e.status === s)) ?? 'idle'
   const secilen = liste.find((e) => e.status === status) ?? liste[0]
-  const voiceChannelId = liste.map((e) => e.voiceChannelId).find((v) => v != null) ?? null
-  // Susturma/sağırlaştırma: çok sekmede, sesli kanala gerçekten bağlı olan (kanalı eşleşen) girdiden alınır
-  const sesGirdisi = liste.find((e) => voiceChannelId != null && e.voiceChannelId === voiceChannelId)
-  return {
-    status,
-    statusText: clampStatusText(secilen.statusText),
-    voiceChannelId,
-    voiceMuted: !!sesGirdisi?.voiceMuted,
-    voiceDeafened: !!sesGirdisi?.voiceDeafened,
-  }
+  return { status, statusText: clampStatusText(secilen.statusText) }
 }
 
-// presenceState() { userId: [girdiler] } → Map<userId, {status, statusText, voiceChannelId}>
+// presenceState() { userId: [girdiler] } → Map<userId, {status, statusText}>
 // Haritada olmayan kişi çevrimdışıdır.
 export function buildPresenceMap(presenceState) {
   const harita = new Map()

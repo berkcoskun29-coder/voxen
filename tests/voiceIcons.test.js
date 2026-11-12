@@ -40,10 +40,12 @@ describe('ses paneli simgeleri', () => {
 describe('kanal listesi simgeleri', () => {
   const profil = { id: 'u1', username: 'berk', color: '#5b7cfa' }
   const uyeler = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }, { id: 'u3', username: 'can', color: '#3be37a' }]
-  const varlik = new Map([
-    ['u1', { status: 'online', voiceChannelId: 'v', voiceMuted: false, voiceDeafened: false }],
-    ['u2', { status: 'online', voiceChannelId: 'v', voiceMuted: true, voiceDeafened: false }],
-    ['u3', { status: 'online', voiceChannelId: 'v', voiceMuted: true, voiceDeafened: true }], // sağır, susturmanın yerine geçer
+  const varlik = new Map([['u1', { status: 'online' }], ['u2', { status: 'online' }], ['u3', { status: 'online' }]])
+  // Sesli durum artık voice_states tablosundan gelir
+  const sesDurumlari = new Map([
+    ['u1', { channelId: 'v', muted: false, deafened: false }],
+    ['u2', { channelId: 'v', muted: true, deafened: false }],
+    ['u3', { channelId: 'v', muted: true, deafened: true }], // sağır, susturmanın yerine geçer
   ])
   function ciz(ek = {}) {
     const panel = document.createElement('aside')
@@ -51,8 +53,8 @@ describe('kanal listesi simgeleri', () => {
       server: { id: 's', name: 'S', owner_id: 'u1' },
       channels: [{ id: 'v', name: 'Lobi', kind: 'voice', position: 1 }],
       profile: profil,
-      voiceMembers: voiceMembersByChannel(uyeler, varlik),
-      presence: varlik,
+      voiceMembers: voiceMembersByChannel(uyeler, sesDurumlari, varlik),
+      voiceStates: sesDurumlari,
       handlers: {},
       ...ek,
     })
@@ -72,12 +74,11 @@ describe('kanal listesi simgeleri', () => {
 })
 
 describe('presence birleştirme', () => {
-  it('çok sekmede susturma bilgisi, kanalı eşleşen girdiden alınır', () => {
+  it('varlık artık yalnız durum ve yazı taşır (sesli durum voice_states tablosunda)', () => {
     const m = mergeEntries([
-      { status: 'online', voiceChannelId: null, voiceMuted: false },
-      { status: 'online', voiceChannelId: 'v', voiceMuted: true, voiceDeafened: false },
+      { status: 'online', statusText: 'a', voiceChannelId: 'v', voiceMuted: true },
+      { status: 'idle', statusText: 'b' },
     ])
-    expect(m).toMatchObject({ voiceChannelId: 'v', voiceMuted: true, voiceDeafened: false })
-    expect(mergeEntries([{ status: 'online' }])).toMatchObject({ voiceMuted: false, voiceDeafened: false })
+    expect(m).toEqual({ status: 'online', statusText: 'a' })
   })
 })

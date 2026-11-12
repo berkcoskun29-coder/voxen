@@ -17,9 +17,14 @@ import { getSettings, onSettingsChange } from '../settings.js'
 import { playBeep } from '../voice/sounds.js'
 import { mountChat } from './chatView.js'
 import { listMembers } from '../data/members.js'
-import { onPresenceChange, otherClientVoiceChannel, startPresence } from '../presence/presence.js'
+import { onPresenceChange, isClientOnline, onlineClientIds, startPresence, CLIENT_ID } from '../presence/presence.js'
+import {
+  subscribeVoiceStates, upsertVoiceState, clearVoiceState, getMyVoiceState, deleteStaleVoiceState,
+  reassertVoiceState, flushVoiceStates,
+} from '../data/voiceStates.js'
 import { getLocalPresencePrefs } from '../auth/profilePrefs.js'
 import { renderMemberList } from './memberList.js'
+import { mountVideoPane, buildVideoPeers } from './videoPane.js'
 
 // Son seçilen sunucu/kanal tarayıcıda hatırlanır (sadece kolaylık için).
 function sonuOku() {
@@ -47,11 +52,24 @@ export function stopApp() {
   aktifDurdur?.()
 }
 
+// Kendi pencerelerimizden biri varlıktan düşünce, satırını silmeden önce bu kadar bekleriz
+// (kısa bir bağlantı kopukluğunda canlı pencerenin satırı silinmesin). Testler değiştirebilir.
+export const appTiming = { staleWindowGraceMs: 10000 }
+// Çıkış'ta sesli durum silmesini en fazla bu kadar bekleriz (ağ yoksa çıkış takılmasın)
+const CIKIS_BEKLEME_MS = 3000
+
 // Üye listesini en sık bu aralıkla yeniden yükleriz (varlık her değiştiğinde sorgu atmamak için)
 const UYE_YENILEME_MS = 2000
 
 export async function startApp(root, profile) {
   const { rail, channels: panel, main, members: uyePaneli } = mountLayout(root)
+  // Ana alan: üstte görüntü bölmesi (sesli kanaldayken), altında sohbet
+  const goruntuAlani = document.createElement('div')
+  goruntuAlani.className = 'video-host'
+  const sohbetAlani = document.createElement('div')
+  sohbetAlani.className = 'chat-host'
+  main.append(goruntuAlani, sohbetAlani)
+  let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
   let uyeler = []
   let varlikHaritasi = new Map() // kim çevrimiçi: userId -> { status, statusText }
 
@@ -62,10 +80,21 @@ export async function startApp(root, profile) {
   const varlik = startPresence(profile.id, getLocalPresencePrefs, { isActive: () => konusuyor })
   let ses = null // açık sesli oturum (aynı anda en fazla bir sesli kanal)
   let sesKanalAdi = ''
+  let sesSunucuId = null // sesli kanalımızın sunucusu (başka sunucuya bakarken de bilinsin)
+  // Sesli kanalımızın sunucusunun üyeleri: katılırken alınır, yalnız o sunucunun üyeleri yeniden
+  // yüklenince yenilenir. Başka sunucuya bakarken (uyeler o sunucunun olur) görüntü bölmesi boşalmasın.
+  let sesUyeleri = []
   let ilkCizimYapildi = false
+  let eskiSatirBakildi = false
+  let benimPencerelerim = new Set() // varlıkta en son gördüğümüz kendi pencerelerimiz (clientId)
+  const dusenZamanlayicilar = new Map() // düşen pencere clientId -> silme zamanlayıcısı
   const dinlemeyiBirak = onPresenceChange((harita) => {
     varlikHaritasi = harita
+    eskiSatiriTemizle()
+    dusenPencereleriTemizle()
+    odadakiEkraniBildir() // ekran paylaşan çevrimdışı olduysa kural kalkar
     cizUyeler()
+    goruntu?.update() // kanaldakilerden kim çevrimiçi değişmiş olabilir
     // Sesli kanallardaki kişiler ve kendi durum noktamız değişmiş olabilir: kanal panelini yenile
     if (ilkCizimYapildi) cizKanalPaneli()
     // Listede olmayan biri çevrimiçi göründüyse (yeni katılan üye olabilir) üyeleri yenile
@@ -93,6 +122,7 @@ export async function startApp(root, profile) {
       }
     },
   })
+  let sonKameraCihazi = getSettings().cameraDeviceId
   // Ayarlar değişince canlı oturuma uygula (mikrofon cihazı hariç: o sonraki katılışta geçerli)
   const ayarDinlemeyiBirak = onSettingsChange((s) => {
     if (s.mode !== ptt.mode) ptt.setMode(s.mode)
@@ -100,7 +130,10 @@ export async function startApp(root, profile) {
     ptt.setThreshold(s.vadThreshold)
     ses?.setNoiseSuppression(s.noiseSuppression)
     ses?.setBitrate(s.bitrateKbps)
+    ses?.setUploadMbps(s.uploadMbps)
     ses?.setOutputDevice(s.outputDeviceId)
+    // Kamera seçimi değişti ve kamera açıksa canlı geçir (mikrofondan farklı olarak)
+    if (s.cameraDeviceId !== sonKameraCihazi) { sonKameraCihazi = s.cameraDeviceId; ses?.switchCamera() }
     if (ses) cizKanalPaneli() // "tuş seçilmedi" ipucu değişmiş olabilir
   })
   // Masaüstü: Rust tuş dinleyicisine bağlan; tepsi menüsündeki "Sustur" sesli kanaldaysak susturur
@@ -140,11 +173,111 @@ export async function startApp(root, profile) {
     return pttHintText({ mode: s.mode, pttKey: s.pttKey, hookError: kancaHatasi })
   }
   function benimDurumum() { return varlikHaritasi.get(profile.id)?.status ?? 'online' }
+
+  // ---- Sesli kanal durumu (voice_states tablosu) ----
+  // Seçili sunucunun ve (başka sunucuya bakıyorsak) sesli kanalımızın sunucusunun durumlarını dinleriz.
+  // serverId -> { birak(), harita: Map<userId, durum> }
+  const sesAbonelikleri = new Map()
+  function sesAbonelikleriniAyarla() {
+    const gerekli = new Set([sunucuId, ses ? sesSunucuId : null].filter(Boolean))
+    for (const [id, a] of sesAbonelikleri) {
+      if (!gerekli.has(id)) { a.birak(); sesAbonelikleri.delete(id) }
+    }
+    for (const id of gerekli) {
+      if (sesAbonelikleri.has(id)) continue
+      const a = { harita: new Map(), birak: () => {} }
+      sesAbonelikleri.set(id, a)
+      a.birak = subscribeVoiceStates(id, (h) => {
+        if (sesAbonelikleri.get(id) !== a) return
+        a.harita = h
+        sesDurumlariDegisti()
+      }, {
+        // Kendi satırımız silindiyse (başka penceremiz bizi kapanmış sandı) ve hâlâ sesli kanaldaysak yeniden yaz
+        onDelete: (userId) => { if (userId === profile.id && ses) reassertVoiceState() },
+      })
+    }
+  }
+  function sesAbonelikleriniKapat() {
+    for (const a of sesAbonelikleri.values()) a.birak()
+    sesAbonelikleri.clear()
+  }
+  // Birinin sesli durumu değişti: kanal listesi ve görüntü bölmesi yeniden çizilir
+  function sesDurumlariDegisti() {
+    if (durduruldu) return
+    odadakiEkraniBildir()
+    if (ilkCizimYapildi) cizKanalPaneli()
+    goruntu?.update()
+  }
+  // Oda kuralı: kanalımızda (çevrimiçi) başka biri ekran paylaşıyorsa kameramız küçülür (videoBudget.js)
+  function odadakiEkraniBildir() {
+    if (!ses) return
+    const cevrimici = cevrimiciler()
+    let paylasanVar = false
+    for (const [id, d] of sesHaritasi(sesSunucuId)) {
+      if (id !== profile.id && d.channelId === ses.channelId && d.screen && cevrimici.has(id)) paylasanVar = true
+    }
+    ses.setRoomScreenOn?.(paylasanVar)
+  }
+  // Sunucunun sesli durumları. Yalnız satırı YAZAN pencere (client_id) hâlâ varlıkta görünüyorsa sayılır:
+  // kişi başka bir pencereden çevrimiçi olsa bile kapanmış pencerenin satırı "hayalet" olarak kalmasın.
+  // Kendi satırımız için sunucunun cevabını beklemeyiz: sesli kanaldaysak yerel oturumdan yazılır
+  // (simge anında doğru), değilsek bu pencerenin eski satırı gösterilmez.
+  function sesHaritasi(serverId) {
+    const h = new Map()
+    for (const [id, d] of sesAbonelikleri.get(serverId)?.harita ?? []) {
+      if (id === profile.id && d.clientId === CLIENT_ID) continue
+      if (isClientOnline(id, d.clientId)) h.set(id, d)
+    }
+    if (ses && sesSunucuId === serverId) {
+      const { muted, deafened, camera, screen } = ses.getState()
+      h.set(profile.id, { userId: profile.id, serverId, channelId: ses.channelId, clientId: CLIENT_ID, muted, deafened, camera, screen })
+    }
+    return h
+  }
+  // Sesli kanallarda yalnız çevrimiçi olanlar gösterilir; kendimiz (varlık henüz gelmediyse de) hep sayılırız
+  function cevrimiciler() {
+    if (varlikHaritasi.has(profile.id)) return varlikHaritasi
+    return new Map(varlikHaritasi).set(profile.id, { status: 'online' })
+  }
+
+  // Kendi pencerelerimizden biri (ör. masaüstü programı) varlıktan düştüyse ve biz açıksak, onun satırını sil:
+  // sayfa kapanırken silmesi gidemediyse herkes bizi o kanalda görmeye devam ederdi. Kısa kopuklukta
+  // canlı pencerenin satırı silinmesin diye biraz bekleyip yeniden bakarız (geri gelirse dokunmayız;
+  // yine de silinirse o pencere silme olayını görüp satırını yeniden yazar).
+  function dusenPencereleriTemizle() {
+    const simdiki = new Set(onlineClientIds(profile.id))
+    for (const c of benimPencerelerim) {
+      if (c === CLIENT_ID || simdiki.has(c) || dusenZamanlayicilar.has(c)) continue
+      dusenZamanlayicilar.set(c, setTimeout(() => {
+        dusenZamanlayicilar.delete(c)
+        if (durduruldu || isClientOnline(profile.id, c) || !isClientOnline(profile.id, CLIENT_ID)) return
+        deleteStaleVoiceState(profile.id, c).catch(() => { /* çevrimdışı satır zaten gösterilmez */ })
+      }, appTiming.staleWindowGraceMs))
+    }
+    benimPencerelerim = simdiki
+  }
+
+  // Açılışta: kapanmış bir pencereden (çökme, sekme kapatma) kalmış kendi satırımızı sil.
+  // Kimin açık olduğunu ancak varlık gelince biliriz: kendi girdimizi görünce bir kez bakılır.
+  // Satırı hâlâ açık olan başka bir penceremiz yazdıysa dokunulmaz.
+  function eskiSatiriTemizle() {
+    if (eskiSatirBakildi || !isClientOnline(profile.id, CLIENT_ID)) return
+    eskiSatirBakildi = true
+    getMyVoiceState(profile.id)
+      .then((satir) => {
+        if (!satir || satir.clientId === CLIENT_ID || isClientOnline(profile.id, satir.clientId)) return
+        return deleteStaleVoiceState(profile.id, satir.clientId)
+      })
+      .catch(() => { /* olmazsa önemli değil: çevrimdışı kişinin satırı zaten gösterilmez */ })
+  }
   // Sayfa kapanırken sesli kanaldan ayrıl (karşıdakilere bye gider)
-  const sayfaKapaniyor = () => sesliAyril(false)
+  const sayfaKapaniyor = () => sesliAyril(false, { hemen: true })
   window.addEventListener('pagehide', sayfaKapaniyor)
   function varligiDurdur() {
-    sesliAyril(false)
+    sesliAyril(false, { hemen: true })
+    sesAbonelikleriniKapat()
+    for (const z of dusenZamanlayicilar.values()) clearTimeout(z)
+    dusenZamanlayicilar.clear()
     window.removeEventListener('pagehide', sayfaKapaniyor)
     dinlemeyiBirak()
     ayarDinlemeyiBirak()
@@ -184,8 +317,10 @@ export async function startApp(root, profile) {
       .then((liste) => {
         if (sunucuId !== id || durduruldu) return // beklerken sunucu değişti ya da uygulama kapandı
         uyeler = liste
+        if (ses && id === sesSunucuId) sesUyeleri = liste
         cizUyeler()
         cizKanalPaneli() // sesli kanaldaki kişiler de üye listesinden gelir
+        goruntu?.update()
       })
       .catch(() => { /* sessizce geç: bir sonraki varlık değişiminde tekrar denenir */ })
       .finally(() => { uyeYukleniyor = false })
@@ -206,8 +341,8 @@ export async function startApp(root, profile) {
     sohbet?.destroy()
     sohbet = null
     acikSohbetId = kanal?.id ?? null
-    main.innerHTML = ''
-    if (kanal) sohbet = mountChat(main, { channel: kanal, profile })
+    sohbetAlani.innerHTML = ''
+    if (kanal) sohbet = mountChat(sohbetAlani, { channel: kanal, profile })
   }
 
   function cizHepsi() {
@@ -225,9 +360,9 @@ export async function startApp(root, profile) {
       profile,
       myStatus: benimDurumum(),
       selectedChannelId: kanalId,
-      voiceMembers: voiceMembersByChannel(uyeler, varlikHaritasi),
+      voiceMembers: voiceMembersByChannel(uyeler, sesHaritasi(sunucuId), cevrimiciler()),
       speaking: ses?.getState().speaking ?? new Set(),
-      presence: varlikHaritasi,
+      voiceStates: sesHaritasi(sunucuId),
       // Sesli kanaldaysak alttaki ses paneli
       voice: ses
         ? {
@@ -237,6 +372,8 @@ export async function startApp(root, profile) {
             handlers: {
               onToggleMute: () => ses.toggleMute(),
               onToggleDeafen: () => ses.toggleDeafen(),
+              onToggleCamera: () => ses.toggleCamera(),
+              onToggleScreen: () => ses.toggleScreenShare(),
               onLeave: () => sesliAyril(),
             },
           }
@@ -248,19 +385,22 @@ export async function startApp(root, profile) {
         onMicTest: () => openMicTest(),
         onSettings: () => openSettings({ ptt, onProfile: profilAc }),
         onProfile: profilAc,
-        onSignOut: () => { varligiDurdur(); signOut() },
+        onSignOut: async () => {
+          varligiDurdur()
+          // Önce sesli durum satırımız silinsin (oturum kapanınca silme yetkimiz kalmaz); ağ yoksa en fazla 3 sn
+          await Promise.race([flushVoiceStates(), new Promise((r) => setTimeout(r, CIKIS_BEKLEME_MS))])
+          signOut()
+        },
       },
     })
   }
 
-  // Susturma/sağırlaştırma değişince presence ile herkese duyur (sadece DEĞİŞİNCE gönder).
-  // Sağırlaştırma susturmayı da getirir; ama durumlar ayrı yayınlanır, liste "sağır" simgesini seçer.
-  let sonYayin = { muted: false, deafened: false }
+  // Susturma/sağırlaştırma/kamera/ekran değişince voice_states satırımıza yaz (herkes görsün).
+  // Yazma kuyruğu hızlı tıklamaları birleştirir ve aynı durumu tekrar yazmaz (bkz. data/voiceStates.js).
+  // Sağırlaştırma susturmayı da getirir; ama durumlar ayrı yazılır, liste "sağır" simgesini seçer.
   function sesDurumunuYayinla(oturum) {
-    const { muted, deafened } = oturum.getState()
-    if (muted === sonYayin.muted && deafened === sonYayin.deafened) return
-    sonYayin = { muted, deafened }
-    varlik.update({ voiceMuted: muted, voiceDeafened: deafened })
+    const { muted, deafened, camera, screen } = oturum.getState()
+    upsertVoiceState({ userId: profile.id, serverId: sesSunucuId, channelId: oturum.channelId, muted, deafened, camera, screen })
   }
 
   // Profil penceresi (ayarlar ekranındaki "Profil" düğmesinden de açılır)
@@ -282,17 +422,29 @@ export async function startApp(root, profile) {
 
   // Sesli kanala katıl (önce varsa eskisinden ayrıl). Tıklama bir kullanıcı hareketi:
   // tarayıcı bu sayede mikrofon iznini sorabilir ve gelen sesi çalabilir.
-  function sesliKatil(kanal) {
+  let katilmaNo = 0 // art arda tıklamada yalnız SON tıklama katılır
+  async function sesliKatil(kanal) {
     if (ses?.channelId === kanal.id) return // zaten buradayız
+    const no = ++katilmaNo
     // Aynı hesap başka bir pencerede (ya da masaüstü programında) zaten sesli kanaldaysa katılma:
-    // aynı kişi iki kez bağlanınca bağlantılar birbirini bozar.
-    if (!ses && otherClientVoiceChannel(profile.id)) {
-      toast('Bu hesap başka bir pencerede sesli kanalda')
-      return
+    // aynı kişi iki kez bağlanınca bağlantılar birbirini bozar. Satırı yazan pencere hâlâ açık mı
+    // (varlıkta görünüyor mu) diye bakarız; kapanmış pencereden kalan eski satır engel olmaz.
+    if (!ses) {
+      let satir = null
+      try { satir = await getMyVoiceState(profile.id) } catch { /* bakamadık: katılmayı engelleme */ }
+      if (no !== katilmaNo || durduruldu) return // beklerken başka bir yere tıklandı ya da uygulama kapandı
+      if (satir && satir.clientId !== CLIENT_ID && isClientOnline(profile.id, satir.clientId)) {
+        toast('Bu hesap başka bir pencerede sesli kanalda')
+        return
+      }
+      if (ses?.channelId === kanal.id) return
     }
     sesliAyril(false)
     const oturum = createVoiceSession({ channelId: kanal.id, userId: profile.id })
     ses = oturum
+    sesSunucuId = sunucuId
+    sesUyeleri = uyeSunucusu === sunucuId ? uyeler : [] // üyeler henüz yüklenmediyse yüklenince gelir
+    sesAbonelikleriniAyarla()
     guncellemeBandi?.refresh() // sesli kanala girildi: bant gizlenir
     sesKanalAdi = kanal.name
     // Durum değişince paneli yenile; konuşan halkalarını ise yeniden çizmeden güncelle
@@ -300,33 +452,62 @@ export async function startApp(root, profile) {
       if (ses !== oturum) return
       sesDurumunuYayinla(oturum)
       cizKanalPaneli()
+      goruntu?.update() // kendi kamera/ekran önizlememiz
     })
-    oturum.on('speaking', (konusanlar) => { if (ses === oturum) updateSpeakingRings(panel, konusanlar) })
-    sonYayin = { muted: false, deafened: false }
-    varlik.update({ voiceChannelId: kanal.id, voiceMuted: false, voiceDeafened: false })
+    oturum.on('notice', (metin) => { if (ses === oturum) toast(metin) }) // örn. kulaklık uyarısı
+    oturum.on('speaking', (konusanlar) => {
+      if (ses !== oturum) return
+      updateSpeakingRings(panel, konusanlar)
+      goruntu?.update() // kutucuklardaki yeşil çerçeve
+    })
+    oturum.on('tracks', () => { if (ses === oturum) goruntu?.update() })
+    // Görüntü bölmesi: kanaldaki kişiler ve kim kamera/ekran açtı voice_states'ten, izler oturumdan
+    goruntu = mountVideoPane(goruntuAlani, {
+      getPeers: () => {
+        const durumlar = sesHaritasi(sesSunucuId)
+        return buildVideoPeers({
+          self: profile,
+          members: voiceMembersByChannel(sesUyeleri, durumlar, cevrimiciler()).get(kanal.id) ?? [],
+          voiceStates: durumlar,
+          session: oturum,
+        })
+      },
+      onHide: (id, gizli) => { oturum.setScreenHidden(id, gizli); goruntu?.update() },
+      onVolume: (id, v) => oturum.setScreenVolume(id, v),
+    })
+    goruntu.update()
+    sesDurumunuYayinla(oturum) // satırımız: bu kanaldayız
+    odadakiEkraniBildir() // kanalda zaten ekran paylaşan varsa
     // Kayıtlı ayarları oturuma uygula; kapı bas-konuşta kapalı başlar (tuşa basılana kadar)
     const s = getSettings()
     oturum.setBitrate(s.bitrateKbps)
+    oturum.setUploadMbps(s.uploadMbps)
     oturum.setOutputDevice(s.outputDeviceId)
     oturum.setTransmitting(ptt.isOpen())
     askPttKeyIfNeeded(ptt) // tuş hiç seçilmediyse ilk katılışta sor
     oturum.join().catch((e) => toast(e.message))
+    cizKanalPaneli() // ses paneli ve kanaldaki kendi satırımız
   }
 
-  // Sesli kanaldan ayrıl (Ayrıl düğmesi, Çıkış, sayfa kapanması)
-  function sesliAyril(ciz = true) {
+  // Sesli kanaldan ayrıl (Ayrıl düğmesi, Çıkış, sayfa kapanması).
+  // hemen: satırımızı beklemeden sil (sayfa kapanırken/çıkışta zamanlayıcıya güvenemeyiz)
+  function sesliAyril(ciz = true, { hemen = false } = {}) {
     if (!ses) return
     ses.leave()
     ses = null
+    sesUyeleri = []
+    goruntu?.dispose() // videolar boşalır, iz dinleyicileri bırakılır
+    goruntu = null
     guncellemeBandi?.refresh()
-    sonYayin = { muted: false, deafened: false }
-    varlik.update({ voiceChannelId: null, voiceMuted: false, voiceDeafened: false })
+    clearVoiceState(profile.id, { now: hemen }) // satırımız silinir (olmazsa yeniden denenir)
+    if (!durduruldu) sesAbonelikleriniAyarla() // başka sunucunun sesli durumlarına artık gerek yok
     if (ciz) cizKanalPaneli()
   }
 
   // Sunucuyu seçer, kanallarını yükler; hatırlanan (yoksa ilk yazılı) kanalı açar.
   async function sunucuSec(id, tercihKanal) {
     sunucuId = id
+    sesAbonelikleriniAyarla() // bu sunucunun sesli kanallarında kim var
     let liste = []
     try { liste = await listChannels(id) } catch (e) { toast(e.message) }
     if (sunucuId !== id) return // beklerken başka sunucu seçildi; bu sonuç eskidi
@@ -343,6 +524,7 @@ export async function startApp(root, profile) {
     if (sunucuId !== id) return
     uyeler = uyeListesi
     uyeSunucusu = id
+    if (ses && id === sesSunucuId) { sesUyeleri = uyeListesi; goruntu?.update() }
     cizUyeler()
   }
 

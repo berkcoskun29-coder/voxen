@@ -2,8 +2,11 @@
 //  - channel(topic) aynı konuda kanal varsa (ayrılma bitmemiş olsa bile) ESKİ nesneyi döner
 //  - subscribe() kapalı olmayan kanalda hiçbir şey yapmaz (geri çağırma da gelmez)
 //  - removeChannel asenkron: ayrılma onaylanınca kanal listeden çıkar
+//  - (isteğe bağlı) rt.presenceLimit = { max, windowMs }: Supabase sunucusunun kişi başı varlık sınırı.
+//    Sınır aşılınca sunucu kanalı KAPATIR (geri çağırmaya 'CLOSED' gelir, kanal listeden çıkar);
+//    kapalı kanala track() artık sunucuya ulaşmaz ('timed out'). rt.serverState: sunucunun gördüğü son durum.
 export function createFakeRealtime() {
-  const rt = { channels: [], created: [], setAuthCalls: 0, removeGate: null, log: [] }
+  const rt = { channels: [], created: [], setAuthCalls: 0, removeGate: null, log: [], presenceLimit: null, presenceCalls: [], serverState: null, serverClosed: 0 }
 
   class FakeChannel {
     constructor(topic, params) {
@@ -27,8 +30,31 @@ export function createFakeRealtime() {
     }
     async send(m) { this.sent.push(m); return 'ok' }
     // Varlık (presence): yayınlanan durumlar kaydedilir
-    track(d) { (this.tracked ??= []).push(d); return Promise.resolve('ok') }
-    untrack() { this.untracked = true; return Promise.resolve('ok') }
+    track(d) {
+      (this.tracked ??= []).push(d)
+      if (this.state !== 'joined') return Promise.resolve('timed out') // kapalı kanal: sunucuya gitmez
+      if (rt.presenceLimit) {
+        const simdi = Date.now()
+        rt.presenceCalls = rt.presenceCalls.filter((t) => simdi - t < rt.presenceLimit.windowMs)
+        rt.presenceCalls.push(simdi)
+        if (rt.presenceCalls.length > rt.presenceLimit.max) {
+          // ClientPresenceRateLimitReached: sunucu kanalı kapatır, bu durum uygulanmaz
+          rt.serverClosed++
+          this.state = 'closed'
+          rt.channels = rt.channels.filter((x) => x !== this)
+          this.cb?.('CLOSED')
+          return Promise.resolve('error')
+        }
+      }
+      rt.serverState = d
+      return Promise.resolve('ok')
+    }
+    // untrack da sunucuda bir varlık çağrısı sayılır (sınıra dahil)
+    untrack() {
+      this.untracked = true
+      if (this.state === 'joined' && rt.presenceLimit) rt.presenceCalls.push(Date.now())
+      return Promise.resolve('ok')
+    }
     presenceState() { return {} }
     deliver(event, payload) {
       for (const h of this.handlers) if (h.type === 'broadcast' && h.event === event) h.cb({ payload })

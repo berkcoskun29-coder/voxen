@@ -165,4 +165,64 @@ describe.skipIf(!hasEnv)('RLS (canlı Supabase)', () => {
       expect(error?.code).toBe('23505')
     })
   })
+
+  // 005: sesli kanal durumu tablosu (voice_states).
+  // 005 veritabanına henüz yüklenmediyse bu testler ATLANIR: önce yönetici anahtarıyla tablo yoklanır.
+  describe('sesli durum tablosu (005)', () => {
+    let var005 = false
+    let aId, bId, cId, voiceChannelId
+
+    beforeAll(async () => {
+      const { error } = await admin.from('voice_states').select('user_id').limit(1)
+      var005 = !error
+      aId = (await A.auth.getUser()).data.user.id
+      bId = (await B.auth.getUser()).data.user.id
+      cId = (await C.auth.getUser()).data.user.id
+      const { data } = await admin.from('channels').select('id').eq('server_id', serverId).eq('kind', 'voice').limit(1)
+      voiceChannelId = data?.[0]?.id
+    })
+    afterAll(async () => {
+      if (var005) await admin.from('voice_states').delete().in('user_id', [aId, bId, cId].filter(Boolean))
+    })
+
+    const satir = (userId, ek = {}) => ({
+      user_id: userId, server_id: serverId, channel_id: voiceChannelId, client_id: 'test', ...ek,
+    })
+
+    it('üye kendi satırını yazar; diğer üye görür, üye olmayan görmez', async (ctx) => {
+      if (!var005) ctx.skip()
+      const { error } = await B.from('voice_states').upsert(satir(bId, { muted: true }))
+      expect(error).toBeNull()
+      const { data: aGorur } = await A.from('voice_states').select('user_id, muted').eq('server_id', serverId)
+      expect(aGorur).toEqual([{ user_id: bId, muted: true }])
+      const { data: cGorur } = await C.from('voice_states').select('user_id').eq('server_id', serverId)
+      expect(cGorur).toEqual([])
+    })
+
+    it('başkası adına satır yazılamaz', async (ctx) => {
+      if (!var005) ctx.skip()
+      const { error } = await B.from('voice_states').insert(satir(aId))
+      expect(error).not.toBeNull()
+    })
+
+    it('yazılı kanal ya da üye olmadığı sunucu reddedilir', async (ctx) => {
+      if (!var005) ctx.skip()
+      const yazili = await A.from('voice_states').insert(satir(aId, { channel_id: textChannelId }))
+      expect(yazili.error).not.toBeNull()
+      const uyeDegil = await C.from('voice_states').insert(satir(cId))
+      expect(uyeDegil.error).not.toBeNull()
+    })
+
+    it('başkasının satırı güncellenemez/silinemez; kendi satırı silinir', async (ctx) => {
+      if (!var005) ctx.skip()
+      await A.from('voice_states').update({ muted: false }).eq('user_id', bId)
+      await A.from('voice_states').delete().eq('user_id', bId)
+      const { data: duruyor } = await admin.from('voice_states').select('muted').eq('user_id', bId)
+      expect(duruyor).toEqual([{ muted: true }]) // RLS: 0 satır etkilendi
+      const { error } = await B.from('voice_states').delete().eq('user_id', bId)
+      expect(error).toBeNull()
+      const { data: kalan } = await admin.from('voice_states').select('user_id').eq('user_id', bId)
+      expect(kalan).toEqual([])
+    })
+  })
 })
