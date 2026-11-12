@@ -1,8 +1,13 @@
 // Giriş yapılmış kullanıcının ana ekranı: sunucu şeridi + kanal paneli + ana alan.
 import { signOut } from '../auth/auth.js'
 import { openProfileModal } from '../auth/profileModal.js'
-import { createServer, inviteToCopy, joinByInvite, listMyServers } from '../data/servers.js'
-import { createChannel, listChannels } from '../data/channels.js'
+import { createServer, inviteToCopy, joinByInvite, listMyServers, leaveServer, deleteServer, renameServer } from '../data/servers.js'
+import { createChannel, listChannels, deleteChannel, renameChannel } from '../data/channels.js'
+import { subscribeServerEvents } from '../data/serverEvents.js'
+import {
+  openServerMenu, openChannelMenu, closeMenu, leaveServerDialog, deleteServerDialog, deleteChannelDialog,
+  renameChannelDialog, serverSettingsDialog,
+} from './serverMenu.js'
 import { inviteFromHash, parseInviteInput, takePendingInvite } from './invite.js'
 import { mountLayout, openModal, toast, createMemberToggle } from './layout.js'
 import { renderRail } from './serverRail.js'
@@ -11,7 +16,9 @@ import { formAlani } from './modal.js'
 import { createVoiceSession } from '../voice/session.js'
 import { openSettings, askPttKeyIfNeeded } from './settings.js'
 import { PttController, pttBeepName, connectDesktopPtt, pttHintText, PTT_HOOK_ERROR_TEXT } from '../voice/ptt.js'
-import { isTauri, loadTauriApi } from '../desktop.js'
+import { isTauri, loadTauriApi, setWindowTitle } from '../desktop.js'
+import { createUnreadTracker, baslikYazisi } from './unread.js'
+import { flushReads, resetReads } from '../data/reads.js'
 import { createUpdateBanner } from './updateBanner.js'
 import { getSettings, updateSettings, onSettingsChange } from '../settings.js'
 import { playBeep } from '../voice/sounds.js'
@@ -337,6 +344,21 @@ export async function startApp(root, profile, { email = '' } = {}) {
     window.removeEventListener('pagehide', sayfaKapaniyor)
     profilKartlariniBirak()
     dinlemeyiBirak()
+    window.removeEventListener('focus', pencereOdaga)
+    olaylar?.close()
+    olaylar = null
+    // Açık sohbet kapanır: mesaj aboneliği ve "yazıyor" kanalı (yoksa aynı sekmede yeniden girişte
+    // eski kanal nesnesi kalır, yeni abonelik bağlanmaz ve "yazıyor…" gitmez)
+    sohbet?.destroy()
+    sohbet = null
+    acikSohbetId = null
+    okunmamis.destroy()
+    document.removeEventListener('visibilitychange', okunduIsaretle)
+    // Bekleyen işaretler gönderi listesine eşzamanlı kopyalanır; hemen sıfırlamak güvenli (sonraki hesaba sızmaz, yarış yok)
+    flushReads().catch(() => {})
+    resetReads()
+    setWindowTitle(baslikYazisi(0))
+    closeMenu()
     ayarDinlemeyiBirak()
     ptt.dispose()
     durduruldu = true
@@ -423,12 +445,33 @@ export async function startApp(root, profile, { email = '' } = {}) {
       .finally(() => { uyeYukleniyor = false })
   }
   let servers = []
+  let olaylar = null // sunucu olayları aboneliği (bkz. sunucuOlaylariniAyarla)
   let kanallar = []
   let sunucuId = null
   let kanalId = null // panelde vurgulanan kanal (sesli de olabilir)
   let yaziliId = null // sohbeti açık olan yazılı kanal
   let sohbet = null // açık sohbet (destroy() ile kapatılır)
-  let acikSohbetId = null
+  let acikSohbetId = null // cizMain: hangi sohbet/kart açık (kanal id'si, 'karsilama' ya da 'hata'); okunmamış sayacı da okur
+  // Okunmamış sayacı (bkz. unread.js): tek abonelikle bütün kanalları dinler; çıkışta/durdurmada kapanır.
+  const pencereOdakta = () => document.visibilityState !== 'hidden' && document.hasFocus()
+  const okunmamis = createUnreadTracker({
+    profileId: profile.id,
+    getReading: () => (sohbet && acikSohbetId ? { channelId: acikSohbetId, atBottom: sohbet.isAtBottom() } : null),
+    isFocused: pencereOdakta,
+    onChange: () => {
+      if (durduruldu) return
+      setWindowTitle(baslikYazisi(okunmamis.total()))
+      if (!ilkCizimYapildi) return // henüz çizim yok: ilk çizim sayıları zaten okur
+      renderRail(rail, servers, sunucuId, railHandlers, okunmamis)
+      cizKanalPaneli()
+    },
+  })
+  // Açık kanal okundu sayılır: pencere odakta ve en alttaysa (kanal açılınca, en alta inince, odağa gelince)
+  function okunduIsaretle() {
+    if (durduruldu || !sohbet || !acikSohbetId || !pencereOdakta() || !sohbet.isAtBottom()) return
+    okunmamis.markChannelRead(acikSohbetId, sohbet.getLastId())
+  }
+  document.addEventListener('visibilitychange', okunduIsaretle)
   // Sunucu listesi durumu: 'yukleniyor' | 'hazir' | 'hata'. Karşılama kartı yalnız liste GERÇEKTEN
   // boş geldiyse çıkar (yüklenemediyse "yeni kullanıcı" sanmayalım).
   let sunucuDurumu = 'yukleniyor'
@@ -438,6 +481,16 @@ export async function startApp(root, profile, { email = '' } = {}) {
   async function sunuculariYukle() {
     servers = await listMyServers()
     sunucuDurumu = 'hazir'
+    sunucuOlaylariniAyarla()
+  }
+
+  // Sunucu olayları (silme, ad değişimi, kanal ekleme/silme, ayrılma): üyesi olduğumuz her sunucunun
+  // konusu dinlenir; sunucu listesi değişince abonelikler de güncellenir.
+  function sunucuOlaylariniAyarla() {
+    if (durduruldu) return
+    const idler = servers.map((s) => s.id)
+    if (olaylar) olaylar.update(idler)
+    else olaylar = subscribeServerEvents(idler, sunucuOlayi)
   }
 
   // Ana alan: sohbet her zaman SON SEÇİLEN YAZILI kanalı gösterir (sesli kanala tıklamak onu değiştirmez).
@@ -461,14 +514,15 @@ export async function startApp(root, profile, { email = '' } = {}) {
     } else if (anahtar === 'hata') {
       sohbetAlani.appendChild(renderLoadError('Sunucular yüklenemedi. Bağlantını kontrol edip yeniden dene.', yenidenDene))
     } else if (kanal) {
-      sohbet = mountChat(sohbetAlani, { channel: kanal, profile, headerActions: [uyeDugmesi.button], headerHost: baslikAlani })
+      sohbet = mountChat(sohbetAlani, { channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id, headerActions: [uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle() })
     }
   }
 
+  const railHandlers = { onSelect: (id) => sunucuSec(id), onAdd: () => sunucuOlustur(), onJoin: () => sunucuyaKatil() }
   function cizHepsi() {
     // Sunucu yokken (ya da henüz seçilmemişken) üye paneli boş kalırdı: gizle (CSS .sunucusuz)
     uyePaneli.classList.toggle('sunucusuz', !sunucuId)
-    renderRail(rail, servers, sunucuId, { onSelect: (id) => sunucuSec(id), onAdd: sunucuOlustur, onJoin: sunucuyaKatil })
+    renderRail(rail, servers, sunucuId, railHandlers, okunmamis)
     cizKanalPaneli()
     cizMain()
   }
@@ -483,6 +537,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       myStatus: benimDurumum(),
       myStatusText: varlikHaritasi.get(profile.id)?.statusText ?? '',
       selectedChannelId: kanalId,
+      unread: okunmamis,
       audio: getSettings(), // sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi
       voiceMembers: voiceMembersByChannel(uyeler, sesHaritasi(sunucuId), cevrimiciler()),
       speaking: ses?.getState().speaking ?? new Set(),
@@ -503,6 +558,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
       handlers: {
         onSelectChannel: kanalSec,
         onAddChannel: kanalEkle,
+        onServerMenu: sunucuMenusu,
+        onChannelMenu: kanalMenusu,
         onCopyInvite: () => davetKopyala(sunucu),
         onToggleMute: susturmayiDegistir,
         onToggleDeafen: sagirlastirmayiDegistir,
@@ -542,6 +599,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     }
     if (kanal?.kind === 'voice') sesliKatil(kanal)
     cizHepsi()
+    okunduIsaretle() // aynı kanala yeniden tıklandıysa sohbet yeniden kurulmaz: yine okundu say
   }
 
   // Sesli kanala katıl (önce varsa eskisinden ayrıl). Tıklama bir kullanıcı hareketi:
@@ -653,6 +711,220 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (ses && id === sesSunucuId) { sesUyeleri = uyeListesi; goruntu?.update() }
     cizUyeler()
   }
+
+  // ---- Sunucu menüsü, ayrılma, silme, ad değiştirme; kanal menüsü ----
+  // Veri işi başarısız olursa pencere açık kalır ve veritabanının Türkçe metni (yoksa genel metin) gösterilir.
+  const ISLEM_BASARISIZ = 'İşlem yapılamadı. İnternetini kontrol edip tekrar dene.'
+  const hataMetni = (e) => e?.message || ISLEM_BASARISIZ
+
+  function sunucuMenusu(opener) {
+    const sunucu = servers.find((s) => s.id === sunucuId)
+    if (!sunucu) return
+    openServerMenu({
+      opener,
+      sunucu,
+      sahip: sunucu.owner_id === profile.id,
+      tik: {
+        onInvite: () => davetKopyala(sunucu),
+        onSettings: () => sunucuAyarlari(sunucu),
+        onAddChannel: () => kanalEkle('text'),
+        onLeave: () => sunucudanAyril(sunucu),
+        onDelete: () => sunucuyuSil(sunucu),
+      },
+    })
+  }
+
+  function kanalMenusu(kanal, opener) {
+    openChannelMenu({
+      opener,
+      kanal,
+      tik: { onRename: () => kanaliAdlandir(kanal), onDelete: () => kanaliSil(kanal) },
+    })
+  }
+
+  // O sunucudaki sesli kanaldaysak önce oradan çıkarız (RPC'den ÖNCE: satırımız silinirken
+  // yeniden yazılmasın). Var olan sesliAyril voice_states satırını da temizler.
+  function sunucudaysaSestenCik(id) {
+    if (ses && sesSunucuId === id) sesliAyril(false, { hemen: true })
+  }
+
+  function sunucudanAyril(sunucu) {
+    leaveServerDialog(sunucu, async () => {
+      try {
+        sunucudaysaSestenCik(sunucu.id)
+        await leaveServer(sunucu.id)
+      } catch (e) { return hataMetni(e) }
+      await listeleriTazele()
+      return null
+    })
+  }
+
+  function sunucuyuSil(sunucu) {
+    deleteServerDialog(sunucu, async () => {
+      try {
+        sunucudaysaSestenCik(sunucu.id)
+        await deleteServer(sunucu.id)
+      } catch (e) { return hataMetni(e) }
+      await listeleriTazele()
+      return null
+    })
+  }
+
+  function sunucuAyarlari(sunucu) {
+    serverSettingsDialog(sunucu, {
+      kopyala: () => davetKopyala(sunucu),
+      kaydet: async (ad) => {
+        try { await renameServer(sunucu.id, ad) } catch (e) { return hataMetni(e) }
+        await listeleriTazele()
+        return null
+      },
+    })
+  }
+
+  function kanaliAdlandir(kanal) {
+    renameChannelDialog(kanal, async (ad) => {
+      try { await renameChannel(kanal.id, ad) } catch (e) { return hataMetni(e) }
+      await listeleriTazele()
+      return null
+    })
+  }
+
+  function kanaliSil(kanal) {
+    deleteChannelDialog(kanal, async () => {
+      try {
+        if (ses?.channelId === kanal.id) sesliAyril(false, { hemen: true })
+        await deleteChannel(kanal.id)
+      } catch (e) { return hataMetni(e) }
+      await listeleriTazele()
+      return null
+    })
+  }
+
+  // ---- Canlı güncelleme: sunucu olayı gelince ya da pencere odağa gelince listeler tazelenir ----
+  // Aynı anda tek tazeleme çalışır; çalışırken gelen istekler tek bir ek tur olarak birleşir.
+  let tazelemeIsi = null
+  let tazelemeIstendi = false
+  let sayilarIstendi = false // okunmamış sayıları da yeniden alınsın mı? (sunucu olayı: evet; yalnız pencere odağı: hayır)
+  function listeleriTazele({ sayilar = true } = {}) {
+    tazelemeIstendi = true
+    if (sayilar) sayilarIstendi = true
+    if (!tazelemeIsi) {
+      tazelemeIsi = (async () => {
+        try {
+          while (tazelemeIstendi && !durduruldu) {
+            tazelemeIstendi = false
+            try { await tazeleTek() } catch { /* sessizce geç: sonraki olayda ya da odakta yeniden denenir */ }
+          }
+        } finally { tazelemeIsi = null }
+      })()
+    }
+    return tazelemeIsi
+  }
+
+  async function tazeleTek() {
+    const eskiListe = servers
+    servers = await listMyServers()
+    if (durduruldu) return
+    sunucuDurumu = 'hazir'
+    sunucuOlaylariniAyarla()
+    okunmamis.prune(new Set(servers.map((s) => s.id))) // ayrıldığımız/silinen sunucuların sayısı toplamdan düşer
+    // Yeni/silinen kanallar için sayılar yeniden alınır. Yalnız pencere odağıyla gelen tazelemede, sunucu
+    // kümesi değişmediyse atlanır (alt-tab her seferinde sorgu atmasın).
+    const kume = (l) => l.map((x) => x.id).sort().join()
+    if (sayilarIstendi || kume(eskiListe) !== kume(servers)) {
+      sayilarIstendi = false
+      okunmamis.refresh()
+    }
+    const varMi = (id) => servers.some((s) => s.id === id)
+    // Sesli kanalımızın sunucusu silindi (ya da başka pencereden ayrıldık): sesten çık, haber ver
+    if (ses && !varMi(sesSunucuId)) {
+      const gidenId = sesSunucuId
+      sesliAyril(false, { hemen: true })
+      // Başka pencereden biz ayrıldıysak "silindi" demeyiz
+      toast(ayrildimIdleri.has(gidenId) ? 'Sunucudan ayrıldın.' : 'Bu sunucu silindi.')
+    }
+    // Bakılan sunucu artık yok: sıradakine (yoksa karşılama ekranına) geç
+    if (sunucuId && !varMi(sunucuId)) {
+      const sira = eskiListe.findIndex((s) => s.id === sunucuId)
+      const hedef = servers[Math.min(Math.max(sira, 0), servers.length - 1)]
+      if (hedef) await sunucuSec(hedef.id)
+      else sunucuyuBosalt()
+      return
+    }
+    if (sunucuId) {
+      const id = sunucuId
+      const liste = await listChannels(id)
+      if (sunucuId !== id || durduruldu) return
+      kanallariUygula(liste)
+    }
+    // Başka sunucuya bakarken sesli kanalımız silindiyse onu da yakala
+    if (ses && sesSunucuId !== sunucuId) {
+      try {
+        const sesListe = await listChannels(sesSunucuId)
+        if (ses && !sesListe.some((k) => k.id === ses.channelId)) sesliAyril(false, { hemen: true })
+      } catch { /* sonraki olayda yeniden denenir; çizim yine de yapılır */ }
+    }
+    cizHepsi()
+  }
+
+  // Yeni kanal listesini uygular: açık kanal silindiyse ilk yazılıya geçilir
+  function kanallariUygula(liste) {
+    const eski = kanallar
+    kanallar = liste
+    if (ses && sesSunucuId === sunucuId) {
+      const k = liste.find((x) => x.id === ses.channelId)
+      if (!k) sesliAyril(false, { hemen: true }) // sesli kanalımız silindi
+      else sesKanalAdi = k.name
+    }
+    const acik = liste.find((k) => k.id === yaziliId && k.kind === 'text')
+    if (!acik) {
+      yaziliId = liste.find((k) => k.kind === 'text')?.id ?? null
+      if (yaziliId) sonuYaz(sunucuId, yaziliId)
+    } else if (eski.find((k) => k.id === yaziliId)?.name !== acik.name) {
+      sohbet?.renameChannel(acik.name) // yalnız adlar güncellenir; taslak ve düzenleme bozulmaz
+    }
+    if (!liste.some((k) => k.id === kanalId)) kanalId = yaziliId ?? liste[0]?.id ?? null
+  }
+
+  // Hiç sunucumuz kalmadı (ayrıldık ya da silindi): her şey boşalır, karşılama ekranı çıkar
+  function sunucuyuBosalt() {
+    sunucuId = null
+    kanallar = []
+    kanalId = null
+    yaziliId = null
+    uyeler = []
+    uyeSunucusu = null
+    sesAbonelikleriniAyarla()
+    cizHepsi()
+    cizUyeler()
+  }
+
+  // Veritabanından "degisti" olayı (ya da yeniden bağlanma) geldi
+  const ayrildimIdleri = new Set() // başka pencerede kendimizin ayrıldığı sunucular (bildirim metni için)
+  function sunucuOlayi(sid, payload) {
+    if (durduruldu) return
+    if (payload?.tablo === 'server_members' && payload?.islem === 'DELETE' && payload?.user_id === profile.id) ayrildimIdleri.add(sid)
+    if (sid === sunucuId && (payload?.yeniden || payload?.tablo === 'server_members')) uyeleriYenile()
+    listeleriTazele()
+  }
+  function uyeleriYenile() {
+    const id = sunucuId
+    if (!id) return
+    listMembers(id)
+      .then((liste) => {
+        if (sunucuId !== id || durduruldu) return
+        uyeler = liste
+        uyeSunucusu = id
+        if (ses && id === sesSunucuId) sesUyeleri = liste
+        cizUyeler()
+        cizKanalPaneli()
+        goruntu?.update()
+      })
+      .catch(() => { /* sonraki olayda yeniden denenir */ })
+  }
+  // Yedek: olay kaçmış olabilir; pencere odağa gelince listeler tazelenir
+  const pencereOdaga = () => { listeleriTazele({ sayilar: false }); okunduIsaretle() }
+  window.addEventListener('focus', pencereOdaga)
 
   // Sunucuya/kanala yazılamadığında (ağ, yetki): Supabase'in İngilizce metni yerine çözüm söyleyen metin
   const OLUSTURULAMADI = 'Oluşturulamadı. İnternetini kontrol edip tekrar dene.'

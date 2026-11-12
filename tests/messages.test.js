@@ -16,13 +16,14 @@ vi.mock('../src/lib/supabase.js', () => {
   fake.topics = []
   fake.subCbs = [] // subscribe(durum) geri çağrıları (yeniden bağlanmayı taklit için)
   fake.from = vi.fn((tablo) => {
-    const durum = { before: null, after: null, asc: false, limit: 1000, ids: null }
+    const durum = { before: null, after: null, asc: false, limit: 1000, ids: null, bos: [] }
     const zincir = {
       select: () => zincir,
       eq: () => zincir,
       lt: (_k, v) => { durum.before = v; return zincir },
       gt: (_k, v) => { durum.after = v; return zincir },
       in: (_k, ids) => { durum.ids = ids; return zincir },
+      is: (k, v) => { if (v === null) durum.bos.push(k); return zincir },
       order: (_k, o) => { durum.asc = !!o?.ascending; return zincir },
       limit: (n) => { durum.limit = n; return zincir },
       insert: (v) => { fake.inserted = v; return zincir },
@@ -33,8 +34,9 @@ vi.mock('../src/lib/supabase.js', () => {
           return res({ data: fake.profiles.filter((p) => durum.ids.includes(p.id)), error: null })
         }
         fake.calls.push({ before: durum.before, limit: durum.limit, ...(durum.after != null && { after: durum.after }) })
+        fake.isNull = durum.bos
         let satirlar = fake.msgRows.filter((m) => (durum.before == null || m.id < durum.before) &&
-          (durum.after == null || m.id > durum.after))
+          (durum.after == null || m.id > durum.after) && durum.bos.every((k) => m[k] == null))
         if (!durum.asc) satirlar = satirlar.slice().reverse() // yeniden eskiye
         satirlar = satirlar.slice(0, durum.limit)
         return res({ data: satirlar, error: null })
@@ -42,10 +44,12 @@ vi.mock('../src/lib/supabase.js', () => {
     }
     return zincir
   })
+  fake.rpc = vi.fn(async () => ({ data: null, error: null }))
+  fake.ons = [] // { event, filter } her .on() çağrısı
   fake.channel = vi.fn((konu) => {
     fake.topics.push(konu)
     const k = {
-      on: (_t, _f, cb) => { fake.handlers.push(cb); return k },
+      on: (_t, f, cb) => { fake.handlers.push(cb); fake.ons.push({ ...f, cb }); return k },
       subscribe: (cb) => { fake.subCbs.push(cb); return k },
     }
     return k
@@ -54,13 +58,20 @@ vi.mock('../src/lib/supabase.js', () => {
   return {
     supabase: {
       from: (...a) => fake.from(...a),
+      rpc: (...a) => fake.rpc(...a),
       channel: (...a) => fake.channel(...a),
       removeChannel: (...a) => fake.removeChannel(...a),
     },
   }
 })
 
-import { sendMessage, fetchMessages, subscribeMessages } from '../src/data/messages.js'
+// "yazıyor" kanalı bu testlerin konusu değil: kanal sayımları bozulmasın diye sahtesi (bkz. typingUi.test.js)
+vi.mock('../src/data/typing.js', () => ({
+  typingTiming: { sendEveryMs: 3000, expireMs: 5000 },
+  joinTyping: () => ({ typing() {}, stopped() {}, clear() {}, leave: async () => {} }),
+}))
+
+import { sendMessage, fetchMessages, subscribeMessages, editMessage, deleteMessage } from '../src/data/messages.js'
 import { renderMessage, mountChat } from '../src/ui/chatView.js'
 
 const ben = { id: 'u1', username: 'berk', color: '#5b7cfa', avatar_url: null }
@@ -83,6 +94,9 @@ beforeEach(() => {
   fake.handlers = []
   fake.removed = 0
   fake.msgGate = null
+  fake.ons = []
+  fake.rpc.mockReset()
+  fake.rpc.mockImplementation(async () => ({ data: null, error: null }))
   fake.insertResult = async () => ({ data: ms(999, 'u1', 0, 'selam'), error: null })
   document.body.innerHTML = '<div id="main"></div>'
 })
@@ -438,3 +452,60 @@ describe('U15: başlık yeri', () => {
   })
 })
 
+
+describe('düzenleme ve silme (006)', () => {
+  it('fetchMessages silinmişleri getirmez (deleted_at is null)', async () => {
+    fake.msgRows = [ms(1, 'u1', 0), { ...ms(2, 'u1', 1, ''), deleted_at: '2026-11-12T10:05:00Z' }, ms(3, 'u2', 2)]
+    expect((await fetchMessages('c1')).map((m) => m.id)).toEqual([1, 3])
+    expect(fake.isNull).toEqual(['deleted_at'])
+    await fetchMessages('c1', { after: 0 })
+    expect(fake.isNull).toEqual(['deleted_at'])
+  })
+
+  it('editMessage edit_message RPCsini kırpılmış metinle çağırır, satırı döner', async () => {
+    const satir = { ...ms(7, 'u1', 0, 'yeni'), edited_at: '2026-11-12T10:01:00Z' }
+    fake.rpc.mockImplementation(async () => ({ data: satir, error: null }))
+    const r = await editMessage(7, '  yeni  ')
+    expect(fake.rpc).toHaveBeenCalledWith('edit_message', { id: 7, yeni: 'yeni' })
+    expect(r).toEqual({ ok: true, message: satir })
+  })
+
+  it('editMessage boş ya da 2000den uzun metni göndermez', async () => {
+    expect(await editMessage(7, '   ')).toEqual({ ok: false, warning: '' })
+    expect(await editMessage(7, 'a'.repeat(2001))).toEqual({ ok: false, warning: 'Mesaj en fazla 2000 karakter olabilir' })
+    expect(fake.rpc).not.toHaveBeenCalled()
+  })
+
+  it('editMessage veritabanı hatasını Türkçe metniyle fırlatır', async () => {
+    fake.rpc.mockImplementation(async () => ({ data: null, error: { message: 'Yalnız kendi mesajını düzenleyebilirsin' } }))
+    await expect(editMessage(7, 'x')).rejects.toThrow('Yalnız kendi mesajını düzenleyebilirsin')
+  })
+
+  it('deleteMessage delete_message RPCsini çağırır; hatada fırlatır', async () => {
+    await deleteMessage(9)
+    expect(fake.rpc).toHaveBeenCalledWith('delete_message', { id: 9 })
+    fake.rpc.mockImplementation(async () => ({ data: null, error: { message: 'Bu mesajı silemezsin' } }))
+    await expect(deleteMessage(9)).rejects.toThrow('Bu mesajı silemezsin')
+  })
+
+  it('subscribeMessages onUpdate verilince kanal süzgeçli UPDATE olaylarını iletir', () => {
+    const eklenen = []
+    const guncellenen = []
+    const kapat = subscribeMessages('c1', (m) => eklenen.push(m.id), { onUpdate: (m) => guncellenen.push(m) })
+    const ins = fake.ons.find((o) => o.event === 'INSERT')
+    const upd = fake.ons.find((o) => o.event === 'UPDATE')
+    expect(upd).toMatchObject({ schema: 'public', table: 'messages', filter: 'channel_id=eq.c1' })
+    ins.cb({ new: ms(1, 'u2', 0) })
+    upd.cb({ new: { ...ms(1, 'u2', 0, ''), deleted_at: 'x' } })
+    expect(eklenen).toEqual([1])
+    expect(guncellenen).toEqual([{ ...ms(1, 'u2', 0, ''), deleted_at: 'x' }])
+    kapat()
+    upd.cb({ new: ms(1, 'u2', 0, 'geç') })
+    expect(guncellenen).toHaveLength(1) // kapandıktan sonra iletilmez
+  })
+
+  it('onUpdate verilmezse UPDATE dinlenmez (eski davranış)', () => {
+    subscribeMessages('c1', () => {})
+    expect(fake.ons.map((o) => o.event)).toEqual(['INSERT'])
+  })
+})

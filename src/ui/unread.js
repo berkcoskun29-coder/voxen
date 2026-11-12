@@ -1,0 +1,119 @@
+// Okunmamış sayacının durumu: kanal başına sayı, toplamlar, başlık yazısı. Ekran çizimi yapmaz:
+// değişince onChange çağrılır, app.js listeleri yeniden çizer.
+// Kurallar: kendi mesajım sayılmaz; açık kanal, pencere odaktayken ve en alttayken artmaz (okundu işaretlenir);
+// silme/yeniden bağlanma sayıları sunucudan yeniden alır (sorgu birleştirilir; her mesajda ağır sorgu yok).
+import { fetchUnreadCounts, markRead, subscribeAllMessages } from '../data/reads.js'
+
+export const unreadTiming = { refetchMs: 2000 }
+
+// Rozet yazısı: 99'dan büyükse "99+", sıfırsa boş
+export function sayiYazisi(n) {
+  if (!n || n <= 0) return ''
+  return n > 99 ? '99+' : String(n)
+}
+
+// Pencere başlığı: okunmamış varsa "(N) Voxen"
+export function baslikYazisi(toplam) {
+  const y = sayiYazisi(toplam)
+  return y ? `(${y}) Voxen` : 'Voxen'
+}
+
+// profileId: kendi mesajlarım için. getReading(): { channelId, atBottom } | null (açık yazılı sohbet).
+// isFocused(): pencere odakta mı. onChange(): sayılar değişti.
+export function createUnreadTracker({ profileId, getReading, isFocused, onChange }) {
+  let sayilar = new Map() // kanalId -> { serverId, count }
+  let kapandi = false
+  let zamanlayici = null
+  let aliniyor = false
+  let tekrarIstendi = false
+
+  const degisti = () => { if (!kapandi) onChange?.() }
+
+  // Açık kanal şu an "okunuyor" mu (odakta ve en altta)?
+  function okunuyor(channelId) {
+    const r = getReading?.()
+    return !!r && r.channelId === channelId && !!r.atBottom && !!isFocused?.()
+  }
+
+  function sifirla(channelId) {
+    const s = sayilar.get(channelId)
+    if (s && s.count !== 0) { sayilar.set(channelId, { ...s, count: 0 }); return true }
+    return false
+  }
+
+  async function yenidenAl() {
+    if (kapandi) return
+    if (aliniyor) { tekrarIstendi = true; return }
+    aliniyor = true
+    try {
+      do {
+        tekrarIstendi = false
+        let yeni
+        try { yeni = await fetchUnreadCounts() } catch { yeni = null } // ağ yok: eski sayılar kalır, sonraki olayda yeniden denenir
+        if (kapandi) return
+        if (yeni) {
+          sayilar = yeni
+          // Açık ve okunan kanalın işareti henüz yazılmamış olabilir: sunucudaki eski sayıyı gösterme
+          const r = getReading?.()
+          if (r && okunuyor(r.channelId)) sifirla(r.channelId)
+          degisti()
+        }
+      } while (tekrarIstendi && !kapandi)
+    } finally { aliniyor = false }
+  }
+
+  // Silme gibi olaylarda 2 sn içindeki istekler tek sorguya birleşir
+  function gecikmeliAl() {
+    if (kapandi || zamanlayici) return
+    zamanlayici = setTimeout(() => { zamanlayici = null; yenidenAl() }, unreadTiming.refetchMs)
+  }
+
+  const kapat = subscribeAllMessages({
+    onInsert: (m) => {
+      if (kapandi || !m || m.author_id === profileId || m.deleted_at) return
+      const s = sayilar.get(m.channel_id)
+      if (!s) { gecikmeliAl(); return } // bilmediğimiz kanal (yeni kanal / sesli): yalnız sayılar yeniden alınır
+      if (okunuyor(m.channel_id)) { markRead(m.channel_id, m.id); return }
+      sayilar.set(m.channel_id, { ...s, count: s.count + 1 })
+      degisti()
+    },
+    onUpdate: (m) => { if (m?.deleted_at && m.author_id !== profileId) gecikmeliAl() },
+    onReconnect: () => { yenidenAl() },
+  })
+
+  yenidenAl() // açılışta
+
+  return {
+    // Kanal başına sayı (sesli kanallar listede yoktur: 0)
+    count(channelId) { return sayilar.get(channelId)?.count ?? 0 },
+    serverCount(serverId) {
+      let t = 0
+      for (const s of sayilar.values()) if (s.serverId === serverId) t += s.count
+      return t
+    },
+    total() {
+      let t = 0
+      for (const s of sayilar.values()) t += s.count
+      return t
+    },
+    // Açık kanal okundu: yerel sayı sıfırlanır, işaret yazılır (id yoksa yalnız sayı sıfırlanır)
+    markChannelRead(channelId, messageId) {
+      if (messageId != null) markRead(channelId, messageId)
+      if (sifirla(channelId)) degisti()
+    },
+    // Sunucu ya da kanal listesi değişti (kanal geldi/gitti): sayılar yeniden alınır
+    refresh() { gecikmeliAl() },
+    // Listede olmayan sunucuların/kanalların sayıları toplamı bozmasın
+    prune(serverIds) {
+      let degistiMi = false
+      for (const [k, s] of sayilar) if (!serverIds.has(s.serverId)) { sayilar.delete(k); degistiMi = true }
+      if (degistiMi) degisti()
+    },
+    destroy() {
+      kapandi = true
+      clearTimeout(zamanlayici)
+      zamanlayici = null
+      kapat()
+    },
+  }
+}

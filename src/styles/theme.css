@@ -486,6 +486,12 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .composer textarea { width: 100%; resize: none; padding: var(--sp-3) var(--sp-3); background: var(--input); color: var(--text); border: 0; border-radius: 8px; font: inherit; }
 .composer-warning { min-height: 1.2em; font-size: var(--fs-xs); color: var(--muted); text-align: right; }
 .composer-warning.over { color: var(--danger); }
+/* "yazıyor…" satırı: yüksekliği sabit, boşken de yer tutar (sohbet zıplamasın) */
+.typing-line { height: 1.4em; line-height: 1.4em; margin-top: var(--sp-1); font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.typing-line strong { font-weight: 600; color: var(--text); }
+.typing-dots { display: inline-block; animation: typing-nefes 1.4s ease-in-out infinite; }
+@keyframes typing-nefes { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .typing-dots { animation: none; } }
 
 /* Çevrimiçi durumu: renkli noktalar ve üye paneli */
 .status-dot {
@@ -690,8 +696,77 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
   background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; /* istisna: 11px rozet boyu */
 }
 /* Okunmamış kanal: ismi beyaz ve kalın */
-.channel-item.unread { color: #fff; font-weight: 600; }
+.channel-item.unread { display: flex; align-items: center; color: #fff; font-weight: 600; }
+.server-icon.selected .server-unread-dot { display: none; } /* seçili sunucuda uzun yeşil çubuk var */
 /* Kanal satırının sağında küçük gri sayı */
 .unread-count { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--muted); } /* istisna: 11px */
 /* Sunucu şeridinde solda kısa beyaz nokta (seçili sunucunun uzun yeşil çubuğundan ayrı) */
 .server-unread-dot { position: absolute; left: -4px; top: 50%; width: 4px; height: 8px; transform: translateY(-50%); border-radius: 0 4px 4px 0; background: #fff; }
+
+/* ---- Mesaj düzenleme ve silme (src/ui/messageActions.js) ---- */
+.message { position: relative; }
+/* Simgeler: opacity ile gizli (display/visibility değil) ki klavyeyle Tab'a girsin; odaklanınca görünür */
+.msg-actions {
+  position: absolute; top: calc(-1 * var(--sp-3)); right: var(--sp-4);
+  display: flex; gap: 2px; padding: 2px;
+  background: var(--channel-panel); border: 1px solid var(--selected); border-radius: 6px;
+  opacity: 0; pointer-events: none; transition: opacity 0.12s;
+}
+.message:hover .msg-actions, .message:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
+.msg-action { padding: var(--sp-1) 6px; margin: 0; background: none; color: var(--text); font-size: var(--fs-sm); line-height: 1; border-radius: 4px; }
+.msg-action:hover { background: var(--selected); }
+.msg-action-sil:hover { background: var(--danger); }
+.msg-edited { color: var(--muted); font-size: var(--fs-xs); cursor: default; margin-left: var(--sp-2); }
+.message.editing { background: var(--channel-panel); }
+.msg-edit { margin-top: var(--sp-1); }
+.msg-edit-input {
+  display: block; width: 100%; box-sizing: border-box; resize: none; max-height: 40vh;
+  padding: var(--sp-2) var(--sp-3); background: var(--input); color: var(--text);
+  border: 0; border-radius: 8px; font: inherit;
+}
+.msg-edit-warning { min-height: 1.2em; font-size: var(--fs-xs); color: var(--danger); }
+.msg-edit-hint { font-size: var(--fs-xs); color: var(--muted); }
+.msg-delete-preview {
+  padding: var(--sp-3); margin-bottom: var(--sp-2); background: var(--input); border-radius: 8px;
+  max-height: 30vh; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.msg-delete-preview strong { display: block; margin-bottom: var(--sp-1); }
+@media (prefers-reduced-motion: reduce) { .msg-actions { transition: none; } }
+
+/* Sunucu menüsü, kanal menüsü (src/ui/serverMenu.js) */
+.server-name-btn {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%; text-align: left;
+  background: none; color: var(--text); padding: 0; font: inherit; font-weight: 700; cursor: pointer;
+  border-radius: 4px; overflow-wrap: anywhere;
+}
+.server-name-btn::after { content: '▾'; margin-left: auto; color: var(--muted); font-size: var(--fs-xs); flex: none; }
+.server-name-btn:hover { background: var(--selected); }
+.channel-row { position: relative; display: flex; align-items: center; }
+.channel-row .channel-item { flex: 1; min-width: 0; }
+.channel-gear {
+  position: absolute; right: var(--sp-1); display: flex; align-items: center; justify-content: center;
+  padding: var(--sp-1); background: none; color: var(--muted); border-radius: 4px; opacity: 0;
+  transition: opacity 0.12s;
+}
+/* Üzerine gelince/odaklanınca ⚙ görünür; okunmamış sayısının üstüne binmesin diye sayı o sırada gizlenir */
+.channel-row:hover:has(.channel-gear) .unread-count, .channel-row:focus-within:has(.channel-gear) .unread-count { visibility: hidden; }
+.channel-row:hover .channel-gear, .channel-row:focus-within .channel-gear, .channel-gear[aria-expanded="true"] { opacity: 1; }
+.channel-gear:hover { color: var(--text); background: var(--selected); }
+@media (prefers-reduced-motion: reduce) { .channel-gear { transition: none; } }
+.popup-menu {
+  position: fixed; z-index: 60; min-width: 200px; padding: var(--sp-1);
+  background: var(--server-rail); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex; flex-direction: column;
+}
+.popup-item {
+  display: block; width: 100%; text-align: left; background: none; color: var(--text);
+  padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); border-radius: 4px; cursor: pointer;
+}
+.popup-item:hover, .popup-item:focus-visible { background: var(--selected); }
+.popup-item.danger { background: none; color: var(--danger); } /* button.danger'ın kırmızı zeminini ezer */
+.popup-item.danger:hover, .popup-item.danger:focus-visible { background: var(--selected); }
+.confirm-text { margin: 0 0 var(--sp-3); color: var(--text); overflow-wrap: anywhere; }
+.invite-code {
+  display: block; margin: var(--sp-1) 0 var(--sp-3); padding: var(--sp-2) var(--sp-3);
+  background: var(--input); border-radius: 6px; color: var(--text); user-select: all; overflow-wrap: anywhere;
+}

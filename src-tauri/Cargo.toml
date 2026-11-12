@@ -1,6 +1,6 @@
 [package]
 name = "voxen"
-version = "0.2.1"
+version = "0.3.0"
 description = "Voxen masaüstü programı"
 authors = ["Berk"]
 license = ""

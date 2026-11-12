@@ -106,8 +106,14 @@ describe.skipIf(!hasEnv)('RLS (canlı Supabase)', () => {
       .select('id')
       .single()
     expect(error).toBeNull()
-    const { error: delErr } = await A.from('channels').delete().eq('id', data.id)
-    expect(delErr).toBeNull()
+    // 006'dan sonra doğrudan silme yok, delete_channel RPC'si var; 006 yüklenmemişse eski yol
+    const rpc = await A.rpc('delete_channel', { cid: data.id })
+    if (rpc.error?.code === 'PGRST202') {
+      const { error: delErr } = await A.from('channels').delete().eq('id', data.id)
+      expect(delErr).toBeNull()
+    } else {
+      expect(rpc.error).toBeNull()
+    }
     const { data: left } = await admin.from('channels').select('id').eq('id', data.id)
     expect(left).toEqual([])
   })

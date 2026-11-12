@@ -174,3 +174,122 @@ describe('005_voice_states.sql', () => {
     expect(sql5).toContain('alter publication supabase_realtime add table public.voice_states')
   })
 })
+
+// 006: temel özellikler (düzenleme/silme, sunucu/kanal yönetimi, okunmamış, yazıyor, sunucu olayları)
+const yol6 = 'supabase/migrations/006_temel_ozellikler.sql'
+const sql6 = existsSync(yol6) ? readFileSync(yol6, 'utf8').toLowerCase().replace(/\s+/g, ' ') : ''
+// Bir fonksiyonun tanımı (create ... $$ gövde $$;)
+const fonk6 = (ad) => {
+  const i = sql6.indexOf(`create or replace function public.${ad}(`)
+  if (i < 0) return ''
+  const govdeBasi = sql6.indexOf('$$', i)
+  return sql6.slice(i, sql6.indexOf('$$;', govdeBasi + 2) + 3)
+}
+describe('006_temel_ozellikler.sql', () => {
+  it('dosya var', () => expect(existsSync(yol6)).toBe(true))
+  it('mesaj sütunları ve yeni içerik kuralı', () => {
+    expect(sql6).toContain('add column if not exists edited_at timestamptz')
+    expect(sql6).toContain('add column if not exists deleted_at timestamptz')
+    expect(sql6).toContain("(deleted_at is null and length(content) between 1 and 2000) or (deleted_at is not null and content = '')")
+  })
+  it('messages_insert sıkılaştı: yeni satır silinmiş/düzenlenmiş olamaz', () => {
+    const p = sql6.slice(sql6.indexOf('create policy messages_insert'), sql6.indexOf('create or replace function public.edit_message'))
+    expect(p).toContain('author_id = auth.uid()')
+    expect(p).toContain('deleted_at is null')
+    expect(p).toContain('edited_at is null')
+    expect(p).toContain('public.is_member(c.server_id)')
+  })
+  it('messages için UPDATE/DELETE politikası yok (yalnız RPC)', () => {
+    expect(sql6).not.toMatch(/create policy \w+ on public\.messages for (update|delete)/)
+  })
+  it('channels_delete politikası kaldırıldı', () => {
+    expect(sql6).toContain('drop policy if exists channels_delete on public.channels')
+    expect(sql6).not.toContain('create policy channels_delete')
+  })
+  const imzalar = {
+    edit_message: '(bigint, text)', delete_message: '(bigint)', leave_server: '(uuid)', delete_server: '(uuid)',
+    rename_server: '(uuid, text)', delete_channel: '(uuid)', rename_channel: '(uuid, text)',
+    unread_counts: '()', mark_read: '(uuid, bigint)', can_access_server_topic: '(text)', can_access_text_topic: '(text)',
+    sunucu_olayi_gonder: '()',
+  }
+  for (const [ad, imza] of Object.entries(imzalar)) {
+    it(`${ad}: security definer, search_path, anon kapalı, authenticated açık`, () => {
+      const f = fonk6(ad)
+      expect(f).not.toBe('')
+      expect(f).toContain('security definer')
+      expect(f).toContain('set search_path = public')
+      expect(sql6).toContain(`revoke all on function public.${ad}${imza} from public, anon`)
+      expect(sql6).toContain(`grant execute on function public.${ad}${imza} to authenticated`)
+    })
+  }
+  it('RPC parametre adları spec ile aynı', () => {
+    for (const s of ['edit_message(id bigint, yeni text)', 'delete_message(id bigint)', 'leave_server(sid uuid)',
+      'delete_server(sid uuid)', 'rename_server(sid uuid, ad text)', 'delete_channel(cid uuid)',
+      'rename_channel(cid uuid, ad text)', 'unread_counts()', 'mark_read(cid uuid, mid bigint)']) {
+      expect(sql6).toContain(`function public.${s}`)
+    }
+  })
+  it('düzenleme yalnız yazar; silme yazar ya da sahip (yumuşak)', () => {
+    expect(fonk6('edit_message')).toContain('m.author_id <> auth.uid()')
+    const sil = fonk6('delete_message')
+    expect(sil).toContain('m.author_id <> auth.uid()')
+    expect(sil).toContain('s.owner_id = auth.uid()')
+    expect(sil).toContain("set content = '', deleted_at = now()")
+  })
+  it('sahip ayrılamaz (spec metni); ayrılınca sesli durum ve okundu kayıtları silinir', () => {
+    const f = fonk6('leave_server')
+    expect(f).toContain('sahibi olduğun sunucudan ayrılamazsın; istersen sunucuyu silebilirsin.')
+    expect(f).toContain('delete from public.voice_states')
+    expect(f).toContain('delete from public.channel_reads')
+  })
+  it('delete_channel: sunucu satırı kilitlenir, sayım kilitten sonra; son yazılı kanal korunur', () => {
+    const f = fonk6('delete_channel')
+    const kilit = f.indexOf('for update')
+    expect(f).toContain('from public.servers s where s.id = sid for update')
+    expect(kilit).toBeGreaterThan(0)
+    expect(f.indexOf("c.kind = 'text') <= 1")).toBeGreaterThan(kilit)
+    expect(f).toContain('sunucuda en az bir yazılı kanal kalmalı.')
+  })
+  it('channel_reads: tablo, RLS, cascade, backfill', () => {
+    expect(sql6).toContain('create table if not exists public.channel_reads')
+    expect(sql6).toContain('user_id uuid not null references auth.users(id) on delete cascade')
+    expect(sql6).toContain('channel_id uuid not null references public.channels(id) on delete cascade')
+    expect(sql6).toContain('primary key (user_id, channel_id)')
+    expect(sql6).toContain('alter table public.channel_reads enable row level security')
+    expect(sql6).toMatch(/insert into public\.channel_reads \(user_id, channel_id, last_read_id\) select sm\.user_id, c\.id, coalesce\(\(select max\(m\.id\)/)
+  })
+  it('unread_counts: başkasının, silinmemiş mesajları, en fazla 100 (istemci 99+), taban id indeksli', () => {
+    const f = fonk6('unread_counts')
+    expect(f).toContain('m.deleted_at is null')
+    expect(f).toContain('m.author_id <> auth.uid()')
+    expect(f).toContain('limit 100')
+    expect(f).toContain('m.id > t.taban')
+    expect(f).toContain('sm.joined_at')
+    expect(f).toContain("c.kind = 'text'")
+  })
+  it('mark_read yalnız ileri gider, üyelik denetlenir', () => {
+    expect(fonk6('mark_read')).toContain('greatest(r.last_read_id, excluded.last_read_id)')
+    expect(fonk6('mark_read')).toContain('public.is_member(c.server_id)')
+  })
+  it('realtime: server: yalnız alma; typing: alma+gönderme, yalnız broadcast', () => {
+    expect(sql6).toContain('create policy server_receive on realtime.messages for select to authenticated')
+    expect(sql6).not.toMatch(/create policy server_\w+ on realtime\.messages for insert/)
+    expect(sql6).toContain('create policy typing_receive on realtime.messages for select to authenticated')
+    expect(sql6).toContain('create policy typing_send on realtime.messages for insert to authenticated')
+    const t = sql6.slice(sql6.indexOf('create policy typing_receive'))
+    expect(t).toContain("realtime.messages.extension = 'broadcast'")
+    expect(t).toContain('public.can_access_text_topic(realtime.topic())')
+    expect(fonk6('can_access_text_topic')).toContain("c.kind = 'text'")
+  })
+  it('tetikleyiciler: silmede BEFORE, ekleme/güncellemede AFTER; realtime.send hatası yutulur', () => {
+    expect(sql6).toContain('before delete on public.servers')
+    expect(sql6).toContain('after update on public.servers')
+    expect(sql6).toContain('after insert or update on public.channels')
+    expect(sql6).toContain('before delete on public.channels')
+    expect(sql6).toContain('before delete on public.server_members')
+    const f = fonk6('sunucu_olayi_gonder')
+    expect(f).toContain('perform realtime.send(')
+    expect(f).toContain("'degisti', 'server:' || sid::text, true")
+    expect(f).toContain('exception when others then')
+  })
+})

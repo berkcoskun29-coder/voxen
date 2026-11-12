@@ -14,3 +14,14 @@ export async function loadTauriApi() {
   ])
   return { listen, invoke }
 }
+
+// Pencere başlığını ayarlar. Web'de document.title yeterli; masaüstünde Tauri'nin yerel pencere
+// başlığı document.title'ı izlemez, bu yüzden ayrıca setTitle çağrılır (izin: capabilities/default.json).
+export async function setWindowTitle(baslik) {
+  if (typeof document !== 'undefined') document.title = baslik
+  if (!isTauri()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().setTitle(baslik)
+  } catch { /* başlık güncellenemezse sayaç yine de çalışır */ }
+}

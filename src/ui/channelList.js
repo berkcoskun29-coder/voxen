@@ -1,6 +1,7 @@
 // Kanal paneli: sunucu adı, davet düğmesi, yazılı/sesli kanallar ve altta kullanıcı çubuğu.
 // Sesli kanalların altında içerideki kişiler; sesli kanaldaysak altta ses paneli.
 import { avatarWithDot } from './memberList.js'
+import { sayiYazisi } from './unread.js'
 import { avatarTextColor } from './avatarColor.js'
 import { makeProfileOpener } from './profileOpener.js'
 import { STATUS_LABELS } from './profileCard.js'
@@ -153,7 +154,7 @@ export function updateSpeakingRings(panel, konusanlar) {
 
 // Bir kanal grubunu (başlık + kanallar) panele ekler.
 // sesli: { members: Map<kanalId, profil[]>, speaking: Set<userId> } (sadece sesli grupta)
-function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli) { // sesli.voiceStates: Map<userId, durum>
+function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli, unread = null) { // sesli.voiceStates: Map<userId, durum>
   const baslikSatiri = document.createElement('div')
   baslikSatiri.className = 'section-head'
   const b = document.createElement('span')
@@ -172,14 +173,39 @@ function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli) 
   const grup = document.createElement('div')
   grup.className = 'channel-group'
   for (const k of kanallar) {
+    // Satır: kanal düğmesi + (yalnız sahipte) ⚙ düğmesi. İç içe düğme olmasın diye ikisi kardeş.
+    const sarma = document.createElement('div')
+    sarma.className = 'channel-row'
     const satir = document.createElement('button')
     satir.type = 'button'
-    satir.className = 'channel-item' + (k.id === secili ? ' selected' : '')
+    // Okunmamış yalnız yazılı kanalda (sesli kanalda sayaç yok)
+    const okunmamis = tur === 'text' ? (unread?.count?.(k.id) ?? 0) : 0
+    satir.className = 'channel-item' + (k.id === secili ? ' selected' : '') + (okunmamis > 0 ? ' unread' : '')
     // Yazılı kanallar # ile başlar; sesli kanalın adında zaten simge olabilir
     satir.textContent = tur === 'text' ? `# ${k.name}` : k.name
+    if (okunmamis > 0) {
+      const say = document.createElement('span')
+      say.className = 'unread-count'
+      say.textContent = sayiYazisi(okunmamis)
+      satir.appendChild(say)
+      satir.setAttribute('aria-label', `${k.name}, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
+    }
     satir.dataset.odak = `kanal-${k.id}`
     satir.onclick = () => handlers.onSelectChannel?.(k.id)
-    grup.appendChild(satir)
+    sarma.appendChild(satir)
+    if (sahip) {
+      const disli = document.createElement('button')
+      disli.type = 'button'
+      disli.className = 'channel-gear'
+      disli.dataset.odak = `kanal-ayar-${k.id}`
+      disli.setAttribute('aria-label', `${k.name} kanal ayarları`)
+      disli.setAttribute('aria-haspopup', 'menu')
+      disli.setAttribute('aria-expanded', 'false')
+      disli.appendChild(gearIcon(14))
+      disli.onclick = () => handlers.onChannelMenu?.(k, disli)
+      sarma.appendChild(disli)
+    }
+    grup.appendChild(sarma)
     if (sesli) {
       // Bu sesli kanaldaki kişiler, kanalın hemen altında
       const kisiler = document.createElement('div')
@@ -230,9 +256,10 @@ function odakAnahtariylaBul(kok, anahtar) {
 
 // ctx: { server, channels, profile, selectedChannelId, handlers,
 //        voiceMembers (Map<kanalId, profil[]>), speaking (Set<userId>), voiceStates (Map<userId, durum>),
+//        unread ({ count(kanalId) }, isteğe bağlı: okunmamış sayaçları),
 //        voice (sesli kanaldaysak: { channelName, state, handlers } -> ses paneli) }
 //        audio (sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi: { muted, deafened }) }
-// handlers: onSelectChannel(id), onAddChannel(kind), onCopyInvite(), onSettings(), onToggleMute(), onToggleDeafen()
+// handlers: onSelectChannel(id), onAddChannel(kind), onServerMenu(düğme), onChannelMenu(kanal, düğme), onCopyInvite(), onSettings(), onToggleMute(), onToggleDeafen()
 export function renderChannelList(panel, ctx) {
   const { server, channels, profile, selectedChannelId, handlers } = ctx
   panel.className = 'channel-panel'
@@ -247,7 +274,16 @@ export function renderChannelList(panel, ctx) {
   ust.className = 'panel-top'
   if (server) {
     const h = document.createElement('h2')
-    h.textContent = server.name
+    // Sunucu adı bir düğme: tıklayınca sunucu menüsü açılır (ok simgesi CSS'ten gelir)
+    const adDugmesi = document.createElement('button')
+    adDugmesi.type = 'button'
+    adDugmesi.className = 'server-name-btn'
+    adDugmesi.textContent = server.name
+    adDugmesi.dataset.odak = 'sunucu-menu'
+    adDugmesi.setAttribute('aria-haspopup', 'menu')
+    adDugmesi.setAttribute('aria-expanded', 'false')
+    adDugmesi.onclick = () => handlers.onServerMenu?.(adDugmesi)
+    h.appendChild(adDugmesi)
     const davet = document.createElement('button')
     davet.type = 'button'
     davet.className = 'secondary invite-btn'
@@ -264,7 +300,7 @@ export function renderChannelList(panel, ctx) {
   if (server) {
     const yazili = channels.filter((k) => k.kind === 'text')
     const sesli = channels.filter((k) => k.kind === 'voice')
-    grupEkle(liste, 'Yazılı kanallar', yazili, selectedChannelId, 'text', handlers, sahip)
+    grupEkle(liste, 'Yazılı kanallar', yazili, selectedChannelId, 'text', handlers, sahip, undefined, ctx.unread)
     grupEkle(liste, 'Sesli kanallar', sesli, selectedChannelId, 'voice', handlers, sahip, {
       members: ctx.voiceMembers ?? new Map(),
       speaking: ctx.speaking ?? new Set(),

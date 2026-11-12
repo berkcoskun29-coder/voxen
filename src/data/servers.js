@@ -24,6 +24,25 @@ export async function joinByInvite(code) {
   return data
 }
 
+// Sunucudan ayrılır. Sahip ayrılamaz: veritabanı şu hatayı verir (metni olduğu gibi fırlatılır):
+// "Sahibi olduğun sunucudan ayrılamazsın; istersen sunucuyu silebilirsin."
+export async function leaveServer(serverId) {
+  const { error } = await supabase.rpc('leave_server', { sid: serverId })
+  if (error) throw new Error(error.message)
+}
+
+// Sunucuyu siler (yalnız sahip). Kanallar, mesajlar ve üyelikler de silinir.
+export async function deleteServer(serverId) {
+  const { error } = await supabase.rpc('delete_server', { sid: serverId })
+  if (error) throw new Error(error.message)
+}
+
+// Sunucu adını değiştirir (yalnız sahip, 1–40 karakter). Boşluklar kırpılır.
+export async function renameServer(serverId, name) {
+  const { error } = await supabase.rpc('rename_server', { sid: serverId, ad: String(name ?? '').trim() })
+  if (error) throw new Error(error.message)
+}
+
 // Paylaşılacak davet adresi. Masaüstü programında location.origin "http://tauri.localhost" olur
 // (başkası açamaz); bu yüzden .env'deki VITE_PUBLIC_URL (web sürümünün adresi) kullanılır.
 // Masaüstündeyiz ve adres verilmemişse null döner (link kurulamaz).

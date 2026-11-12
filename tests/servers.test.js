@@ -26,8 +26,8 @@ vi.mock('../src/lib/supabase.js', () => {
   return { supabase: { rpc: (...a) => fake.rpc(...a), from: (...a) => fake.from(...a), channel: () => kanal, removeChannel: () => {} } }
 })
 
-import { getInviteLink, inviteToCopy, joinByInvite } from '../src/data/servers.js'
-import { listChannels } from '../src/data/channels.js'
+import { getInviteLink, inviteToCopy, joinByInvite, leaveServer, deleteServer, renameServer } from '../src/data/servers.js'
+import { listChannels, deleteChannel, renameChannel } from '../src/data/channels.js'
 import { renderChannelList } from '../src/ui/channelList.js'
 import { startApp } from '../src/ui/app.js'
 
@@ -131,5 +131,37 @@ describe('davet kopyalama (masaüstü)', () => {
   it('tarayıcıda adres yoksa bulunduğumuz site kullanılır', () => {
     expect(inviteToCopy(s, { publicUrl: '', desktop: false }))
       .toEqual({ text: `${location.origin}/#/davet/abc123`, message: 'Davet linki kopyalandı' })
+  })
+})
+
+describe('sunucu ve kanal yönetimi RPCleri (006)', () => {
+  it('leaveServer / deleteServer / renameServer doğru RPC ve argümanlarla', async () => {
+    fake.rpc.mockImplementation(async () => ({ data: null, error: null }))
+    await leaveServer('s1')
+    await deleteServer('s1')
+    await renameServer('s1', '  Yeni Ad  ')
+    expect(fake.rpc.mock.calls).toEqual([
+      ['leave_server', { sid: 's1' }],
+      ['delete_server', { sid: 's1' }],
+      ['rename_server', { sid: 's1', ad: 'Yeni Ad' }],
+    ])
+  })
+
+  it('deleteChannel / renameChannel doğru RPC ve argümanlarla', async () => {
+    fake.rpc.mockImplementation(async () => ({ data: null, error: null }))
+    await deleteChannel('c1')
+    await renameChannel('c1', ' sohbet ')
+    expect(fake.rpc.mock.calls).toEqual([
+      ['delete_channel', { cid: 'c1' }],
+      ['rename_channel', { cid: 'c1', ad: 'sohbet' }],
+    ])
+  })
+
+  it('veritabanının Türkçe hata metni olduğu gibi fırlatılır', async () => {
+    const metin = 'Sahibi olduğun sunucudan ayrılamazsın; istersen sunucuyu silebilirsin.'
+    fake.rpc.mockImplementation(async () => ({ data: null, error: { message: metin } }))
+    await expect(leaveServer('s1')).rejects.toThrow(metin)
+    fake.rpc.mockImplementation(async () => ({ data: null, error: { message: 'Sunucuda en az bir yazılı kanal kalmalı.' } }))
+    await expect(deleteChannel('c1')).rejects.toThrow('Sunucuda en az bir yazılı kanal kalmalı.')
   })
 })

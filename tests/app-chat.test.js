@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Uygulama + sohbet bağlantısı: kanal/sunucu değişiminde abonelik ve yarış durumları.
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const fake = vi.hoisted(() => ({}))
 
@@ -18,7 +18,7 @@ vi.mock('../src/lib/supabase.js', () => {
     let deger = null
     let tek = false
     const zincir = {
-      select: () => zincir, eq: (k, v) => { filtre[k] = v; return zincir }, lt: () => zincir, in: () => zincir,
+      select: () => zincir, eq: (k, v) => { filtre[k] = v; return zincir }, lt: () => zincir, in: () => zincir, is: () => zincir,
       order: () => zincir, limit: () => zincir,
       maybeSingle: () => { tek = true; return zincir },
       upsert: (v) => { islem = 'upsert'; deger = v; return zincir },
@@ -44,6 +44,11 @@ vi.mock('../src/lib/supabase.js', () => {
   fake.voice = 0 // açık sesli kanal (voice:<id>) sinyal aboneliği sayısı
   fake.voiceTopics = []
   fake.tracked = []
+  fake.all = 0 // açık messages-all:<n> (okunmamış sayacı) aboneliği sayısı
+  fake.allHandlers = {} // { INSERT: cb, UPDATE: cb }
+  fake.srv = 0 // açık server:<id> olay aboneliği sayısı
+  fake.srvTopics = []
+  fake.srvHandlers = [] // { server, cb, k }
   fake.vs = 0 // açık voice_states aboneliği sayısı
   fake.vsTopics = []
   fake.vsHandlers = [] // { server, cb } (sunucuya göre filtreli olaylar)
@@ -51,15 +56,19 @@ vi.mock('../src/lib/supabase.js', () => {
     // presence:voxen, voice:<id> ve voice_states:<sunucu> ayrı kanallar: sohbet abonelik sayacına katılmaz
     const sesli = ad.startsWith('voice:')
     const vsKanal = ad.startsWith('voice_states:')
+    const srvKanal = ad.startsWith('server:') // sunucu olayları (serverEvents.js)
+    const tumuKanal = ad.startsWith('messages-all:') // okunmamış sayacı: tek abonelik (data/reads.js)
     const k = {
       on: (_t, f, cb) => {
+        if (srvKanal) fake.srvHandlers.push({ server: ad.slice(7), cb, k })
+        if (tumuKanal) fake.allHandlers[f.event] = cb
         if (ad === 'presence:voxen') fake.syncCb = cb
         if (vsKanal && f.filter) fake.vsHandlers.push({ server: f.filter.replace('server_id=eq.', ''), cb, k })
         return k
       },
       // Varlık ve sesli durum kanalları hemen bağlanır
       subscribe: (cb) => {
-        if (ad === 'presence:voxen') cb?.('SUBSCRIBED')
+        if (ad === 'presence:voxen' || tumuKanal) cb?.('SUBSCRIBED')
         if (vsKanal) Promise.resolve().then(() => { if (!k.kapandi) cb?.('SUBSCRIBED') })
         return k
       },
@@ -70,8 +79,11 @@ vi.mock('../src/lib/supabase.js', () => {
       presence: ad === 'presence:voxen',
       sesli,
       vsKanal,
+      srvKanal,
+      tumuKanal,
     }
-    if (sesli) { fake.voice++; fake.voiceTopics.push(ad) } else if (vsKanal) { fake.vs++; fake.vsTopics.push(ad) } else if (!k.presence) fake.subs++
+    if (tumuKanal) { fake.all++; return k }
+    if (srvKanal) { fake.srv++; fake.srvTopics.push(ad) } else if (sesli) { fake.voice++; fake.voiceTopics.push(ad) } else if (vsKanal) { fake.vs++; fake.vsTopics.push(ad) } else if (!k.presence) fake.subs++
     return k
   })
   return {
@@ -80,7 +92,9 @@ vi.mock('../src/lib/supabase.js', () => {
       from: (...a) => fake.from(...a),
       channel: (...a) => fake.channel(...a),
       removeChannel: (k) => {
-        if (k?.sesli) fake.voice--
+        if (k?.tumuKanal) { fake.all--; fake.allHandlers = {} }
+        else if (k?.srvKanal) { fake.srv--; fake.srvHandlers = fake.srvHandlers.filter((h) => h.k !== k) }
+        else if (k?.sesli) fake.voice--
         else if (k?.vsKanal) { fake.vs--; k.kapandi = true; fake.vsHandlers = fake.vsHandlers.filter((h) => h.k !== k) }
         else if (!k?.presence) fake.subs--
       },
@@ -110,6 +124,15 @@ vi.mock('../src/voice/session.js', async (asil) => {
 })
 
 // Profil penceresi: kaydet geri çağrısını yakala (karşılama kartındaki ad tazelensin mi testi)
+// "yazıyor" kanalı bu testlerin konusu değil: kanal sayımları bozulmasın diye sahtesi (bkz. typingUi.test.js)
+vi.mock('../src/data/typing.js', () => ({
+  typingTiming: { sendEveryMs: 3000, expireMs: 5000 },
+  joinTyping: () => {
+    fake.typingOpen = (fake.typingOpen ?? 0) + 1 // açık "yazıyor" kanalı sayısı (stopApp kapatmalı)
+    return { typing() {}, stopped() {}, clear() {}, leave: async () => { fake.typingOpen-- } }
+  },
+}))
+
 vi.mock('../src/auth/profileModal.js', () => ({ openProfileModal: vi.fn() }))
 
 // Çıkış: signOut çağrıldığı anda sesli durum silmesi gitmiş olmalı
@@ -119,6 +142,7 @@ vi.mock('../src/auth/auth.js', async (asil) => ({
 }))
 
 import { startApp, stopApp, appTiming } from '../src/ui/app.js'
+import { readTiming, resetReads } from '../src/data/reads.js'
 import { supabase } from '../src/lib/supabase.js'
 import { openProfileModal } from '../src/auth/profileModal.js'
 import { presenceLimits, CLIENT_ID } from '../src/presence/presence.js'
@@ -154,12 +178,20 @@ beforeEach(async () => {
   // Önceki testte açık kalan sesli oturum varsa şimdi kapansın (sayaçlar sıfırlanmadan önce).
   // Kanal bırakma asenkron olduğu için bitmesini bekle.
   window.dispatchEvent(new Event('pagehide'))
+  stopApp() // önceki testin uygulaması açık kaldıysa abonelikleri ve menüleri kapat
+  // Önceki testten kalan tuş seçme penceresi (yakalama aşamasında tuşları yutar) kapansın
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape' }))
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0))
+  supabase.rpc.mockReset()
   fake.rows = {
     servers: [{ id: 's1', name: 'S', owner_id: 'u1', invite_code: 'k' }],
     channels: kanallar,
   }
   fake.subs = 0
+  fake.typingOpen = 0
+  fake.srv = 0
+  fake.srvTopics = []
+  fake.srvHandlers = []
   fake.voice = 0
   fake.voiceTopics = []
   fake.tracked = []
@@ -660,7 +692,8 @@ describe('karşılama kartı (T01)', () => {
     fake.rows.servers = []
     location.hash = '#/davet/KOD1'
     let bitir
-    supabase.rpc.mockImplementationOnce(() => new Promise((r) => { bitir = r }))
+    // unread_counts (okunmamış sayacı) hemen döner; katılma çağrısı bekletilir
+    supabase.rpc.mockImplementation((ad) => (ad === 'unread_counts' ? Promise.resolve({ data: [], error: null }) : new Promise((r) => { bitir = r })))
     const bitti = startApp(document.querySelector('#app'), profil)
     await bosalt()
     expect(document.querySelector('.welcome-card')).toBeNull() // katılma sürüyor
@@ -811,5 +844,369 @@ describe('kendi profil kartı (tasarım 3)', () => {
     expect(JSON.parse(localStorage.getItem('voxen.presence')).dnd).toBe(true)
     kart.querySelector('.profile-card-edit').click()
     expect(openProfileModal).toHaveBeenCalled()
+  })
+})
+
+describe('sunucu menüsü, silme/ayrılma ve canlı sunucu olayları (Görev 3)', () => {
+  const menuOgesi = (yazi) => [...document.querySelectorAll('.popup-menu [role=menuitem]')].find((b) => b.textContent === yazi)
+  const modalDugme = (yazi) => [...document.querySelectorAll('.modal-card button')].find((b) => b.textContent === yazi)
+  const sunucuMenusunuAc = () => document.querySelector('.server-name-btn').click()
+  const olayGonder = (payload = { tablo: 'channels', islem: 'DELETE' }) => { for (const h of fake.srvHandlers) h.cb({ payload }) }
+  const acikBaslik = () => document.querySelector('textarea')?.placeholder
+
+  it('her sunucu için server:<id> konusu açılır ve çıkışta kapanır', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.srvTopics).toEqual(['server:s1'])
+    expect(fake.srv).toBe(1)
+    stopApp()
+    await bosalt()
+    expect(fake.srv).toBe(0)
+  })
+
+  it('sahipte menüde Davet et, Sunucu ayarları, Kanal ekle, Sunucuyu sil; üyede Sunucudan ayrıl', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sunucuMenusunuAc()
+    expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent))
+      .toEqual(['Davet et', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(document.querySelector('.popup-menu')).toBeNull()
+
+    fake.rows.servers = [{ id: 's1', name: 'S', owner_id: 'baskasi', invite_code: 'k' }]
+    stopApp()
+    document.body.innerHTML = '<div id="app"></div>'
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sunucuMenusunuAc()
+    expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent))
+      .toEqual(['Davet et', 'Sunucudan ayrıl'])
+    // üyede kanal ⚙ düğmesi yok
+    expect(document.querySelector('.channel-gear')).toBeNull()
+  })
+
+  it('Sunucuyu sil: ad aynen yazılana kadar Sil pasif; RPC çağrılır, sunucu kalkınca karşılama ekranı çıkar', async () => {
+    supabase.rpc.mockImplementation(async (ad) => { if (ad === 'delete_server') fake.rows.servers = []; return { data: null, error: null } })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sunucuMenusunuAc()
+    menuOgesi('Sunucuyu sil').click()
+    const sil = modalDugme('Sil')
+    const kutu = document.querySelector('.modal-card input')
+    expect(document.querySelector('.modal-card').textContent).toContain('Bu geri alınamaz. Bütün kanallar ve mesajlar silinir.')
+    expect(sil.disabled).toBe(true)
+    kutu.value = 's'
+    kutu.dispatchEvent(new Event('input'))
+    expect(sil.disabled).toBe(true)
+    kutu.value = 'S'
+    kutu.dispatchEvent(new Event('input'))
+    expect(sil.disabled).toBe(false)
+    sil.click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('delete_server', { sid: 's1' })
+    expect(document.querySelector('.modal-card')).toBeNull()
+    expect(document.body.textContent).toContain('Voxen\'e hoş geldin')
+    expect(fake.srv).toBe(0) // silinen sunucunun konusu kapandı
+  })
+
+  it('sesli kanaldayken sunucuyu silmek önce sesten çıkarır', async () => {
+    supabase.rpc.mockImplementation(async (ad) => { if (ad === 'delete_server') fake.rows.servers = []; return { data: null, error: null } })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(document.querySelector('.voice-panel')).not.toBeNull()
+    sunucuMenusunuAc()
+    menuOgesi('Sunucuyu sil').click()
+    const kutu = document.querySelector('.modal-card input')
+    kutu.value = 'S'
+    kutu.dispatchEvent(new Event('input'))
+    modalDugme('Sil').click()
+    await bosalt()
+    expect(document.querySelector('.voice-panel')).toBeNull()
+    expect(fake.voice).toBe(0)
+    expect(fake.vsOps.some(([o]) => o === 'delete')).toBe(true)
+    expect(document.body.textContent).not.toContain('Bu sunucu silindi.') // kendi silmemiz: bildirim yok
+  })
+
+  it('Sunucudan ayrıl: onay metni, RPC ve sıradaki sunucuya geçiş', async () => {
+    fake.rows.servers = [
+      { id: 's1', name: 'S', owner_id: 'baskasi', invite_code: 'k' },
+      { id: 's2', name: 'İkinci', owner_id: 'baskasi', invite_code: 'k2' },
+    ]
+    supabase.rpc.mockImplementation(async (ad) => { if (ad === 'leave_server') fake.rows.servers = fake.rows.servers.filter((s) => s.id !== 's1'); return { data: null, error: null } })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sunucuMenusunuAc()
+    menuOgesi('Sunucudan ayrıl').click()
+    expect(document.querySelector('.modal-card').textContent).toContain('S sunucusundan ayrılınsın mı? Davet linkiyle yeniden katılabilirsin.')
+    modalDugme('Ayrıl').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('leave_server', { sid: 's1' })
+    expect(document.querySelector('.panel-top h2').textContent).toBe('İkinci')
+  })
+
+  it('RPC hatası pencerede gösterilir ve pencere açık kalır', async () => {
+    fake.rows.servers = [{ id: 's1', name: 'S', owner_id: 'baskasi', invite_code: 'k' }]
+    supabase.rpc.mockImplementation(async () => ({ data: null, error: { message: 'Bir sorun var' } }))
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sunucuMenusunuAc()
+    menuOgesi('Sunucudan ayrıl').click()
+    modalDugme('Ayrıl').click()
+    await bosalt()
+    expect(document.querySelector('.modal-card .error').textContent).toBe('Bir sorun var')
+  })
+
+  it('açık kanal silinince (olayla) ilk yazılı kanala geçilir', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('sohbet')
+    await bosalt()
+    expect(acikBaslik()).toBe('#sohbet kanalına mesaj yaz…')
+    fake.rows.channels = kanallar.filter((k) => k.id !== 'b')
+    olayGonder()
+    await bosalt()
+    expect(acikBaslik()).toBe('#genel kanalına mesaj yaz…')
+    expect(JSON.parse(localStorage.getItem('voxen.last')).channelId).toBe('a')
+  })
+
+  it('kanal ⚙ menüsü: yeniden adlandır (doğrulama + RPC) ve sil (onay + RPC)', async () => {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ad === 'delete_channel') fake.rows.channels = fake.rows.channels.filter((k) => k.id !== arg.cid)
+      if (ad === 'rename_channel') fake.rows.channels = fake.rows.channels.map((k) => (k.id === arg.cid ? { ...k, name: arg.ad } : k))
+      return { data: null, error: null }
+    })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const dislisi = (ad) => document.querySelector(`.channel-gear[aria-label="${ad} kanal ayarları"]`)
+    dislisi('sohbet').click()
+    expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent)).toEqual(['Kanalı yeniden adlandır', 'Kanalı sil'])
+    menuOgesi('Kanalı yeniden adlandır').click()
+    const kutu = document.querySelector('.modal-card input')
+    expect(kutu.value).toBe('sohbet')
+    kutu.value = '   '
+    modalDugme('Kaydet').click()
+    await bosalt()
+    expect(document.querySelector('.modal-card .field-error').textContent).toContain('Kanal adı boş olamaz')
+    expect(kutu.getAttribute('aria-invalid')).toBe('true')
+    kutu.value = 'yeni-ad'
+    modalDugme('Kaydet').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('rename_channel', { cid: 'b', ad: 'yeni-ad' })
+    expect([...document.querySelectorAll('.channel-item')].some((b) => b.textContent === '# yeni-ad')).toBe(true)
+    dislisi('yeni-ad').click()
+    menuOgesi('Kanalı sil').click()
+    expect(document.querySelector('.modal-card').textContent).toContain('#yeni-ad kanalı silinsin mi? İçindeki bütün mesajlar silinir.')
+    modalDugme('Sil').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('delete_channel', { cid: 'b' })
+    expect([...document.querySelectorAll('.channel-item')].some((b) => b.textContent.includes('yeni-ad'))).toBe(false)
+  })
+
+  it('Sunucu ayarları: ad kaydedilir (rename_server), davet kodu görünür', async () => {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ad === 'rename_server') fake.rows.servers = fake.rows.servers.map((s) => ({ ...s, name: arg.ad }))
+      return { data: null, error: null }
+    })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sunucuMenusunuAc()
+    menuOgesi('Sunucu ayarları').click()
+    expect(document.querySelector('.invite-code').textContent).toBe('k')
+    expect(modalDugme('Davet linkini kopyala')).toBeTruthy()
+    const kutu = document.querySelector('.modal-card input')
+    kutu.value = 'Yeni Ad'
+    modalDugme('Kaydet').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('rename_server', { sid: 's1', ad: 'Yeni Ad' })
+    expect(document.querySelector('.panel-top h2').textContent).toBe('Yeni Ad')
+  })
+
+  it('sesli kanaldayken sunucu başkasınca silinirse sesten çıkılır ve "Bu sunucu silindi." gösterilir', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(document.querySelector('.voice-panel')).not.toBeNull()
+    fake.rows.servers = []
+    olayGonder({ tablo: 'servers', islem: 'DELETE' })
+    await bosalt()
+    expect(document.querySelector('.voice-panel')).toBeNull()
+    expect(fake.voice).toBe(0)
+    expect(fake.vsOps.some(([o]) => o === 'delete')).toBe(true)
+    expect([...document.querySelectorAll('.toast')].map((t) => t.textContent)).toContain('Bu sunucu silindi.')
+  })
+
+  it('pencere odağa gelince listeler tazelenir', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.rows.channels = [...kanallar, { id: 'z', server_id: 's1', name: 'yeni', kind: 'text', position: 5 }]
+    window.dispatchEvent(new Event('focus'))
+    await bosalt()
+    expect([...document.querySelectorAll('.channel-item')].some((b) => b.textContent === '# yeni')).toBe(true)
+  })
+
+  it('kanal yeniden adlandırılınca sohbet yeniden kurulmaz: taslak ve açık düzenleme kutusu kalır', async () => {
+    fake.rows.messages = [{ id: 1, channel_id: 'a', author_id: 'u1', content: 'eski mesaj', created_at: '2026-01-01T10:00:00Z' }]
+    fake.rows.profiles = [{ id: 'u1', username: 'berk', color: '#5b7cfa' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const anaKutu = () => [...document.querySelectorAll('textarea')].find((t) => t.placeholder.includes('kanalına'))
+    const kutu = anaKutu()
+    kutu.value = 'yarım kalan taslak'
+    const duzenle = document.querySelector('.msg-action-duzenle')
+    expect(duzenle).not.toBeNull()
+    duzenle.click()
+    const duzenKutusu = document.querySelector('.msg-edit-input')
+    expect(duzenKutusu).not.toBeNull()
+    duzenKutusu.value = 'düzenlenen metin'
+    fake.rows.channels = kanallar.map((k) => (k.id === 'a' ? { ...k, name: 'ana' } : k))
+    olayGonder({ tablo: 'channels', islem: 'UPDATE' })
+    await bosalt()
+    expect(anaKutu()).toBe(kutu) // aynı düğüm: yeniden kurulmadı
+    expect(kutu.value).toBe('yarım kalan taslak')
+    expect(kutu.placeholder).toBe('#ana kanalına mesaj yaz…')
+    expect(document.querySelector('.header-name').textContent).toBe('ana')
+    expect(document.querySelector('.msg-edit-input')).toBe(duzenKutusu)
+    expect(duzenKutusu.value).toBe('düzenlenen metin')
+  })
+
+  it('başka pencereden ayrılınca sesteyken "silindi" yerine "Sunucudan ayrıldın." gösterilir', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    fake.rows.servers = []
+    olayGonder({ tablo: 'server_members', islem: 'DELETE', server_id: 's1', user_id: 'u1' })
+    await bosalt()
+    const toastlar = [...document.querySelectorAll('.toast')].map((t) => t.textContent)
+    expect(toastlar).toContain('Sunucudan ayrıldın.')
+    expect(toastlar).not.toContain('Bu sunucu silindi.')
+  })
+
+  it('kanal adı başka istemcide değişince açık sohbetin başlığı da yenilenir', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.rows.channels = kanallar.map((k) => (k.id === 'a' ? { ...k, name: 'ana' } : k))
+    olayGonder({ tablo: 'channels', islem: 'UPDATE' })
+    await bosalt()
+    expect(acikBaslik()).toBe('#ana kanalına mesaj yaz…')
+  })
+})
+
+describe('okunmamış sayacı (T5)', () => {
+  const sayaclar = (liste) => supabase.rpc.mockImplementation(async (ad) => (ad === 'unread_counts' ? { data: liste, error: null } : { data: null, error: null }))
+  const satir = (ad) => [...document.querySelectorAll('.channel-item')].find((b) => b.textContent.includes(ad))
+  let odak
+  beforeEach(() => { odak = true; vi.spyOn(document, 'hasFocus').mockImplementation(() => odak); document.title = 'Voxen' })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('açılışta sayılar gelir: kanal satırı, sunucu şeridi rozeti ve pencere başlığı', async () => {
+    sayaclar([{ channel_id: 'b', server_id: 's1', count: 3 }, { channel_id: 'a', server_id: 's1', count: 0 }])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(satir('sohbet').classList.contains('unread')).toBe(true)
+    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('3')
+    expect(satir('genel').classList.contains('unread')).toBe(false)
+    expect(document.querySelector('.server-icon .unread-badge').textContent).toBe('3')
+    expect(document.title).toBe('(3) Voxen')
+  })
+
+  it('başkasının mesajı artırır; kendi mesajım ve sesli kanal artırmaz', async () => {
+    sayaclar([{ channel_id: 'b', server_id: 's1', count: 0 }])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.allHandlers.INSERT({ new: { id: 1, channel_id: 'b', author_id: 'u2' } })
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u1' } })
+    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('1')
+    expect(satir('Lobi').querySelector('.unread-count')).toBeNull()
+    expect(document.title).toBe('(1) Voxen')
+  })
+
+  it('açık kanal odakta ve en alttayken artmaz; odak yokken artar, odağa gelince sıfırlanır', async () => {
+    sayaclar([{ channel_id: 'a', server_id: 's1', count: 0 }])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.allHandlers.INSERT({ new: { id: 5, channel_id: 'a', author_id: 'u2' } })
+    expect(satir('genel').querySelector('.unread-count')).toBeNull()
+    odak = false
+    fake.allHandlers.INSERT({ new: { id: 6, channel_id: 'a', author_id: 'u2' } })
+    expect(satir('genel').querySelector('.unread-count').textContent).toBe('1')
+    odak = true
+    window.dispatchEvent(new Event('focus'))
+    expect(satir('genel').querySelector('.unread-count')).toBeNull()
+    expect(document.title).toBe('Voxen')
+  })
+
+  it('99 üstü "99+" görünür', async () => {
+    sayaclar([{ channel_id: 'b', server_id: 's1', count: 100 }])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('99+')
+    expect(document.title).toBe('(99+) Voxen')
+  })
+
+  it('stopApp tüm-mesaj aboneliğini kapatır ve başlığı sıfırlar', async () => {
+    sayaclar([{ channel_id: 'b', server_id: 's1', count: 2 }])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.all).toBe(1)
+    stopApp()
+    await bosalt()
+    expect(fake.all).toBe(0)
+    expect(document.title).toBe('Voxen')
+  })
+
+  it('stopApp açık sohbeti de kapatır: mesaj aboneliği ve "yazıyor" kanalı (aynı sekmede yeniden girişte sızmaz)', async () => {
+    sayaclar([])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.subs).toBe(1)
+    expect(fake.typingOpen).toBe(1)
+    stopApp()
+    await bosalt()
+    expect(fake.subs).toBe(0)
+    expect(fake.typingOpen).toBe(0)
+    // Yeniden giriş: tek sohbet, tek "yazıyor" kanalı
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.subs).toBe(1)
+    expect(fake.typingOpen).toBe(1)
+  })
+
+  it('en alta kaydırınca açık kanal okundu işaretlenir (odak yokken açılmışsa)', async () => {
+    sayaclar([])
+    resetReads()
+    readTiming.coalesceMs = 0
+    fake.rows.messages = [{ id: 7, channel_id: 'a', author_id: 'u2', content: 'selam', created_at: new Date().toISOString() }]
+    odak = false // açılışta okundu sayılmasın
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(supabase.rpc.mock.calls.some(([ad]) => ad === 'mark_read')).toBe(false)
+    odak = true
+    document.querySelector('.message-list').dispatchEvent(new Event('scroll'))
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('mark_read', { cid: 'a', mid: 7 })
+    readTiming.coalesceMs = 1000
+  })
+
+  it('çıkışta bekleyen işaretler yazılır ve okuma durumu sıfırlanır (sonraki oturumda aynı mesaj yeniden işaretlenir)', async () => {
+    sayaclar([])
+    resetReads()
+    fake.rows.messages = [{ id: 9, channel_id: 'a', author_id: 'u2', content: 'selam', created_at: new Date().toISOString() }]
+    const sayi = () => supabase.rpc.mock.calls.filter(([ad]) => ad === 'mark_read').length
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt() // açık kanal odakta ve en altta: işaret bekliyor (1 sn birleştirme)
+    expect(sayi()).toBe(0)
+    stopApp() // hemen yazılır
+    await bosalt()
+    expect(sayi()).toBe(1)
+    // Sıfırlanmadıysa id 9 "zaten gönderildi" sayılıp atlanırdı
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    stopApp()
+    await bosalt()
+    expect(sayi()).toBe(2)
   })
 })
