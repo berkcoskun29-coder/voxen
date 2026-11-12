@@ -5,6 +5,17 @@ export function ilkHarf(ad) {
   return (Array.from(ad.trim())[0] ?? '?').toLocaleUpperCase('tr')
 }
 
+import { plusIcon, linkIcon } from './icons.js'
+
+// Her şerit düğmesi: ad hem ekran okuyucuya (aria-label) hem baloncuğa (data-tip + title) gider.
+// Baloncuğu src/ui/tooltip.js gösterir.
+function ipucuVer(dugme, ad) {
+  dugme.title = ad
+  dugme.dataset.tip = ad
+  dugme.dataset.tipSide = 'right' // şeritte baloncuk sağda çıkar
+  dugme.setAttribute('aria-label', ad)
+}
+
 // handlers: { onSelect(serverId), onAdd(), onJoin() }
 export function renderRail(rail, servers, selectedId, handlers) {
   rail.innerHTML = ''
@@ -12,23 +23,31 @@ export function renderRail(rail, servers, selectedId, handlers) {
     const dugme = document.createElement('button')
     dugme.type = 'button'
     dugme.className = 'server-icon' + (s.id === selectedId ? ' selected' : '')
-    dugme.title = s.name
+    ipucuVer(dugme, s.name)
     dugme.textContent = ilkHarf(s.name)
     dugme.onclick = () => handlers.onSelect?.(s.id)
     rail.appendChild(dugme)
   }
+  // Sunucular ile eylem düğmeleri arasında ince ayraç (hiç sunucu yoksa ayıracak bir şey yok: çizilmez)
+  if (servers.length > 0) {
+    const ayrac = document.createElement('div')
+    ayrac.className = 'rail-separator'
+    ayrac.setAttribute('role', 'separator')
+    rail.appendChild(ayrac)
+  }
+
   const ekle = document.createElement('button')
   ekle.type = 'button'
   ekle.className = 'server-icon add'
-  ekle.title = 'Sunucu oluştur'
-  ekle.textContent = '+'
+  ipucuVer(ekle, 'Sunucu oluştur')
+  ekle.appendChild(plusIcon())
   ekle.onclick = () => handlers.onAdd?.()
   rail.appendChild(ekle)
   const katil = document.createElement('button')
   katil.type = 'button'
   katil.className = 'server-icon join'
-  katil.title = 'Sunucuya katıl'
-  katil.textContent = '🔗'
+  ipucuVer(katil, 'Sunucuya katıl')
+  katil.appendChild(linkIcon())
   katil.onclick = () => handlers.onJoin?.()
   rail.appendChild(katil)
 }

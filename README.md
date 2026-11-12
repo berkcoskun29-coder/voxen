@@ -2,7 +2,7 @@
 
 Voxen, arkadaşlarla sesli ve yazılı sohbet etmek için ücretsiz, Discord benzeri bir uygulamadır. Sunucular, yazı ve sesli kanallar, bas-konuş ve oyun içi kullanım için masaüstü sürümü vardır.
 
-**Web sürümü:** https://voxen-sohbet.netlify.app
+**Web sürümü:** https://voxen-sohbet.pages.dev
 
 ## Masaüstü uygulamasını kurma (Windows)
 
@@ -32,6 +32,7 @@ npm run dev              # web sürümü
 npm test                 # testler
 npm run db:push          # veritabanı şemasını gönder
 npx tauri build          # masaüstü kurulum dosyası
+npm run deploy:web       # web sürümünü Cloudflare Pages'e yükle
 ```
 
 Sürüm yayınlama: `npx tauri build` (imzalama ortam değişkenleriyle), ardından `node scripts/release-latest-json.mjs "notlar"`; `-setup.exe`, `.sig` ve `latest.json` GitHub Release'e (`vX.Y.Z`) yüklenir.

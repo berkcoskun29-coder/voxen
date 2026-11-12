@@ -1,5 +1,7 @@
 // Sağdaki üye paneli: "Çevrimiçi — N" ve "Çevrimdışı — N" olarak gruplanır.
 import { STATUS_COLORS } from '../presence/status.js'
+import { avatarTextColor } from './avatarColor.js'
+import { makeProfileOpener } from './profileOpener.js'
 
 // Renkli durum noktası (avatarın köşesine konur)
 export function statusDot(status) {
@@ -25,13 +27,21 @@ export function avatarWithDot(kisi, status, sinif = 'member-avatar') {
   }
   av.className = sinif
   av.style.background = kisi.color
+  av.style.color = avatarTextColor(kisi.color)
+  // Çevrimdışıda yalnız avatar soluklaşır (.dim); durum noktası ve ad solmaz
+  if (status === 'offline') av.classList.add('dim')
   kutu.append(av, statusDot(status))
   return kutu
 }
 
 // members: profil dizisi; presence: Map<userId, {status, statusText}>
 export function renderMemberList(panel, { members, presence }) {
-  panel.className = 'member-panel'
+  // classList.add: app.js'in koyduğu .sunucusuz gibi sınıflar silinmesin (className = ... silerdi)
+  panel.classList.add('member-panel')
+  // Baştan çizim odaktaki avatarı siler: anahtarını (data-odak) hatırla, çizimden sonra yenisine odaklan.
+  // Yalnız odak paneldeyse (başka yerdeki odağı çalmayız).
+  const odakli = document.activeElement
+  const odakAnahtari = panel.contains(odakli) ? odakli.dataset?.odak : null
   panel.innerHTML = ''
   const cevrimici = members.filter((m) => presence.has(m.id))
   const cevrimdisi = members.filter((m) => !presence.has(m.id))
@@ -58,10 +68,16 @@ export function renderMemberList(panel, { members, presence }) {
         y.textContent = durum.statusText
         metin.appendChild(y)
       }
-      satir.append(avatarWithDot(k, durum?.status ?? 'offline'), metin)
+      // Avatara tıklayınca profil kartı açılır (dinleyici app.js'te: installProfileCards)
+      const av = makeProfileOpener(avatarWithDot(k, durum?.status ?? 'offline'), k, `profil-uye-${k.id}`)
+      satir.append(av, metin)
       panel.appendChild(satir)
     }
   }
   grup('Çevrimiçi', cevrimici)
   grup('Çevrimdışı', cevrimdisi)
+  if (odakAnahtari) {
+    // CSS seçicisi yerine tek tek karşılaştırma: anahtarda tırnak olsa da bozulmasın
+    ;[...panel.querySelectorAll('[data-odak]')].find((e) => e.dataset.odak === odakAnahtari)?.focus()
+  }
 }

@@ -1,44 +1,81 @@
 // Alttaki ses paneli (kullanıcı çubuğunun hemen üstünde):
-// bağlantı durumu, kanal adı, varsa mikrofon hatası ve Sustur / Sağırlaştır / Ayrıl düğmeleri.
+// üstte "Ses bağlandı · kanal" satırı + kare Ayrıl düğmesi, varsa hata yazıları,
+// altta yalnız simgeli Kamera / Ekran düğmeleri (adları baloncukta).
+// Sustur / Sağırlaştır artık kullanıcı çubuğunda (renderMuteButtons; bkz. channelList.js).
 
 export const VOICE_STATUS_TEXT = {
   connecting: 'Bağlanıyor…',
-  connected: 'Bağlandı',
+  connected: 'Ses bağlandı',
   failed: 'Doğrudan bağlantı kurulamadı',
 }
 
-import { micIcon, headphonesIcon, cameraIcon, screenIcon } from './icons.js'
+import { micIcon, headphonesIcon, cameraIcon, screenIcon, hangupIcon } from './icons.js'
 import { screenShareSupported, desktopScreenNotice } from '../voice/screenShare.js'
 import { isTauri } from '../desktop.js'
 
-// simge: SVG (ya da yok); aria: ekran okuyucu/ipucu metni. Yazı da durur, simge yanına eklenir.
-function dugme(yazi, basili, onClick, ek = '', simge = null, aria = '') {
+// ad: düğmenin kısa adı (data-ad; testler ve kod buradan bulur). Düğmede yazı yok, yalnız simge var:
+// aria: ekran okuyucu metni; aynı metin title ve data-tip olarak baloncukta (src/ui/tooltip.js) görünür.
+function dugme(ad, basili, onClick, ek = '', simge = null, aria = '') {
   const b = document.createElement('button')
   b.type = 'button'
   b.className = 'voice-btn' + (basili ? ' active' : '') + ek
+  b.dataset.ad = ad
+  b.dataset.odak = `ses-${ad}` // panel yeniden çizilince odak bu anahtarla geri gelir (channelList.js)
   if (simge) b.appendChild(simge)
-  b.appendChild(document.createTextNode(yazi))
-  if (aria) { b.setAttribute('aria-label', aria); b.title = aria }
+  if (aria) { b.setAttribute('aria-label', aria); b.title = aria; b.dataset.tip = aria }
   b.setAttribute('aria-pressed', String(!!basili))
-  b.onclick = () => onClick?.()
+  b.onclick = () => { if (!b.dataset.pasif) onClick?.() }
   return b
 }
 
+// Pasif düğme: disabled yerine aria-disabled; böylece odaklanabilir, baloncuğu görünür, tıklama boşa gider.
+// neden: baloncukta (ve title'da) adın yerine görünen açıklama, ör. "Bağlanırken kullanılamaz".
+// Düğmenin adı aria-label'da kalır; ekran okuyucu "Kamerayı aç, kullanılamaz" der.
+function pasifYap(b, pasif, neden) {
+  if (!pasif) return
+  b.dataset.pasif = '1' // tıklama boşa gider
+  b.setAttribute('aria-disabled', 'true')
+  b.classList.add('unavailable') // CSS: soluk
+  b.dataset.tip = neden
+  b.title = neden
+}
+
+// Kullanıcı çubuğundaki Sustur ve Sağırlaştır simge düğmeleri.
+// durum: { muted, deafened, listenOnly } — sesli kanaldaysak oturumun durumu, değilsek kayıtlı tercih.
+// handlers: onToggleMute(), onToggleDeafen(). Basılıyken kırmızı (.active) ve çizili simge.
+// Odak anahtarları (data-odak: ses-Sustur / ses-Sağırlaştır) yeniden çizimde odağı geri getirir.
+export function renderMuteButtons(durum, handlers = {}) {
+  // Sağırlaştırma susturmayı da getirir: mikrofon simgesi sağırken de çizili görünür
+  const miksiz = durum.muted || durum.deafened
+  const sustur = dugme('Sustur', durum.muted, handlers.onToggleMute, ' bar-btn', micIcon(miksiz, 18), durum.muted ? 'Mikrofonu aç' : 'Mikrofonu kapat')
+  sustur.setAttribute('aria-label', 'Sustur') // ad sabit kalır; durumu aria-pressed söyler (değişen yazı yalnız baloncukta)
+  pasifYap(sustur, durum.listenOnly, 'Mikrofon yok') // mikrofon yoksa açılamaz
+  const sagir = dugme('Sağırlaştır', durum.deafened, handlers.onToggleDeafen, ' bar-btn', headphonesIcon(durum.deafened, 18), durum.deafened ? 'Sesi aç' : 'Sesi kapat')
+  sagir.setAttribute('aria-label', 'Sağırlaştır')
+  return [sustur, sagir]
+}
+
 // state: createVoiceSession().getState()
-// handlers: onToggleMute(), onToggleDeafen(), onLeave()  pttHint: varsa kırmızı ipucu yazısı
+// handlers: onToggleCamera(), onToggleScreen(), onLeave()  pttHint: varsa kırmızı ipucu yazısı
 export function renderVoicePanel({ channelName, state, handlers, pttHint }) {
   const kutu = document.createElement('div')
   kutu.className = 'voice-panel'
 
-  const durum = document.createElement('div')
+  // Üst satır: "Ses bağlandı · Lobi" (solda) ve kare Ayrıl düğmesi (sağda)
+  const ust = document.createElement('div')
+  ust.className = 'voice-top'
+  const bilgi = document.createElement('div')
+  bilgi.className = 'voice-info'
+  const durum = document.createElement('span')
   durum.className = 'voice-status ' + state.status // renk CSS'te: bağlandı yeşil, hata kırmızı
   durum.textContent = VOICE_STATUS_TEXT[state.status] ?? ''
-
-  const ad = document.createElement('div')
+  const ad = document.createElement('span')
   ad.className = 'voice-channel-name'
   ad.textContent = channelName
-
-  kutu.append(durum, ad)
+  bilgi.append(durum, ' · ', ad)
+  const ayril = dugme('Ayrıl', false, handlers.onLeave, ' leave', hangupIcon(), 'Ayrıl')
+  ust.append(bilgi, ayril)
+  kutu.appendChild(ust)
 
   for (const metin of [state.micError, state.cameraError, state.screenError]) {
     if (!metin) continue
@@ -58,38 +95,31 @@ export function renderVoicePanel({ channelName, state, handlers, pttHint }) {
 
   const dugmeler = document.createElement('div')
   dugmeler.className = 'voice-buttons'
-  // Sağırlaştırma susturmayı da getirir: mikrofon simgesi sağırken de çizili görünür
-  const miksiz = state.muted || state.deafened
-  const sustur = dugme('Sustur', state.muted, handlers.onToggleMute, '', micIcon(miksiz), state.muted ? 'Mikrofonu aç' : 'Mikrofonu kapat')
-  sustur.disabled = !!state.listenOnly // mikrofon yoksa açılamaz
-  const sagir = dugme('Sağırlaştır', state.deafened, handlers.onToggleDeafen, '', headphonesIcon(state.deafened), state.deafened ? 'Sesi aç' : 'Sesi kapat')
   // Kamera: açıkken yeşil (active), yalnız simge
-  const kamera = dugme('', state.camera, handlers.onToggleCamera, ' camera-btn', cameraIcon(false), state.camera ? 'Kamerayı kapat' : 'Kamerayı aç')
+  const kamera = dugme('Kamera', state.camera, handlers.onToggleCamera, ' camera-btn', cameraIcon(false, 18), state.camera ? 'Kamerayı kapat' : 'Kamerayı aç')
   // Bağlanırken kamera/ekran açılamaz (örgü henüz kurulmadı): düğmeler soluk ve tıklanamaz
   const baglaniyor = state.status === 'connecting'
-  kamera.disabled = baglaniyor
-  const ayril = dugme('Ayrıl', false, handlers.onLeave, ' leave')
-  dugmeler.append(sustur, sagir, kamera)
+  pasifYap(kamera, baglaniyor, 'Bağlanırken kullanılamaz')
+  dugmeler.append(kamera)
   // Ekran paylaşımı: açıkken yeşil; tarayıcı desteklemiyorsa düğme hiç görünmez
   if (screenShareSupported()) {
-    const ekran = dugme('', state.screen, handlers.onToggleScreen, ' camera-btn screen-btn', screenIcon(), state.screen ? 'Paylaşımı durdur' : 'Ekranı paylaş')
-    ekran.disabled = baglaniyor
+    const ekran = dugme('Ekran', state.screen, handlers.onToggleScreen, ' camera-btn screen-btn', screenIcon(18), state.screen ? 'Paylaşımı durdur' : 'Ekranı paylaş')
+    pasifYap(ekran, baglaniyor, 'Bağlanırken kullanılamaz')
     dugmeler.appendChild(ekran)
   } else if (isTauri()) {
     // Masaüstü programı ekran yakalamayı desteklemiyorsa düğme kalır ama soluk durur;
     // üstüne gelince ipucu, tıklayınca panelde uyarı: "Bu özellik şimdilik tarayıcı sürümünde: …"
     const not = desktopScreenNotice()
-    const b = dugme('', false, () => {
+    const b = dugme('Ekran', false, () => {
       if (kutu.querySelector('.screen-notice')) return // bir kez yeter
       const uyari = document.createElement('div')
       uyari.className = 'voice-error screen-notice'
       uyari.textContent = not
       kutu.insertBefore(uyari, dugmeler)
-    }, ' camera-btn screen-btn unavailable', screenIcon(), not)
+    }, ' camera-btn screen-btn unavailable', screenIcon(18), not)
     b.setAttribute('aria-disabled', 'true') // disabled değil: ipucu ve tıklama çalışsın diye
     dugmeler.appendChild(b)
   }
-  dugmeler.appendChild(ayril)
   kutu.appendChild(dugmeler)
   return kutu
 }

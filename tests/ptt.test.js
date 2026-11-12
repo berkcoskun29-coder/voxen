@@ -140,11 +140,13 @@ describe('ayarlar', () => {
 })
 
 describe('ayarlar ekranı', () => {
-  it('tuş yokken ptt modunda tuş seçme penceresi gösterilir; tuşa basınca kaydedilir', () => {
+  it('tuş yokken ptt modunda tuş seçme penceresi gösterilir; tuşa basıp onaylayınca kaydedilir', () => {
     const ptt = new PttController({ mode: 'ptt', key: null, listen: false })
     askPttKeyIfNeeded(ptt)
-    expect(document.body.textContent).toContain('Bas-konuş tuşunu seç — bir tuşa bas')
+    expect(document.body.textContent).toContain('Kullanmak istediğin tuşa bas. Vazgeçmek için Esc.')
     tus('keydown', 'KeyV')
+    expect(getSettings().pttKey).toBeNull() // önce tuşun adı gösterilir, onay beklenir
+    tus('keydown', 'Enter') // Enter onaylar
     expect(getSettings().pttKey).toBe('KeyV')
     expect(document.querySelector('.modal-back')).toBeNull()
     ptt.dispose()
@@ -167,7 +169,7 @@ describe('ayarlar ekranı', () => {
     updateSettings({ pttKey: 'KeyV' })
     const ptt = new PttController({ mode: 'ptt', key: 'KeyV', listen: false })
     openSettings({ ptt })
-    expect(document.body.textContent).toContain("Oyunun kendi sesli sohbet tuşunu seçme (ör. CS2/Valorant'ta V)")
+    expect(document.body.textContent).toContain('Oyunda kullandığın bas-konuş tuşundan farklı bir tuş seç.')
     expect(document.body.textContent).toContain('128 kbps')
     const kayd = document.querySelector('input[type=range][data-ayar=bitrate]')
     expect([kayd.min, kayd.max, kayd.step]).toEqual(['32', '128', '8'])

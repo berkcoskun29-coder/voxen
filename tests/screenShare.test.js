@@ -290,8 +290,8 @@ describe('ayarlar, presence, panel', () => {
   it('bağlanırken (status connecting) 🖥 düğmesi kapalı (disabled)', () => {
     sahteMedya(async () => {})
     const b = (st) => renderVoicePanel({ channelName: 'k', state: durum(st), handlers: {} }).querySelector('.screen-btn')
-    expect(b({ status: 'connecting' }).disabled).toBe(true)
-    expect(b({ status: 'connected' }).disabled).toBe(false)
+    expect(b({ status: 'connecting' }).getAttribute('aria-disabled')).toBe('true')
+    expect(b({ status: 'connected' }).getAttribute('aria-disabled')).toBeNull()
   })
   it('örgü kurulmadan setScreenShare(true): paylaşım başlamaz ama change yayılır', async () => {
     const o = oturumKur()

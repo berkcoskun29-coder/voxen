@@ -85,11 +85,24 @@ describe('signUp', () => {
   })
 })
 
+describe('signUp şifre hataları', () => {
+  it('weak_password kodu "çok zayıf" metni verir, diğer şifre hataları 8 karakter demez', async () => {
+    fake.signUp.mockImplementationOnce(async () => ({ data: {}, error: { status: 422, code: 'weak_password', message: 'Password is known to be weak' } }))
+    const r = await signUp('a@b.com', 'sifre1234', 'berk')
+    expect(r.error).toBe('Bu şifre çok zayıf. Daha uzun bir şifre seç; harf, rakam ve işaret karıştır.')
+    expect(r.alan).toBe('password')
+    fake.signUp.mockImplementationOnce(async () => ({ data: {}, error: { status: 422, message: 'Password not accepted' } }))
+    const r2 = await signUp('a@b.com', 'sifre1234', 'berk')
+    expect(r2.error).not.toMatch(/8 karakter/)
+    expect(r2.alan).toBe('password')
+  })
+})
+
 describe('yarış durumunda yönlendirme', () => {
   it('oturum açık + unique ihlali: needsProfile döner', async () => {
     fake.insert.mockImplementation(async () => ({ error: { code: '23505' } }))
     const r = await signUp('a@b.com', 'sifre1234', 'berk')
-    expect(r).toEqual({ error: 'Bu kullanıcı adı alınmış', needsProfile: true })
+    expect(r).toEqual({ error: 'Bu kullanıcı adı alınmış', alan: 'username', needsProfile: true })
   })
 
   it('görünüm onDone(mesaj) çağırır, "Profilini tamamla" formu hatayı gösterir', async () => {
@@ -104,7 +117,65 @@ describe('yarış durumunda yönlendirme', () => {
     kap.querySelector('form').dispatchEvent(new Event('submit', { cancelable: true }))
     await vi.waitFor(() => expect(onDone).toHaveBeenCalledWith('Bu kullanıcı adı alınmış'))
     expect(kap.querySelector('h1').textContent).toBe('Profilini tamamla')
-    expect(kap.querySelector('.error').textContent).toBe('Bu kullanıcı adı alınmış')
+    // Hata kullanıcı adı kutusunun altında (U07 kalıbı), kutu kırmızı
+    expect(kap.querySelector('#hata-tamamla-ad').textContent).toBe('Bu kullanıcı adı alınmış')
+    expect(kap.querySelector('[name=username]').getAttribute('aria-invalid')).toBe('true')
+  })
+})
+
+// U04: "Profilini tamamla" giriş kartı ve profil penceresiyle aynı görünüm
+describe('Profilini tamamla ekranı', () => {
+  let kap, bitti
+  function ac(mesaj = '') {
+    kap = document.createElement('div')
+    document.body.replaceChildren(kap)
+    bitti = vi.fn()
+    renderCompleteProfile(kap, 'u1', bitti, mesaj)
+  }
+  it('logo + başlık, tek satır açıklama, 72px önizleme, bağlı etiket ve tam genişlik Devam', () => {
+    ac()
+    expect(kap.querySelector('h1.brand img')).not.toBeNull()
+    expect(kap.querySelector('.tagline').textContent).toBe('Arkadaşların seni bu isim ve renkle görecek.')
+    expect(kap.querySelector('.profile-preview')).not.toBeNull()
+    const kutu = kap.querySelector('[name=username]')
+    expect(kap.querySelector(`label[for="${kutu.id}"]`).textContent).toBe('Kullanıcı adı')
+    const devam = kap.querySelector('button[type=submit]')
+    expect(devam.textContent).toBe('Devam')
+    expect(devam.classList.contains('block')).toBe(true)
+    expect(document.activeElement).toBe(kutu)
+  })
+  it('isim yazıldıkça baş harf ve ad, renk seçilince önizleme rengi değişir', () => {
+    ac()
+    const kutu = kap.querySelector('[name=username]')
+    const onizleme = kap.querySelector('.profile-preview')
+    expect(onizleme.textContent).toBe('?')
+    kutu.value = 'ıdil'
+    kutu.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(onizleme.textContent).toBe('I')
+    expect(kap.querySelector('.preview-name').textContent).toBe('ıdil')
+    kap.querySelector('.swatch[data-color="#ef5b9c"]').click()
+    expect(onizleme.style.background).toBe('rgb(239, 91, 156)')
+  })
+  it('kısa ad: hata kutunun altında, istek atılmaz', async () => {
+    ac()
+    kap.querySelector('[name=username]').value = 'ab'
+    kap.querySelector('form').dispatchEvent(new Event('submit', { cancelable: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(kap.querySelector('#hata-tamamla-ad').textContent).toBe('Kullanıcı adı en az 3 karakter olmalı')
+    expect(fake.insert).not.toHaveBeenCalled()
+    expect(bitti).not.toHaveBeenCalled()
+  })
+  it('geçerli adla profil oluşturulur ve devam edilir', async () => {
+    ac()
+    kap.querySelector('[name=username]').value = 'berk'
+    kap.querySelector('form').dispatchEvent(new Event('submit', { cancelable: true }))
+    await vi.waitFor(() => expect(bitti).toHaveBeenCalled())
+    expect(fake.insert.mock.calls[0][0]).toMatchObject({ id: 'u1', username: 'berk' })
+  })
+  it('kullanıcı adıyla ilgisiz başlangıç mesajı genel satırda', () => {
+    ac('Bir şeyler ters gitti. İnternetini kontrol edip tekrar dene.')
+    expect(kap.querySelector('.error').textContent).toBe('Bir şeyler ters gitti. İnternetini kontrol edip tekrar dene.')
+    expect(kap.querySelector('[name=username]').hasAttribute('aria-invalid')).toBe(false)
   })
 })
 

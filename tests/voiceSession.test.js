@@ -6,7 +6,7 @@ vi.mock('../src/lib/supabase.js', () => ({ supabase: { channel: vi.fn(), removeC
 
 import { createVoiceSession } from '../src/voice/session.js'
 import { getSettings, updateSettings } from '../src/settings.js'
-import { renderVoicePanel, VOICE_STATUS_TEXT } from '../src/ui/voicePanel.js'
+import { renderVoicePanel, renderMuteButtons, VOICE_STATUS_TEXT } from '../src/ui/voicePanel.js'
 import { MicError, MIC_MESSAGES } from '../src/voice/pipeline.js'
 import { fakeStream } from './fakes/webrtc.js'
 
@@ -150,7 +150,8 @@ describe('sesli oturum', () => {
     expect(o.getState().muted).toBe(true)
     const panel = renderVoicePanel({ channelName: 'Lobi', state: o.getState(), handlers: {} })
     expect(panel.textContent).toContain('Mikrofon izni verilmedi')
-    expect([...panel.querySelectorAll('button')].find((b) => b.textContent === 'Sustur').disabled).toBe(true)
+    // Sustur kullanıcı çubuğunda: mikrofon yokken pasif
+    expect(renderMuteButtons(o.getState())[0].getAttribute('aria-disabled')).toBe('true')
     o.leave()
   })
 
@@ -263,24 +264,48 @@ describe('sesli oturum', () => {
 describe('ses paneli', () => {
   const durum = (ek = {}) => ({ status: 'connecting', micError: null, muted: false, deafened: false, listenOnly: false, speaking: new Set(), ...ek })
 
-  it('kanal adı, durum ve üç düğme', () => {
+  it('kanal adı, durum ve Ayrıl; Sustur / Sağırlaştır çubuk düğmeleri', () => {
     const tik = []
     const handlers = { onToggleMute: () => tik.push('m'), onToggleDeafen: () => tik.push('d'), onLeave: () => tik.push('l') }
     const p = renderVoicePanel({ channelName: 'Lobi', state: durum(), handlers })
     expect(p.textContent).toContain('Lobi')
     expect(p.textContent).toContain('Bağlanıyor…')
-    const dugme = (ad) => [...p.querySelectorAll('button')].find((b) => b.textContent === ad)
-    dugme('Sustur').click()
-    dugme('Sağırlaştır').click()
-    dugme('Ayrıl').click()
+    const [sustur, sagir] = renderMuteButtons(durum(), handlers)
+    sustur.click()
+    sagir.click()
+    ;[...p.querySelectorAll('button')].find((b) => b.dataset.ad === 'Ayrıl').click()
     expect(tik).toEqual(['m', 'd', 'l'])
   })
 
   it('Bağlandı ve basılı düğmeler', () => {
     const p = renderVoicePanel({ channelName: 'Lobi', state: durum({ status: 'connected', muted: true, deafened: true }), handlers: {} })
-    expect(p.textContent).toContain('Bağlandı')
-    const dugme = (ad) => [...p.querySelectorAll('button')].find((b) => b.textContent === ad)
-    expect(dugme('Sustur').getAttribute('aria-pressed')).toBe('true')
-    expect(dugme('Sağırlaştır').getAttribute('aria-pressed')).toBe('true')
+    expect(p.textContent).toContain('Ses bağlandı')
+    const [sustur, sagir] = renderMuteButtons(durum({ muted: true, deafened: true }))
+    expect(sustur.getAttribute('aria-pressed')).toBe('true')
+    expect(sagir.getAttribute('aria-pressed')).toBe('true')
+  })
+})
+
+describe('başlangıç susturma tercihi (U01)', () => {
+  it('muted / deafened ile kurulan oturum öyle başlar; kapı kapalı, örgü sağır', async () => {
+    hat = fakeHat()
+    const o = createVoiceSession({
+      channelId: 'v1', userId: 'ben', muted: true, deafened: true,
+      deps: {
+        openMic: async () => fakeStream('mik'),
+        createVoicePipeline: async () => hat,
+        createMesh: (opts) => new FakeMesh(opts),
+        playBeep: () => {},
+        getNoiseSuppressionPref: () => true,
+      },
+    })
+    expect(o.getState()).toMatchObject({ muted: true, deafened: true })
+    await o.join()
+    expect(hat.gate).toBe(false)
+    expect(FakeMesh.son.deafened).toBe(true)
+    o.setMuted(false)
+    o.setDeafened(false)
+    expect(hat.gate).toBe(true) // formül aynı: konuşma izni VE susturulmamış VE sağır değil
+    o.leave()
   })
 })

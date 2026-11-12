@@ -161,6 +161,8 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Mesaj linkleri varsayılan tarayıcıda açılır (src/ui/links.js); izin yalnız http/https adreslerine
+        .plugin(tauri_plugin_opener::init())
         .manage(PttState(filtre))
         .manage(HookStatus(Mutex::new(None)))
         .manage(BekleyenGuncelleme(Mutex::new(None)))

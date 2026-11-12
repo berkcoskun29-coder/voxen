@@ -17,3 +17,19 @@ it('üyeler Çevrimiçi/Çevrimdışı gruplanır, nokta rengi ve durum yazısı
   expect(panel.querySelector('.member-status-text').textContent).toBe('toplantıda')
   expect(panel.querySelector('b')).toBe(null) // HTML olarak yorumlanmadı
 })
+
+it('avatar harfi arka plana uygun renkte; çevrimdışında yalnız avatar soluk, satır değil', () => {
+  const panel = document.createElement('aside')
+  const members = [
+    { id: 'a', username: 'ayla', color: '#3be37a' }, // açık renk: koyu harf
+    { id: 'k', username: 'kerem', color: '#111111' }, // eski, koyu renk: beyaz harf
+  ]
+  renderMemberList(panel, { members, presence: new Map([['a', { status: 'online' }]]) })
+  const avatarlar = panel.querySelectorAll('.member-avatar')
+  expect(avatarlar[0].style.color).toBe('rgb(15, 26, 20)')
+  expect(avatarlar[1].style.color).toBe('rgb(255, 255, 255)')
+  const cevrimdisi = panel.querySelector('.member-row.offline')
+  expect(cevrimdisi.querySelector('.member-avatar').classList.contains('dim')).toBe(true)
+  expect(cevrimdisi.querySelector('.status-dot').classList.contains('dim')).toBe(false)
+  expect(panel.querySelector('.member-row:not(.offline) .member-avatar').classList.contains('dim')).toBe(false)
+})

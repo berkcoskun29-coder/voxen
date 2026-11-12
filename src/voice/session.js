@@ -16,8 +16,9 @@ import { ICE_SERVERS } from '../config.js'
 
 export const SELF_SPEAKING_POLL_MS = 100
 
+// muted / deafened: başlangıç durumu (kullanıcı çubuğundaki son seçim; kanalda değilken tercih olarak tutulur).
 // deps sadece testler içindir.
-export function createVoiceSession({ channelId, userId, deps = {} }) {
+export function createVoiceSession({ channelId, userId, muted = false, deafened = false, deps = {} }) {
   const d = {
     openMic,
     openCamera,
@@ -35,8 +36,8 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
     status: 'connecting', // 'connecting' | 'connected' | 'failed'
     micError: null, // Türkçe mikrofon hatası (varsa)
     listenOnly: false, // mikrofon yok: sadece dinliyoruz
-    muted: false, // Sustur
-    deafened: false, // Sağırlaştır
+    muted: !!muted, // Sustur
+    deafened: !!deafened, // Sağırlaştır
     camera: false, // kamera açık mı
     cameraError: null, // Türkçe kamera hatası (varsa)
     screen: false, // ekran paylaşımı açık mı
@@ -184,7 +185,7 @@ export function createVoiceSession({ channelId, userId, deps = {} }) {
       hat = null
       state.listenOnly = true
       state.muted = true
-      state.micError = MIC_MESSAGES[e?.code] ?? 'Mikrofon açılamadı'
+      state.micError = MIC_MESSAGES[e?.code] ?? 'Mikrofon açılamadı. Başka bir uygulama kullanıyor olabilir.'
     }
     kapiyiAyarla()
 

@@ -1,6 +1,7 @@
 // Mikrofon testi penceresi: canlı seviye çubuğu, 5 sn kayıt + dinleme, gürültü engelleme anahtarı.
 import { openMic, createVoicePipeline, MIC_MESSAGES } from '../voice/pipeline.js'
-import { getSettings, updateSettings } from '../settings.js'
+import { getSettings, updateSettings, onSettingsChange } from '../settings.js'
+import { createModalShell } from './modal.js'
 
 // Gürültü engelleme tercihi artık tek ayar nesnesinde (src/settings.js). Eski adlar uyumluluk için kaldı.
 export function getNoiseSuppressionPref() { return getSettings().noiseSuppression }
@@ -14,32 +15,42 @@ function el(tag, cls, text) {
 }
 
 export function openMicTest() {
-  const arka = el('div', 'modal-back')
-  const kart = el('div', 'card')
-  const baslik = el('h1', '', 'Mikrofon testi')
-  const hata = el('p', 'error')
+  // Çubuğun üstünde başlık + seçili mikrofonun adı (soluk)
+  const mikAdi = el('span', 'mic-name', 'Varsayılan mikrofon')
+  const mikSatiri = el('div', 'mic-row')
+  mikSatiri.append(el('span', 'mic-title', 'Konuş, çubuk dolsun'), mikAdi)
   const cubukDis = el('div', 'level-bar')
   const cubuk = el('div', 'level-fill')
   cubukDis.appendChild(cubuk)
 
   // Gürültü engelleme anahtarı
-  const satir = el('div', 'row')
+  const satir = el('div', 'check-row')
   const kutu = document.createElement('input')
   kutu.type = 'checkbox'; kutu.id = 'mic-ns'; kutu.checked = getNoiseSuppressionPref()
   const etiket = el('label', '', 'Gürültü engelleme')
   etiket.htmlFor = 'mic-ns'
   satir.append(kutu, etiket)
 
+  // Aynı ayar Ayarlar penceresinde de var: orada değişirse kutu ve canlı hat da değişsin
+  const ayarDinlemeyiBirak = onSettingsChange((yeni) => {
+    if (kutu.checked === yeni.noiseSuppression) return // değişiklik bu kutudan geldi
+    kutu.checked = yeni.noiseSuppression
+    hat?.setNoiseSuppression(yeni.noiseSuppression)
+  })
+
   const kayitBtn = el('button', '', '5 sn kaydet ve dinle')
   kayitBtn.type = 'button'
   const kayitlar = el('div', 'recordings') // arka arkaya kayıtlar burada birikir
-  const kapat = el('button', 'secondary', 'Kapat')
-  kapat.type = 'button'
-  const dugmeler = el('div', 'buttons')
-  dugmeler.appendChild(kapat)
-  kart.append(baslik, cubukDis, satir, kayitBtn, kayitlar, hata, dugmeler)
-  arka.appendChild(kart)
-  document.body.appendChild(arka)
+
+  // Ortak pencere kalıbı: sol altta "Kapat"; X, Esc ve arka plan da kapatır.
+  // Hangi yolla kapanırsa kapansın temizlik (mikrofonu kapatma vb.) onKapat'ta yapılır.
+  const kabuk = createModalShell({
+    baslik: 'Mikrofon testi',
+    ikincil: 'Kapat',
+    govde: [mikSatiri, cubukDis, satir, kayitBtn, el('p', 'mic-note', 'Kaydettiğin ses sana geri çalınır.'), kayitlar],
+    onKapat: () => temizle(),
+  })
+  const hata = kabuk.hata // hata satırı kalıbın içinde hazır
 
   let hat = null
   let raf = 0
@@ -50,15 +61,15 @@ export function openMicTest() {
 
   // Pencere kapanırken her şeyi temizle
   function temizle() {
+    if (kapandi) return
     kapandi = true
+    ayarDinlemeyiBirak()
     cancelAnimationFrame(raf)
     clearTimeout(kayitZamanlayici)
     if (kaydedici && kaydedici.state !== 'inactive') kaydedici.stop()
     hat?.close()
     urls.forEach((u) => URL.revokeObjectURL(u))
-    arka.remove()
   }
-  kapat.onclick = temizle
 
   // Seviye çubuğunu her karede güncelle
   function ciz() {
@@ -109,16 +120,18 @@ export function openMicTest() {
     try {
       const akis = await openMic()
       if (kapandi) { akis.getTracks().forEach((t) => t.stop()); return }
+      const ad = akis.getAudioTracks?.()[0]?.label
+      if (ad) { mikAdi.textContent = ad; mikAdi.title = ad }
       // Hat kurulumu başarısız olursa createVoicePipeline mikrofonu kendisi durdurur
       hat = await createVoicePipeline(akis, { noiseSuppression: kutu.checked })
       if (kapandi) { hat.close(); return }
       hat.setNoiseSuppression(kutu.checked) // kurulum sırasında anahtar değişmiş olabilir
       raf = requestAnimationFrame(ciz)
     } catch (e) {
-      hata.textContent = MIC_MESSAGES[e?.code] ?? 'Mikrofon açılamadı'
+      hata.textContent = MIC_MESSAGES[e?.code] ?? 'Mikrofon açılamadı. Başka bir uygulama kullanıyor olabilir.'
       kayitBtn.disabled = true
     }
   })()
 
-  return { close: temizle }
+  return { close: () => kabuk.kapat() }
 }

@@ -186,7 +186,7 @@ describe('mountChat', () => {
     kutu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
     await bosalt()
     expect(kutu.value).toBe('merhaba')
-    expect(document.querySelector('.toast').textContent).toBe('Mesaj gönderilemedi')
+    expect(document.querySelector('.toast').textContent).toBe('Mesaj gönderilemedi. Tekrar dene.')
   })
 
   it('2000den uzun metinde uyarı gösterilir, sayaç yalnız 1800den sonra', async () => {
@@ -253,6 +253,36 @@ describe('mountChat', () => {
     }
   })
 
+  it('görüntü bölmesi açılırken boyut değişiminden gelen kaydırma olayı yapışıklığı bozmaz (en üste kaçmaz)', async () => {
+    const gozlemciler = []
+    globalThis.ResizeObserver = class {
+      constructor(cb) { this.cb = cb; this.izlenen = []; gozlemciler.push(this) }
+      observe(e) { this.izlenen.push(e) }
+      disconnect() {}
+    }
+    try {
+      const chat = mountChat(document.getElementById('main'), { channel: { id: 'c1', name: 'genel' }, profile: ben })
+      await bosalt()
+      const liste = document.querySelector('.message-list')
+      const ro = gozlemciler.find((g) => g.izlenen.includes(liste))
+      Object.defineProperty(liste, 'scrollHeight', { configurable: true, value: 1000 })
+      Object.defineProperty(liste, 'clientHeight', { configurable: true, value: 300 })
+      ro.cb([]) // ilk ölçü
+      liste.scrollTop = 700 // en altta
+      liste.dispatchEvent(new Event('scroll'))
+      // Bölme açıldı: liste kısaldı ve tarayıcı yerleşim sırasında kaydırmayı oynattı (0'a attı),
+      // kaydırma olayı gözlemciden ÖNCE geldi. Bu kullanıcı kaydırması değil: yapışıklık sürmeli.
+      Object.defineProperty(liste, 'clientHeight', { configurable: true, value: 150 })
+      liste.scrollTop = 0
+      liste.dispatchEvent(new Event('scroll'))
+      ro.cb([])
+      expect(liste.scrollTop).toBe(1000)
+      chat.destroy()
+    } finally {
+      delete globalThis.ResizeObserver
+    }
+  })
+
   it('destroy aboneliği kapatır ve sonraki realtime mesajı yok sayılır', async () => {
     const chat = mountChat(document.getElementById('main'), { channel: { id: 'c1', name: 'genel' }, profile: ben })
     await bosalt()
@@ -298,3 +328,113 @@ describe('yeniden bağlanınca geri doldurma', () => {
     expect(icerik).toEqual(['x', 'x', 'kopukken', 'bu da'])
   })
 })
+
+describe('mesaj satırı: saat ve linkler (T09)', () => {
+  it('gruplanmış satırda avatar boşluğunda küçük saat var; başlıklı satırda yok', () => {
+    const g = renderMessage(ms(2, 'u1', 7), ben, { grouped: true })
+    const saat = g.querySelector('.msg-hover-time')
+    expect(saat.textContent).toMatch(/^\d{2}:\d{2}$/)
+    expect(g.firstElementChild).toBe(saat) // gövdeden önce, avatarın yerinde
+    expect(renderMessage(ms(1, 'u1', 0), ben).querySelector('.msg-hover-time')).toBeNull()
+  })
+  it('mesajdaki https adresi yeni sekmede açılan link olur', () => {
+    const el = renderMessage({ ...ms(1, 'u1', 0), content: 'bak https://a.com/x.' }, ben)
+    const a = el.querySelector('.msg-text a')
+    expect(a.getAttribute('href')).toBe('https://a.com/x')
+    expect(a.target).toBe('_blank')
+    expect(a.rel).toBe('noopener noreferrer')
+    expect(el.querySelector('.msg-text').textContent).toBe('bak https://a.com/x.')
+  })
+  it('javascript: ve data: link olmaz; HTML çalışmaz', () => {
+    const el = renderMessage({ ...ms(1, 'u1', 0), content: 'javascript:alert(1) data:text/html,<img src=x onerror=alert(1)>' }, ben)
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('img')).toBeNull()
+    expect(el.querySelector('.msg-text').textContent).toBe('javascript:alert(1) data:text/html,<img src=x onerror=alert(1)>')
+  })
+})
+
+describe('kanalın başlangıcı (T02)', () => {
+  const kur = () => mountChat(document.getElementById('main'), { channel: { id: 'c1', name: 'duyurular' }, profile: ben })
+
+  it('boş kanalda büyük # ve hoş geldin yazısı görünür', async () => {
+    kur()
+    await bosalt()
+    const blok = document.querySelector('.message-list > .channel-start')
+    expect(blok).not.toBeNull()
+    expect(blok.querySelector('h2').textContent).toBe('#duyurular kanalına hoş geldin!')
+    expect(blok.textContent).toContain('Bu kanalın başlangıcı. İlk mesajı sen yaz.')
+  })
+
+  it('yükleme bitmeden görünmez', async () => {
+    fake.msgGate = new Promise(() => {}) // hiç bitmeyen yükleme
+    kur()
+    await bosalt()
+    expect(document.querySelector('.channel-start')).toBeNull()
+  })
+
+  it('ilk mesaj gelince blok en tepede kalır', async () => {
+    kur()
+    await bosalt()
+    fake.handlers[0]({ new: ms(1, 'u2', 0, 'ilk!') })
+    await bosalt()
+    const liste = document.querySelector('.message-list')
+    expect(liste.firstElementChild.classList.contains('channel-start')).toBe(true)
+    expect(document.querySelectorAll('.message')).toHaveLength(1)
+  })
+
+  it('daha eski mesaj varken görünmez; en eski sayfa yüklenince en tepede çıkar', async () => {
+    fake.msgRows = Array.from({ length: 60 }, (_, i) => ms(i + 1, 'u1', i))
+    kur()
+    await bosalt()
+    expect(document.querySelector('.channel-start')).toBeNull()
+    const liste = document.querySelector('.message-list')
+    liste.scrollTop = 0
+    liste.dispatchEvent(new Event('scroll'))
+    await bosalt()
+    expect(document.querySelectorAll('.message')).toHaveLength(60)
+    expect(liste.firstElementChild.classList.contains('channel-start')).toBe(true)
+  })
+
+  it('eski sayfa tam 50 ile bitip sonraki boş gelirse de blok çıkar', async () => {
+    fake.msgRows = Array.from({ length: 50 }, (_, i) => ms(i + 1, 'u1', i))
+    kur()
+    await bosalt()
+    expect(document.querySelector('.channel-start')).toBeNull()
+    const liste = document.querySelector('.message-list')
+    liste.dispatchEvent(new Event('scroll'))
+    await bosalt()
+    expect(liste.firstElementChild.classList.contains('channel-start')).toBe(true)
+  })
+
+  it('kanal adı HTML olarak çalışmaz', async () => {
+    mountChat(document.getElementById('main'), { channel: { id: 'c1', name: '<img src=x onerror=alert(1)>' }, profile: ben })
+    await bosalt()
+    expect(document.querySelector('.channel-start img')).toBeNull()
+  })
+})
+
+describe('sohbet başlığı ek düğmeleri', () => {
+  it('headerActions başlığın sağına eklenir', async () => {
+    const d = document.createElement('button')
+    d.className = 'deneme'
+    mountChat(document.getElementById('main'), { channel: { id: 'c1', name: 'genel' }, profile: ben, headerActions: [d] })
+    await bosalt()
+    expect(document.querySelector('.main-header .header-actions .deneme')).toBe(d)
+  })
+})
+
+describe('U15: başlık yeri', () => {
+  it('headerHost verilirse başlık oraya konur, sohbet kutusunda olmaz; destroy kaldırır', async () => {
+    const ana = document.getElementById('main')
+    const ust = document.createElement('div')
+    document.body.appendChild(ust)
+    const s = mountChat(ana, { channel: { id: 'c1', name: 'genel' }, profile: ben, headerHost: ust })
+    await bosalt()
+    expect(ust.querySelector('.main-header .header-name').textContent).toBe('genel')
+    expect(ana.querySelector('.main-header')).toBeNull()
+    expect(ana.querySelector('.message-list')).not.toBeNull()
+    s.destroy()
+    expect(ust.querySelector('.main-header')).toBeNull()
+  })
+})
+

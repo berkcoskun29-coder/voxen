@@ -415,3 +415,32 @@ describe('kanal listesi: kamera/ekran simgeleri', () => {
     expect(ikinci.querySelector('svg')).toBeNull()
   })
 })
+
+describe('görüntü bölmesi: cömert boyut (U10)', () => {
+  it('büyük/küçük kutucuk ve bölme yüksekliği cömert değerlerde', async () => {
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync('src/styles/theme.css', 'utf8')
+    expect(css).toMatch(/\.video-stage \.video-tile \{ flex: 1 1 640px/)
+    expect(css).toMatch(/\.video-strip \.video-tile \{ flex: 0 1 280px/)
+    expect(css).toMatch(/\.video-pane-body \{[^}]*max-height: 55vh/)
+    expect(css).toMatch(/\.chat-host \{ flex: 1; min-height: 160px/)
+  })
+})
+
+describe('U10: tek kutu', () => {
+  it('tek kutu varken bölmede .tek sınıfı olur, ikincisi gelince kalkar', () => {
+    const kamera = iz()
+    kur([es({ camera: true, tracks: { camera: kamera } })])
+    expect(kap.querySelector('.video-pane').classList.contains('tek')).toBe(true)
+    esler = [es({ camera: true, tracks: { camera: kamera } }), es({ id: 'u3', camera: true, tracks: { camera: iz() } })]
+    bolme.update()
+    expect(kap.querySelector('.video-pane').classList.contains('tek')).toBe(false)
+  })
+
+  it('başlık --fs-sm boyunda, tek kutu CSS’i ~%70 genişlik verir', async () => {
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync('src/styles/theme.css', 'utf8')
+    expect(css).toMatch(/\.video-pane-toggle \{[^}]*font-size: var\(--fs-sm\)/)
+    expect(css).toMatch(/\.video-pane\.tek \.video-tile \{[^}]*70%/)
+  })
+})

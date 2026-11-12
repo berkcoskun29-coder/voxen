@@ -285,9 +285,9 @@ describe('ses paneli kamera düğmesi', () => {
     expect(onToggleCamera).toHaveBeenCalled()
   })
   it('bağlanırken (status connecting) kamera düğmesi kapalı (disabled); bağlanınca açık', () => {
-    expect(kamBtn(ciz(durum({ status: 'connecting' }))).disabled).toBe(true)
-    expect(kamBtn(ciz(durum({ status: 'connected' }))).disabled).toBe(false)
-    expect(kamBtn(ciz(durum({ status: 'failed' }))).disabled).toBe(false)
+    expect(kamBtn(ciz(durum({ status: 'connecting' }))).getAttribute('aria-disabled')).toBe('true')
+    expect(kamBtn(ciz(durum({ status: 'connected' }))).getAttribute('aria-disabled')).toBeNull()
+    expect(kamBtn(ciz(durum({ status: 'failed' }))).getAttribute('aria-disabled')).toBeNull()
   })
   it('kamera hatası panelde görünür', () => {
     const p = ciz(durum({ cameraError: 'Kamera izni verilmedi' }))

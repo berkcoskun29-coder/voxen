@@ -65,7 +65,7 @@ describe('davet linki', () => {
     fake.rpc.mockImplementation(async () => ({ data: null, error: { message: 'Geçersiz davet kodu' } }))
     location.hash = '#/davet/YANLIS'
     await startApp(document.querySelector('#app'), profil)
-    expect(document.body.textContent).toContain('Davet linki geçersiz')
+    expect(document.body.textContent).toContain('Bu davet bulunamadı. Linki yeniden kopyalayıp yapıştır.')
     expect(document.querySelector('.server-rail')).not.toBeNull()
   })
 
@@ -105,7 +105,7 @@ describe('kanallar', () => {
     expect(gruplar[0].textContent).not.toContain('Lobi')
     expect(gruplar[1].textContent).toContain('Lobi')
     expect(panel.textContent).toContain('+ kanal') // sahip olduğu için
-    expect(panel.textContent).toContain('Davet linkini kopyala')
+    expect(panel.textContent).toContain('Davet et')
   })
 
   it('sahip olmayana "+ kanal" gösterilmez', () => {

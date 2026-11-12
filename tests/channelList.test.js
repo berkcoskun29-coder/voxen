@@ -76,8 +76,51 @@ describe('sesli kanaldaki kişiler', () => {
     })
     const sesPaneli = panel.querySelector('.voice-panel')
     expect(sesPaneli.textContent).toContain('Lobi')
-    expect(sesPaneli.textContent).toContain('Bağlandı')
+    expect(sesPaneli.textContent).toContain('Ses bağlandı · Lobi')
     expect(sesPaneli.nextElementSibling.classList.contains('user-bar')).toBe(true)
     expect(ciz().querySelector('.voice-panel')).toBeNull()
+  })
+})
+
+describe('yeniden çizimde klavye odağı korunur', () => {
+  // Panel belgede olmalı ki odak alabilsin
+  function belgedeCiz(panel, ek = {}) {
+    renderChannelList(panel, {
+      server: { id: 's', name: 'S', owner_id: 'u1' },
+      channels: kanallar,
+      profile: profil,
+      selectedChannelId: 'a',
+      voiceMembers: new Map(),
+      handlers: {},
+      ...ek,
+    })
+  }
+  const ses = { channelName: 'Lobi', state: { status: 'connected', muted: false, deafened: false }, handlers: {} }
+
+  it('odaklı düğme (ses düğmesi, ayarlar, kanal) yeniden çizimden sonra yine odakta', () => {
+    const panel = document.createElement('aside')
+    document.body.appendChild(panel)
+    for (const secici of ['[data-ad="Sustur"]', '[aria-label="Ayarlar"]', '[data-ad="Sağırlaştır"]', '.channel-item:nth-child(1)', '.invite-btn']) {
+      belgedeCiz(panel, { voice: ses })
+      const eski = panel.querySelector(secici)
+      eski.focus()
+      expect(document.activeElement).toBe(eski)
+      belgedeCiz(panel, { voice: { ...ses, state: { ...ses.state, muted: true } } })
+      const yeni = panel.querySelector(secici)
+      expect(yeni).not.toBe(eski) // gerçekten yeni öğe
+      expect(document.activeElement).toBe(yeni)
+    }
+    panel.remove()
+  })
+
+  it('odak panelin dışındaysa yeniden çizim odağı çalmaz', () => {
+    const panel = document.createElement('aside')
+    const disari = document.createElement('input')
+    document.body.append(panel, disari)
+    belgedeCiz(panel, { voice: ses })
+    disari.focus()
+    belgedeCiz(panel, { voice: ses })
+    expect(document.activeElement).toBe(disari)
+    panel.remove(); disari.remove()
   })
 })

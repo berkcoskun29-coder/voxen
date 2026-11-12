@@ -25,6 +25,7 @@ vi.mock('../src/lib/supabase.js', () => {
       delete: () => { islem = 'delete'; return zincir },
       then: async (res) => {
         if (kapi) await kapi
+        if (tablo === 'servers' && fake.serversError) return res({ data: null, error: { message: 'Ağ hatası' } })
         if (tablo !== 'voice_states') return res({ data: satirlar, error: null })
         const uyar = (r) => Object.entries(filtre).every(([k, v]) => r[k] === v)
         if (islem === 'upsert') {
@@ -108,6 +109,9 @@ vi.mock('../src/voice/session.js', async (asil) => {
   }
 })
 
+// Profil penceresi: kaydet geri çağrısını yakala (karşılama kartındaki ad tazelensin mi testi)
+vi.mock('../src/auth/profileModal.js', () => ({ openProfileModal: vi.fn() }))
+
 // Çıkış: signOut çağrıldığı anda sesli durum silmesi gitmiş olmalı
 vi.mock('../src/auth/auth.js', async (asil) => ({
   ...(await asil()),
@@ -115,8 +119,11 @@ vi.mock('../src/auth/auth.js', async (asil) => ({
 }))
 
 import { startApp, stopApp, appTiming } from '../src/ui/app.js'
+import { supabase } from '../src/lib/supabase.js'
+import { openProfileModal } from '../src/auth/profileModal.js'
 import { presenceLimits, CLIENT_ID } from '../src/presence/presence.js'
 import { voiceStateTiming, resetVoiceStateWriter } from '../src/data/voiceStates.js'
+import { getSettings } from '../src/settings.js'
 
 // Bu dosya varlık gönderim sınırını denemiyor (o: tests/presenceRateLimit.test.js);
 // burada her değişikliğin hemen gönderildiğini görmek için sınırı kaldırıyoruz.
@@ -157,6 +164,7 @@ beforeEach(async () => {
   fake.voiceTopics = []
   fake.tracked = []
   fake.channelsGate = null
+  fake.serversError = false
   fake.vsOps = []
   fake.vsTopics = []
   fake.presenceState = undefined
@@ -234,7 +242,8 @@ describe('çevrimiçi dinleyici sızıntısı', () => {
 
 describe('sesli kanal', () => {
   const sesPaneli = () => document.querySelector('.voice-panel')
-  const dugme = (ad) => [...sesPaneli().querySelectorAll('button')].find((b) => b.textContent === ad)
+  // Sustur / Sağırlaştır kullanıcı çubuğunda, diğerleri ses panelinde
+  const dugme = (ad) => [...document.querySelectorAll('.voice-panel button, .user-bar button')].find((b) => b.dataset.ad === ad)
 
   it('sesli kanala tıklayınca katılır: ses paneli, voice:<id> sinyali ve voice_states satırı', async () => {
     await startApp(document.querySelector('#app'), profil)
@@ -423,7 +432,7 @@ describe('sesli kanaldayken başka sunucuya bakmak', () => {
     expect(kisiler()).toEqual([['berk', false], ['ali', true]]) // bölme boşalmadı
     expect(fake.vs).toBe(2) // seçili sunucu + sesli kanalımızın sunucusu dinleniyor
     // Ayrılınca yalnız seçili sunucu dinlenir
-    ;[...document.querySelector('.voice-panel').querySelectorAll('button')].find((b) => b.textContent === 'Ayrıl').click()
+    ;[...document.querySelector('.voice-panel').querySelectorAll('button')].find((b) => b.dataset.ad === 'Ayrıl').click()
     await bosalt()
     expect(fake.vs).toBe(1)
   })
@@ -512,7 +521,14 @@ describe('çıkış', () => {
     kanalaTikla('Lobi')
     await bosalt()
     fake.signOutAnindaOps = null
-    document.querySelector('.user-bar button[title="Çıkış"]').click()
+    // Çıkış artık kullanıcı çubuğunda değil, Ayarlar > Hesap'ta
+    expect(document.querySelector('.user-bar button[title="Çıkış"]')).toBeNull()
+    document.querySelector('.user-bar button[title="Ayarlar"]').click()
+    ;[...document.querySelectorAll('.modal-back button')].find((b) => b.textContent === 'Çıkış yap').click()
+    // Önce onay sorulur ("Çıkış yapılsın mı?"); onaydaki kırmızı düğme çıkışı başlatır
+    const onay = [...document.querySelectorAll('.modal-back')].at(-1) // en üstteki pencere
+    expect(onay.querySelector('h2').textContent).toBe('Çıkış yapılsın mı?')
+    ;[...onay.querySelectorAll('button')].find((b) => b.textContent === 'Çıkış yap').click()
     await bosalt()
     expect(fake.signOutAnindaOps).not.toBeNull()
     expect(fake.signOutAnindaOps.at(-1)).toBe('delete')
@@ -579,5 +595,221 @@ describe('aynı hesap iki pencerede', () => {
     fake.syncCb()
     await bosalt()
     expect(fake.vsOps).toEqual([])
+  })
+})
+
+describe('karşılama kartı (T01)', () => {
+  it('hiç sunucu yokken ana alanda selam ve iki düğme görünür', async () => {
+    fake.rows.servers = []
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const kart = document.querySelector('.chat-host .welcome-card')
+    expect(kart).not.toBeNull()
+    expect(kart.querySelector('h2').textContent).toBe("Voxen'e hoş geldin, berk!")
+    expect(document.querySelector('textarea')).toBeNull() // sohbet yok
+  })
+
+  it('"Sunucu oluştur" ve "Davetle katıl" mevcut pencereleri açar', async () => {
+    fake.rows.servers = []
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.welcome-create').click()
+    expect(document.querySelector('.modal-title').textContent).toBe('Sunucu oluştur')
+    document.querySelector('.modal-back').remove()
+    document.querySelector('.welcome-join').click()
+    expect(document.querySelector('.modal-title').textContent).toBe('Sunucuya katıl')
+  })
+
+  it('profil adı değişince karşılama kartındaki ad tazelenir', async () => {
+    fake.rows.servers = []
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    // Ayarlar > Profil: profil penceresi (sahte) açılır; kaydet geri çağrısını yeni adla çağır
+    document.querySelector('.user-bar button[title="Ayarlar"]').click()
+    ;[...document.querySelectorAll('.modal-back button')].find((b) => b.textContent === 'Profili düzenle').click()
+    const kaydet = openProfileModal.mock.calls.at(-1)[1]
+    kaydet({ ...profil, username: 'yeniad' })
+    expect(document.querySelector('.welcome-card h2').textContent).toBe("Voxen'e hoş geldin, yeniad!")
+  })
+
+  it('sunucular yüklenemezse karşılama kartı yerine hata ve "Yeniden dene" görünür', async () => {
+    fake.rows.servers = []
+    fake.serversError = true
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.welcome-card')).toBeNull()
+    expect(document.querySelector('.load-error')).not.toBeNull()
+    fake.serversError = false
+    document.querySelector('.load-error button').click()
+    await bosalt()
+    expect(document.querySelector('.load-error')).toBeNull()
+    expect(document.querySelector('.welcome-card')).not.toBeNull()
+  })
+
+  it('yeniden dene başarılı olunca sunucu varsa sohbet açılır', async () => {
+    fake.serversError = true
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.serversError = false
+    document.querySelector('.load-error button').click()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#genel kanalına mesaj yaz…')
+  })
+
+  it('adresteki davetle katılırken karşılama kartı yanıp sönmez; davet geçersizse sonra görünür', async () => {
+    fake.rows.servers = []
+    location.hash = '#/davet/KOD1'
+    let bitir
+    supabase.rpc.mockImplementationOnce(() => new Promise((r) => { bitir = r }))
+    const bitti = startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.welcome-card')).toBeNull() // katılma sürüyor
+    bitir({ data: null, error: { message: 'geçersiz' } })
+    await bitti
+    await bosalt()
+    expect(document.querySelector('.welcome-card')).not.toBeNull()
+  })
+
+  it('sunucu varken karşılama kartı yok', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.welcome-card')).toBeNull()
+  })
+})
+
+describe('Üyeler düğmesi sohbet başlığında (T12)', () => {
+  it('başlığın sağında; üye panelini açıp kapatır, kanal değişince de yerinde', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1400 })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const panel = document.querySelector('.member-panel')
+    let dugme = document.querySelector('.main-header .members-toggle')
+    expect(dugme).not.toBeNull()
+    expect(panel.hidden).toBe(false)
+    dugme.click()
+    expect(panel.hidden).toBe(true)
+    expect(dugme.getAttribute('aria-pressed')).toBe('false')
+    kanalaTikla('sohbet')
+    await bosalt()
+    dugme = document.querySelector('.main-header .members-toggle')
+    expect(dugme.getAttribute('aria-pressed')).toBe('false')
+    dugme.click()
+    expect(panel.hidden).toBe(false)
+  })
+})
+
+describe('tasarım turu 2: çubukta sustur/sağırlaştır, profil kartı, sunucusuz düzen', () => {
+  const cubukDugmesi = (ad) => [...document.querySelectorAll('.user-bar button')].find((b) => b.dataset.ad === ad)
+
+  it('kanalda değilken Sağırlaştır tercih olarak kaydedilir ve katılınca uygulanır (voice_states dahil)', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.voice-panel')).toBeNull()
+    cubukDugmesi('Sağırlaştır').click()
+    expect(getSettings().deafened).toBe(true)
+    expect(cubukDugmesi('Sağırlaştır').getAttribute('aria-pressed')).toBe('true')
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(fake.oturum.getState().deafened).toBe(true)
+    expect(sonYazma()).toEqual(['upsert', expect.objectContaining({ channel_id: 'v', deafened: true })])
+    // Kanaldayken basınca oturum değişir, tercih de güncellenir (tek durum)
+    cubukDugmesi('Sağırlaştır').click()
+    await bosalt()
+    expect(fake.oturum.getState().deafened).toBe(false)
+    expect(getSettings().deafened).toBe(false)
+    expect(sonYazma()[1].deafened).toBe(false)
+  })
+
+  it('kanalda değilken Sustur tercihi değişir; mikrofon testi çubukta yok', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.user-bar [aria-label="Mikrofon testi"]')).toBeNull()
+    cubukDugmesi('Sustur').click()
+    expect(getSettings().muted).toBe(true)
+    expect(cubukDugmesi('Sustur').dataset.tip).toBe('Mikrofonu aç')
+  })
+
+  it('sunucu yokken üye paneli ve şeritteki ayraç gizli, kanal panelinde yinelenen yazı yok', async () => {
+    fake.rows.servers = []
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.member-panel').classList.contains('sunucusuz')).toBe(true)
+    expect(document.querySelector('.rail-separator')).toBeNull()
+    expect(document.querySelector('.channel-panel').textContent).not.toContain('Henüz sunucun yok')
+    // Varlık değişince üye listesi yeniden çizilir: panel yine gizli kalmalı
+    fake.presenceState = { u1: [{ status: 'online', statusText: '', clientId: CLIENT_ID }] }
+    fake.syncCb()
+    await bosalt()
+    expect(document.querySelector('.member-panel').classList.contains('sunucusuz')).toBe(true)
+  })
+
+  it('sunucu varken üye paneli görünür', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.member-panel').classList.contains('sunucusuz')).toBe(false)
+  })
+
+  it('M10: sağırken Sustur sağırlığı da kaldırır (tercih ve simge)', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    cubukDugmesi('Sağırlaştır').click() // kanalda değil: tercih sağır olur
+    expect(getSettings().deafened).toBe(true)
+    cubukDugmesi('Sustur').click()
+    expect(getSettings().deafened).toBe(false)
+    expect(getSettings().muted).toBe(false)
+    expect(cubukDugmesi('Sağırlaştır').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('M2: çevrimdışı kişinin takılı kalmış ses satırı kartta "Sesli kanalda" göstermez', async () => {
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+    fake.rows.voice_states = [vsSatir('u2')]
+    fake.presenceState = { u1: [{ status: 'online', statusText: '', clientId: CLIENT_ID }] } // u2 çevrimdışı
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.syncCb?.()
+    await bosalt()
+    const av = [...document.querySelectorAll('.member-panel [data-profile-opener]')].find((e) => e.getAttribute('aria-label') === 'ali profilini göster')
+    av.click()
+    const kart = document.querySelector('.profile-card')
+    expect(kart.textContent).toContain('Çevrimdışı')
+    expect(kart.querySelector('.profile-card-voice')).toBeNull()
+  })
+
+  it('üye listesindeki avatara tıklayınca profil kartı açılır (durum ve sesli kanal)', async () => {
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+    fake.rows.voice_states = [vsSatir('u2')]
+    fake.presenceState = {
+      u1: [{ status: 'online', statusText: '', clientId: CLIENT_ID }],
+      u2: [{ status: 'idle', statusText: 'yemekte', clientId: 'c-u2' }],
+    }
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.syncCb?.()
+    await bosalt()
+    const av = [...document.querySelectorAll('.member-panel [data-profile-opener]')].find((e) => e.getAttribute('aria-label') === 'ali profilini göster')
+    av.click()
+    const kart = document.querySelector('.profile-card')
+    expect(kart.querySelector('.profile-card-name').textContent).toBe('ali')
+    expect(kart.textContent).toContain('Boşta')
+    expect(kart.textContent).toContain('yemekte')
+    expect(kart.querySelector('.profile-card-voice').textContent).toContain('Lobi')
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    expect(document.querySelector('.profile-card')).toBeNull()
+  })
+})
+
+describe('kendi profil kartı (tasarım 3)', () => {
+  it('çubuktaki avatara tıklayınca kendi kartı açılır; Rahatsız etmeyin tercihi yazılır, Profili düzenle pencereyi açar', async () => {
+    await startApp(document.querySelector('#app'), profil, { email: 'berk@ornek.com' })
+    await bosalt()
+    document.querySelector('.user-bar .avatar-wrap').click()
+    const kart = document.querySelector('.profile-card')
+    expect(kart.querySelector('.profile-card-edit')).not.toBeNull()
+    kart.querySelector('[data-durum=dnd]').click()
+    expect(JSON.parse(localStorage.getItem('voxen.presence')).dnd).toBe(true)
+    kart.querySelector('.profile-card-edit').click()
+    expect(openProfileModal).toHaveBeenCalled()
   })
 })

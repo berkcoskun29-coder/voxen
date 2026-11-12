@@ -232,6 +232,8 @@ export function mountVideoPane(container, { getPeers, onHide, onVolume }) {
     sirala(serit, kucuk.map((g) => kutular.get(g.anahtar).kutu))
     sahne.hidden = buyuk.length === 0
     serit.hidden = kucuk.length === 0
+    // Tek kutu varken ortada ve büyük durur (CSS .tek)
+    kok.classList.toggle('tek', gorunen.length === 1)
 
     // Kontroller: kamerası ya da ekranı açık her karşıdaki kişi (gizliyse de: geri açabilsin)
     const paylasanlar = kisiler.filter((k) => !k.self && (k.camera || k.screen))

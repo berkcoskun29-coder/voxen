@@ -1,0 +1,7 @@
+# Cloudflare Pages güvenlik başlıkları (npm run build bunları dist/ içine kopyalar)
+# CSP bilerek yok: Supabase (https + wss) ve WebRTC ile çakışma riski; temel başlıklar yeterli.
+# Mikrofon, kamera ve ekran paylaşımı yalnız bu site için açık.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: microphone=(self), camera=(self), display-capture=(self), geolocation=()

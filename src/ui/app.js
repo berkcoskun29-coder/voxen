@@ -4,27 +4,28 @@ import { openProfileModal } from '../auth/profileModal.js'
 import { createServer, inviteToCopy, joinByInvite, listMyServers } from '../data/servers.js'
 import { createChannel, listChannels } from '../data/channels.js'
 import { inviteFromHash, parseInviteInput, takePendingInvite } from './invite.js'
-import { mountLayout, openModal, toast } from './layout.js'
+import { mountLayout, openModal, toast, createMemberToggle } from './layout.js'
 import { renderRail } from './serverRail.js'
-import { renderChannelList, updateSpeakingRings, voiceMembersByChannel } from './channelList.js'
+import { renderChannelList, updateSpeakingRings, voiceMembersByChannel, renderKindPicker, kanalTuruSimgesi } from './channelList.js'
+import { formAlani } from './modal.js'
 import { createVoiceSession } from '../voice/session.js'
-import { openMicTest } from './micTest.js'
 import { openSettings, askPttKeyIfNeeded } from './settings.js'
 import { PttController, pttBeepName, connectDesktopPtt, pttHintText, PTT_HOOK_ERROR_TEXT } from '../voice/ptt.js'
 import { isTauri, loadTauriApi } from '../desktop.js'
 import { createUpdateBanner } from './updateBanner.js'
-import { getSettings, onSettingsChange } from '../settings.js'
+import { getSettings, updateSettings, onSettingsChange } from '../settings.js'
 import { playBeep } from '../voice/sounds.js'
-import { mountChat } from './chatView.js'
+import { mountChat, renderWelcome, renderLoadError } from './chatView.js'
 import { listMembers } from '../data/members.js'
 import { onPresenceChange, isClientOnline, onlineClientIds, startPresence, CLIENT_ID } from '../presence/presence.js'
 import {
   subscribeVoiceStates, upsertVoiceState, clearVoiceState, getMyVoiceState, deleteStaleVoiceState,
   reassertVoiceState, flushVoiceStates,
 } from '../data/voiceStates.js'
-import { getLocalPresencePrefs } from '../auth/profilePrefs.js'
+import { getLocalPresencePrefs, setLocalPresencePrefs } from '../auth/profilePrefs.js'
 import { renderMemberList } from './memberList.js'
 import { mountVideoPane, buildVideoPeers } from './videoPane.js'
+import { installProfileCards } from './profileCard.js'
 
 // Son seçilen sunucu/kanal tarayıcıda hatırlanır (sadece kolaylık için).
 function sonuOku() {
@@ -34,14 +35,12 @@ function sonuYaz(serverId, channelId) {
   try { localStorage.setItem('voxen.last', JSON.stringify({ serverId, channelId })) } catch { /* sorun değil */ }
 }
 
-// Etiket + yazı kutusu çifti (pencerelerde kullanılır)
+// Etiket + yazı kutusu + kutunun altındaki hata satırı (pencerelerde kullanılır; bkz. modal.js formAlani)
 function girdi(etiket, max) {
-  const l = document.createElement('label')
-  l.textContent = etiket
   const i = document.createElement('input')
   i.type = 'text'
   i.maxLength = max
-  return { etiket: l, input: i }
+  return formAlani(etiket, i)
 }
 
 let aktifDurdur = null // önceki uygulamanın varlığı tamamen durduran fonksiyonu (aynı anda en fazla bir tane)
@@ -61,16 +60,21 @@ const CIKIS_BEKLEME_MS = 3000
 // Üye listesini en sık bu aralıkla yeniden yükleriz (varlık her değiştiğinde sorgu atmamak için)
 const UYE_YENILEME_MS = 2000
 
-export async function startApp(root, profile) {
+export async function startApp(root, profile, { email = '' } = {}) {
   const { rail, channels: panel, main, members: uyePaneli } = mountLayout(root)
-  // Ana alan: üstte görüntü bölmesi (sesli kanaldayken), altında sohbet
+  // Ana alan: üstte kanal başlığı, altında görüntü bölmesi (sesli kanaldayken), en altta sohbet
+  const baslikAlani = document.createElement('div')
+  baslikAlani.className = 'header-host'
   const goruntuAlani = document.createElement('div')
   goruntuAlani.className = 'video-host'
   const sohbetAlani = document.createElement('div')
   sohbetAlani.className = 'chat-host'
-  main.append(goruntuAlani, sohbetAlani)
+  main.append(baslikAlani, goruntuAlani, sohbetAlani)
+  // Sohbet başlığının sağındaki "Üyeler" düğmesi: tek düğme, her kanal açılışında başlığa taşınır
+  const uyeDugmesi = createMemberToggle(uyePaneli)
   let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
   let uyeler = []
+  let cubukDurumu = '' // çubuktaki durum satırının son çizilen hâli (bkz. cubukDurumunuYenile)
   let varlikHaritasi = new Map() // kim çevrimiçi: userId -> { status, statusText }
 
   // Çevrimiçi durumu: giriş yapılınca başlar, Çıkış'ta durur. Tercihler tarayıcıda saklanır.
@@ -90,6 +94,7 @@ export async function startApp(root, profile) {
   const dusenZamanlayicilar = new Map() // düşen pencere clientId -> silme zamanlayıcısı
   const dinlemeyiBirak = onPresenceChange((harita) => {
     varlikHaritasi = harita
+    cubukDurumunuYenile()
     eskiSatiriTemizle()
     dusenPencereleriTemizle()
     odadakiEkraniBildir() // ekran paylaşan çevrimdışı olduysa kural kalkar
@@ -123,8 +128,14 @@ export async function startApp(root, profile) {
     },
   })
   let sonKameraCihazi = getSettings().cameraDeviceId
+  let sonAyarlar = getSettings()
   // Ayarlar değişince canlı oturuma uygula (mikrofon cihazı hariç: o sonraki katılışta geçerli)
   const ayarDinlemeyiBirak = onSettingsChange((s) => {
+    // Yalnız çubuktaki susturma tercihi değiştiyse oturuma yeniden uygulanacak bir şey yok
+    // (oturumun kendisi zaten değişti; bkz. susturmayiDegistir)
+    const yalnizSusturma = Object.keys(s).every((k) => k === 'muted' || k === 'deafened' || s[k] === sonAyarlar[k])
+    sonAyarlar = s
+    if (yalnizSusturma) return
     if (s.mode !== ptt.mode) ptt.setMode(s.mode)
     if (s.pttKey !== ptt.key) ptt.setKey(s.pttKey)
     ptt.setThreshold(s.vadThreshold)
@@ -146,26 +157,26 @@ export async function startApp(root, profile) {
       guncellemeBandi = createUpdateBanner({
         isInVoice: () => !!ses,
         onInstall: () => api.invoke('install_update'),
-        onError: (e) => toast(`Güncellenemedi: ${e?.message ?? e}`),
+        onError: (e) => toast(`Güncellenemedi: ${e?.message ?? e}`, 'hata'),
       })
       const birakanlar = [
         await api.listen('update-available', (o) => guncellemeBandi?.offer(o.payload)),
         await connectDesktopPtt(ptt, api, {
           onHookError: () => {
             if (durduruldu) return
-            if (!kancaHatasi) toast(PTT_HOOK_ERROR_TEXT)
+            if (!kancaHatasi) toast(PTT_HOOK_ERROR_TEXT, 'hata')
             kancaHatasi = true
             if (ses) cizKanalPaneli()
           },
         }),
-        await api.listen('tray-toggle-mute', () => ses?.toggleMute()),
+        await api.listen('tray-toggle-mute', () => susturmayiDegistir()), // çubuktaki Sustur ile aynı
       ]
       if (durduruldu) birakanlar.forEach((f) => f())
       else masaustuBirak = birakanlar
       // Olay web yüklenmeden önce gönderilmiş olabilir: bekleyen güncelleme var mı sor
       const bekleyen = await api.invoke('pending_update')
       if (bekleyen && !durduruldu) guncellemeBandi.offer(bekleyen)
-    }).catch((e) => toast(`Masaüstü bağlantısı kurulamadı: ${e?.message ?? e}`))
+    }).catch((e) => toast(`Masaüstü bağlantısı kurulamadı: ${e?.message ?? e}`, 'hata'))
   }
   // Ses panelindeki ipucu: bas-konuşta tuş yoksa kapı kapalı kalır
   function pttIpucu() {
@@ -173,6 +184,51 @@ export async function startApp(root, profile) {
     return pttHintText({ mode: s.mode, pttKey: s.pttKey, hookError: kancaHatasi })
   }
   function benimDurumum() { return varlikHaritasi.get(profile.id)?.status ?? 'online' }
+  // Kullanıcı çubuğundaki durum (ikinci satır, nokta) değişince yalnız kanal panelini yeniden çiz
+  function cubukDurumunuYenile() {
+    const yeni = benimDurumum() + '|' + (varlikHaritasi.get(profile.id)?.statusText ?? '')
+    if (yeni === cubukDurumu) return
+    const ilk = cubukDurumu === ''
+    cubukDurumu = yeni
+    if (!ilk && ilkCizimYapildi) cizKanalPaneli()
+  }
+
+  // ---- Sustur / Sağırlaştır (kullanıcı çubuğu ve tepsi menüsü) ----
+  // Tek durum: sesli kanaldaysak oturumun durumu (ses.getState()); değilsek kayıtlı tercih
+  // (getSettings().muted/deafened) ve bir sonraki katılışta oturum bu tercihle başlar.
+  // Kanaldayken de son seçim tercihe yazılır ki sonraki katılışta aynı kalsın.
+  function susturmayiDegistir() {
+    // Sağırken Sustur'a basmak sağırlığı da kaldırır (Discord gibi): simge boşuna çizili kalmasın
+    const simdi = ses ? ses.getState() : getSettings()
+    if (simdi.deafened && !simdi.listenOnly) {
+      if (ses) {
+        ses.setMuted(false)
+        ses.setDeafened(false)
+        updateSettings({ muted: false, deafened: false })
+      } else {
+        updateSettings({ muted: false, deafened: false })
+        cizKanalPaneli()
+      }
+      return
+    }
+    if (ses) {
+      if (ses.getState().listenOnly) return // mikrofon yok: hep susturulmuş, tercih bozulmasın
+      ses.toggleMute() // 'change' olayı: voice_states'e yazılır, panel yeniden çizilir
+      updateSettings({ muted: ses.getState().muted })
+    } else {
+      updateSettings({ muted: !getSettings().muted })
+      cizKanalPaneli()
+    }
+  }
+  function sagirlastirmayiDegistir() {
+    if (ses) {
+      ses.toggleDeafen()
+      updateSettings({ deafened: ses.getState().deafened })
+    } else {
+      updateSettings({ deafened: !getSettings().deafened })
+      cizKanalPaneli()
+    }
+  }
 
   // ---- Sesli kanal durumu (voice_states tablosu) ----
   // Seçili sunucunun ve (başka sunucuya bakıyorsak) sesli kanalımızın sunucusunun durumlarını dinleriz.
@@ -279,6 +335,7 @@ export async function startApp(root, profile) {
     for (const z of dusenZamanlayicilar.values()) clearTimeout(z)
     dusenZamanlayicilar.clear()
     window.removeEventListener('pagehide', sayfaKapaniyor)
+    profilKartlariniBirak()
     dinlemeyiBirak()
     ayarDinlemeyiBirak()
     ptt.dispose()
@@ -288,10 +345,50 @@ export async function startApp(root, profile) {
     masaustuBirak = []
     varlik.stop()
     clearTimeout(uyeZamanlayici)
+    uyeDugmesi.dispose()
     if (aktifDurdur === varligiDurdur) aktifDurdur = null
   }
   aktifDurdur = varligiDurdur
+
+  // Çıkış yap (Ayarlar > Hesap'taki kırmızı düğme). Sıra önemli:
+  // önce varlık ve ses durdurulur, sesli durum satırı silinir, EN SON oturum kapanır.
+  async function cikisYap() {
+    varligiDurdur()
+    // Önce sesli durum satırımız silinsin (oturum kapanınca silme yetkimiz kalmaz); ağ yoksa en fazla 3 sn
+    await Promise.race([flushVoiceStates(), new Promise((r) => setTimeout(r, CIKIS_BEKLEME_MS))])
+    signOut()
+  }
+  // (renderMemberList .sunucusuz sınıfını korur; sınıfı cizHepsi koyar/kaldırır. Burada sunucuId'ye
+  //  bakılmaz: bu fonksiyon varlık dinleyicisi kurulurken, sunucuId tanımlanmadan önce de çağrılır.)
   function cizUyeler() { renderMemberList(uyePaneli, { members: uyeler, presence: varlikHaritasi }) }
+
+  // ---- Profil kartı: avatara (üye listesi, sohbet, sesli kanaldakiler) tıklayınca ----
+  // Kartın bilgisi tıklama anında buradan okunur: durum, durum yazısı, sesli kanal.
+  function profilBilgisi(kisi) {
+    const v = varlikHaritasi.get(kisi.id)
+    const durum = kisi.id === profile.id ? benimDurumum() : (v?.status ?? 'offline')
+    // Sesli kanal: önce bakılan sunucu, sonra kendi sesli kanalımızın sunucusu
+    let kanalAdi = null
+    // Çevrimdışı kişinin eski (takılı kalmış) ses satırı kartta gösterilmez; kanal listesi de gizler
+    for (const sid of (durum === 'offline' ? [] : [sunucuId, ses ? sesSunucuId : null])) {
+      const kanal = sid ? sesHaritasi(sid).get(kisi.id)?.channelId : null
+      if (!kanal) continue
+      kanalAdi = kanal === ses?.channelId ? sesKanalAdi : (kanallar.find((k) => k.id === kanal)?.name ?? null)
+      if (kanalAdi) break
+    }
+    const bilgi = { status: durum, statusText: v?.statusText ?? '', voiceChannelName: kanalAdi }
+    if (kisi.id === profile.id) {
+      bilgi.statusText = getLocalPresencePrefs().statusText
+      // Kendi kartımız: durum seçimi profil penceresindekiyle AYNI yoldan gider
+      // (tercih yazılır, varlık yenilenir; gönderim sınırı presence.js'te kalır).
+      bilgi.own = {
+        onStatus: (dnd) => { setLocalPresencePrefs({ dnd }); varlik.refresh() },
+        onEdit: profilAc,
+      }
+    }
+    return bilgi
+  }
+  const profilKartlariniBirak = installProfileCards(root, profilBilgisi)
 
   // Canlı üye yenileme: varlıkta, seçili sunucunun üye listesinde OLMAYAN biri varsa üyeleri yeniden yükle.
   // (Varlık kanalı tüm sunucular için ortak; başka sunucudan kişiler de görünür. Bu yüzden
@@ -332,20 +429,45 @@ export async function startApp(root, profile) {
   let yaziliId = null // sohbeti açık olan yazılı kanal
   let sohbet = null // açık sohbet (destroy() ile kapatılır)
   let acikSohbetId = null
+  // Sunucu listesi durumu: 'yukleniyor' | 'hazir' | 'hata'. Karşılama kartı yalnız liste GERÇEKTEN
+  // boş geldiyse çıkar (yüklenemediyse "yeni kullanıcı" sanmayalım).
+  let sunucuDurumu = 'yukleniyor'
+  let davetIsleniyor = false // adresteki davetle katılırken kart bir anlığına yanıp sönmesin
+
+  // Sunucu listesini yükler; başarılıysa durum 'hazir' olur. Hata olursa fırlatır.
+  async function sunuculariYukle() {
+    servers = await listMyServers()
+    sunucuDurumu = 'hazir'
+  }
 
   // Ana alan: sohbet her zaman SON SEÇİLEN YAZILI kanalı gösterir (sesli kanala tıklamak onu değiştirmez).
   // Aynı kanal zaten açıksa yeniden kurmayız; değişince eski sohbetin aboneliği kapatılır.
+  // Hiç sunucu yoksa sohbet yerine karşılama kartı çizilir (acikSohbetId = 'karsilama');
+  // sunucular yüklenemediyse hata kutusu ve "Yeniden dene" (acikSohbetId = 'hata').
   function cizMain() {
     const kanal = kanallar.find((k) => k.id === yaziliId && k.kind === 'text')
-    if ((kanal?.id ?? null) === acikSohbetId) return
+    let anahtar = kanal?.id ?? null
+    if (sunucuDurumu === 'hata') anahtar = 'hata'
+    else if (sunucuDurumu === 'hazir' && servers.length === 0 && !davetIsleniyor) anahtar = 'karsilama'
+    if (anahtar === acikSohbetId) return
     sohbet?.destroy()
     sohbet = null
-    acikSohbetId = kanal?.id ?? null
+    acikSohbetId = anahtar
     sohbetAlani.innerHTML = ''
-    if (kanal) sohbet = mountChat(sohbetAlani, { channel: kanal, profile })
+    baslikAlani.innerHTML = ''
+    if (anahtar === 'karsilama') {
+      // Düğmeler şeritteki + ve zincir düğmeleriyle aynı pencereleri açar
+      sohbetAlani.appendChild(renderWelcome(profile, { onCreate: sunucuOlustur, onJoin: sunucuyaKatil }))
+    } else if (anahtar === 'hata') {
+      sohbetAlani.appendChild(renderLoadError('Sunucular yüklenemedi. Bağlantını kontrol edip yeniden dene.', yenidenDene))
+    } else if (kanal) {
+      sohbet = mountChat(sohbetAlani, { channel: kanal, profile, headerActions: [uyeDugmesi.button], headerHost: baslikAlani })
+    }
   }
 
   function cizHepsi() {
+    // Sunucu yokken (ya da henüz seçilmemişken) üye paneli boş kalırdı: gizle (CSS .sunucusuz)
+    uyePaneli.classList.toggle('sunucusuz', !sunucuId)
     renderRail(rail, servers, sunucuId, { onSelect: (id) => sunucuSec(id), onAdd: sunucuOlustur, onJoin: sunucuyaKatil })
     cizKanalPaneli()
     cizMain()
@@ -359,7 +481,9 @@ export async function startApp(root, profile) {
       channels: kanallar,
       profile,
       myStatus: benimDurumum(),
+      myStatusText: varlikHaritasi.get(profile.id)?.statusText ?? '',
       selectedChannelId: kanalId,
+      audio: getSettings(), // sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi
       voiceMembers: voiceMembersByChannel(uyeler, sesHaritasi(sunucuId), cevrimiciler()),
       speaking: ses?.getState().speaking ?? new Set(),
       voiceStates: sesHaritasi(sunucuId),
@@ -370,8 +494,6 @@ export async function startApp(root, profile) {
             state: ses.getState(),
             pttHint: pttIpucu(),
             handlers: {
-              onToggleMute: () => ses.toggleMute(),
-              onToggleDeafen: () => ses.toggleDeafen(),
               onToggleCamera: () => ses.toggleCamera(),
               onToggleScreen: () => ses.toggleScreenShare(),
               onLeave: () => sesliAyril(),
@@ -382,15 +504,10 @@ export async function startApp(root, profile) {
         onSelectChannel: kanalSec,
         onAddChannel: kanalEkle,
         onCopyInvite: () => davetKopyala(sunucu),
-        onMicTest: () => openMicTest(),
-        onSettings: () => openSettings({ ptt, onProfile: profilAc }),
+        onToggleMute: susturmayiDegistir,
+        onToggleDeafen: sagirlastirmayiDegistir,
+        onSettings: () => openSettings({ ptt, onProfile: profilAc, onSignOut: cikisYap, account: { profile, email } }),
         onProfile: profilAc,
-        onSignOut: async () => {
-          varligiDurdur()
-          // Önce sesli durum satırımız silinsin (oturum kapanınca silme yetkimiz kalmaz); ağ yoksa en fazla 3 sn
-          await Promise.race([flushVoiceStates(), new Promise((r) => setTimeout(r, CIKIS_BEKLEME_MS))])
-          signOut()
-        },
       },
     })
   }
@@ -405,7 +522,14 @@ export async function startApp(root, profile) {
 
   // Profil penceresi (ayarlar ekranındaki "Profil" düğmesinden de açılır)
   function profilAc() {
-    openProfileModal(profile, (yeni) => { profile = yeni; sohbet?.updateProfile(yeni); varlik.refresh(); cizHepsi(); cizUyeler() })
+    openProfileModal(profile, (yeni) => {
+      profile = yeni
+      sohbet?.updateProfile(yeni)
+      varlik.refresh()
+      if (acikSohbetId === 'karsilama') acikSohbetId = null // karşılama kartı yeni adla yeniden çizilsin
+      cizHepsi()
+      cizUyeler()
+    })
   }
 
   function kanalSec(id) {
@@ -434,13 +558,15 @@ export async function startApp(root, profile) {
       try { satir = await getMyVoiceState(profile.id) } catch { /* bakamadık: katılmayı engelleme */ }
       if (no !== katilmaNo || durduruldu) return // beklerken başka bir yere tıklandı ya da uygulama kapandı
       if (satir && satir.clientId !== CLIENT_ID && isClientOnline(profile.id, satir.clientId)) {
-        toast('Bu hesap başka bir pencerede sesli kanalda')
+        toast('Bu hesap başka bir pencerede sesli kanalda', 'hata')
         return
       }
       if (ses?.channelId === kanal.id) return
     }
     sesliAyril(false)
-    const oturum = createVoiceSession({ channelId: kanal.id, userId: profile.id })
+    // Çubukta kanal dışındayken seçilen Sustur/Sağırlaştır tercihiyle başla
+    const tercih = getSettings()
+    const oturum = createVoiceSession({ channelId: kanal.id, userId: profile.id, muted: tercih.muted, deafened: tercih.deafened })
     ses = oturum
     sesSunucuId = sunucuId
     sesUyeleri = uyeSunucusu === sunucuId ? uyeler : [] // üyeler henüz yüklenmediyse yüklenince gelir
@@ -485,7 +611,7 @@ export async function startApp(root, profile) {
     oturum.setOutputDevice(s.outputDeviceId)
     oturum.setTransmitting(ptt.isOpen())
     askPttKeyIfNeeded(ptt) // tuş hiç seçilmediyse ilk katılışta sor
-    oturum.join().catch((e) => toast(e.message))
+    oturum.join().catch((e) => toast(e.message, 'hata'))
     cizKanalPaneli() // ses paneli ve kanaldaki kendi satırımız
   }
 
@@ -509,7 +635,7 @@ export async function startApp(root, profile) {
     sunucuId = id
     sesAbonelikleriniAyarla() // bu sunucunun sesli kanallarında kim var
     let liste = []
-    try { liste = await listChannels(id) } catch (e) { toast(e.message) }
+    try { liste = await listChannels(id) } catch (e) { toast(e.message, 'hata') }
     if (sunucuId !== id) return // beklerken başka sunucu seçildi; bu sonuç eskidi
     kanallar = liste
     const yazili = kanallar.filter((k) => k.kind === 'text')
@@ -520,7 +646,7 @@ export async function startApp(root, profile) {
     cizHepsi()
     // Üye listesi (çevrimiçi/çevrimdışı gruplu)
     let uyeListesi = []
-    try { uyeListesi = await listMembers(id) } catch (e) { toast(e.message) }
+    try { uyeListesi = await listMembers(id) } catch (e) { toast(e.message, 'hata') }
     if (sunucuId !== id) return
     uyeler = uyeListesi
     uyeSunucusu = id
@@ -528,41 +654,47 @@ export async function startApp(root, profile) {
     cizUyeler()
   }
 
+  // Sunucuya/kanala yazılamadığında (ağ, yetki): Supabase'in İngilizce metni yerine çözüm söyleyen metin
+  const OLUSTURULAMADI = 'Oluşturulamadı. İnternetini kontrol edip tekrar dene.'
+
   function sunucuOlustur() {
     const f = girdi('Sunucu adı', 40)
-    openModal('Sunucu oluştur', [f.etiket, f.input], async () => {
+    // Hata kutuyla ilgiliyse { alan, metin } döner: metin kutunun altına yazılır (modal.js)
+    openModal('Sunucu oluştur', [f.etiket, f.input, f.hata], async () => {
       const ad = f.input.value.trim()
-      if (ad.length < 1 || ad.length > 40) return 'Sunucu adı 1-40 karakter olmalı'
+      if (ad.length < 1 || ad.length > 40) return { alan: f.input, metin: 'Sunucu adı boş olamaz. Bir ad yaz (en fazla 40 karakter).' }
       try {
         const id = await createServer(ad)
-        servers = await listMyServers()
+        await sunuculariYukle()
         await sunucuSec(id)
-      } catch (e) { return e.message }
+      } catch { return OLUSTURULAMADI }
       return null
     })
   }
 
+  // tur: hangi bölümün "+ kanal"ından açıldı ('text' | 'voice'); o türün kartı seçili gelir
   function kanalEkle(tur) {
     const f = girdi('Kanal adı', 30)
-    const etiket = document.createElement('label')
-    etiket.textContent = 'Tür'
-    const sec = document.createElement('select')
-    for (const [deger, yazi] of [['text', 'Yazılı'], ['voice', 'Sesli']]) {
-      const o = document.createElement('option')
-      o.value = deger
-      o.textContent = yazi
-      sec.appendChild(o)
-    }
-    sec.value = tur ?? 'text'
-    openModal('Kanal ekle', [f.etiket, f.input, etiket, sec], async () => {
+    // Kutunun başında seçili türün simgesi (# ya da hoparlör)
+    const onEk = document.createElement('span')
+    onEk.className = 'input-prefix'
+    onEk.setAttribute('aria-hidden', 'true')
+    const simgeyiCiz = (t) => onEk.replaceChildren(kanalTuruSimgesi(t))
+    const tursec = renderKindPicker(tur, simgeyiCiz)
+    simgeyiCiz(tursec.secili())
+    const sarma = document.createElement('div')
+    sarma.className = 'input-wrap has-prefix'
+    sarma.append(onEk, f.input)
+
+    openModal('Kanal ekle', [tursec.baslik, tursec.kutu, f.etiket, sarma, f.hata], async () => {
       const ad = f.input.value.trim()
-      if (ad.length < 1 || ad.length > 30) return 'Kanal adı 1-30 karakter olmalı'
+      if (ad.length < 1 || ad.length > 30) return { alan: f.input, metin: 'Kanal adı boş olamaz. Bir ad yaz (en fazla 30 karakter).' }
       try {
         const sonPozisyon = kanallar.reduce((m, k) => Math.max(m, k.position), -1) + 1
-        await createChannel(sunucuId, ad, sec.value, sonPozisyon)
+        await createChannel(sunucuId, ad, tursec.secili(), sonPozisyon)
         kanallar = await listChannels(sunucuId)
         cizHepsi()
-      } catch (e) { return e.message }
+      } catch { return OLUSTURULAMADI }
       return null
     })
   }
@@ -572,16 +704,19 @@ export async function startApp(root, profile) {
     const { text, message } = inviteToCopy(sunucu)
     try {
       await navigator.clipboard.writeText(text)
-      toast(message)
-    } catch { toast('Kopyalanamadı: ' + text) }
+      toast(message, 'basari')
+    } catch { toast('Kopyalanamadı: ' + text, 'hata') }
   }
 
   // Koda katılır, sunucu listesini yeniler ve o sunucuyu seçer. Hata olursa fırlatır.
   async function katilVeSec(kod) {
     const id = await joinByInvite(kod)
-    servers = await listMyServers()
+    await sunuculariYukle()
     await sunucuSec(id)
   }
+
+  // Davet bulunamadığında (geçersiz/bozuk link ya da kod) gösterilen metin: çözümü de söyler
+  const DAVET_BULUNAMADI = 'Bu davet bulunamadı. Linki yeniden kopyalayıp yapıştır.'
 
   // Davet koduyla katılır (adresten ya da giriş öncesinde saklanandan). Başarılıysa true.
   async function davetiIsle(kod) {
@@ -591,7 +726,7 @@ export async function startApp(root, profile) {
       adresiTemizle()
       return true
     } catch {
-      toast('Davet linki geçersiz')
+      toast(DAVET_BULUNAMADI, 'hata')
       adresiTemizle()
       return false
     }
@@ -600,20 +735,39 @@ export async function startApp(root, profile) {
   // "Sunucuya katıl" penceresi: link ya da kod yazılır; geçersizse istek atılmaz.
   function sunucuyaKatil() {
     const f = girdi('Davet linki veya kodu', 200)
-    openModal('Sunucuya katıl', [f.etiket, f.input], async () => {
+    openModal('Sunucuya katıl', [f.etiket, f.input, f.hata], async () => {
       const girilen = parseInviteInput(f.input.value)
-      if (!girilen) return 'Davet linki geçersiz'
-      try { await katilVeSec(girilen) } catch { return 'Davet linki geçersiz' }
+      const hata = { alan: f.input, metin: DAVET_BULUNAMADI } // hata kutunun altında, çözümüyle
+      if (!girilen) return hata
+      try { await katilVeSec(girilen) } catch { return hata }
       return null
     }, 'Katıl')
   }
 
+  // Son açılan (yoksa ilk) sunucuyu seçer
+  async function sonSunucuyuAc() {
+    const son = sonuOku()
+    const hedef = servers.find((s) => s.id === son.serverId) ?? servers[0]
+    if (hedef) await sunucuSec(hedef.id, son.channelId)
+  }
+
+  // Hata kutusundaki "Yeniden dene": listeyi tekrar ister; olursa her şey yeniden çizilir
+  async function yenidenDene() {
+    try { await sunuculariYukle() } catch (e) { toast(e.message, 'hata'); return }
+    cizHepsi()
+    await sonSunucuyuAc()
+  }
+
   // Başlangıç
   const kod = inviteFromHash() ?? takePendingInvite()
-  try { servers = await listMyServers() } catch (e) { toast(e.message) }
+  try { await sunuculariYukle() } catch (e) { sunucuDurumu = 'hata'; toast(e.message, 'hata') }
+  davetIsleniyor = !!kod
   cizHepsi()
-  if (kod && (await davetiIsle(kod))) return
-  const son = sonuOku()
-  const hedef = servers.find((s) => s.id === son.serverId) ?? servers[0]
-  if (hedef) await sunucuSec(hedef.id, son.channelId)
+  if (kod) {
+    const katildi = await davetiIsle(kod)
+    davetIsleniyor = false
+    if (katildi) return
+    cizMain() // davet geçersizdi: gerekirse karşılama kartı şimdi çıksın
+  }
+  await sonSunucuyuAc()
 }

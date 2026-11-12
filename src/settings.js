@@ -19,6 +19,10 @@ export const DEFAULTS = {
   outputDeviceId: null,
   cameraDeviceId: null, // kamera cihazı; null = varsayılan
   screenMode: 'net', // ekran paylaşımı kalitesi: 'net' (1080p/30) | 'akici' (720p/60)
+  // Kullanıcı çubuğundaki Sustur / Sağırlaştır'ın son seçimi: sesli kanalda değilken tercih olarak
+  // tutulur, bir sonraki katılışta oturuma uygulanır (bkz. src/ui/app.js)
+  muted: false,
+  deafened: false,
 }
 
 let bellek = null // depolama kapalıysa ayarlar en azından bu oturum boyunca bellekte kalır
@@ -43,6 +47,8 @@ function temizle(ham) {
   s.outputDeviceId = s.outputDeviceId || null
   s.cameraDeviceId = s.cameraDeviceId || null
   s.screenMode = s.screenMode === 'akici' ? 'akici' : 'net'
+  s.muted = s.muted === true // yalnız gerçek true; bozuk değer kapalı sayılır
+  s.deafened = s.deafened === true
   return s
 }
 
