@@ -1,0 +1,225 @@
+/* Tema "A · Gece": tüm renkler burada, değiştirmek için tek yer. */
+:root {
+  --bg: #16181d;            /* sayfa arka planı */
+  --server-rail: #0f1013;   /* sol sunucu şeridi */
+  --channel-panel: #1b1e24; /* kanal paneli */
+  --selected: #2a2f3a;      /* seçili kanal */
+  --input: #22262e;         /* yazı kutusu */
+  --text: #d8dbe2;          /* yazı rengi */
+  --accent: #3be37a;        /* vurgu rengi (logodaki yeşil) */
+  --accent-strong: #1fa35a; /* koyu yeşil: üzerine gelince / seçili göstergeler */
+  --on-accent: #0f1a14;     /* yeşil zemin üstündeki yazı (koyu: okunaklı, AA) */
+  --speaking: #3be37a;      /* konuşan kişinin halkası */
+  --danger: #ef5b5b;
+  --muted: #8d93a1;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+input, button { font: inherit; }
+
+input[type='text'], input[type='email'], input[type='password'] {
+  width: 100%;
+  padding: 10px 12px;
+  margin: 4px 0 12px;
+  background: var(--input);
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+input:focus { outline: none; border-color: var(--accent); }
+
+button {
+  padding: 10px 16px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button.secondary { background: var(--selected); color: var(--text); }
+button:disabled { opacity: 0.6; cursor: default; }
+
+.card {
+  max-width: 380px;
+  margin: 10vh auto 0;
+  padding: 28px;
+  background: var(--channel-panel);
+  border-radius: 10px;
+}
+.card h1 { margin-top: 0; }
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.tabs button { flex: 1; background: var(--selected); color: var(--text); }
+.tabs button.active { background: var(--accent); color: var(--on-accent); }
+.error { color: var(--danger); min-height: 1.2em; margin: 0 0 8px; }
+.card label { font-size: 0.9em; color: var(--muted); }
+
+/* Renk seçici: küçük yuvarlak düğmeler */
+.swatches { display: flex; gap: 8px; margin: 6px 0 14px; flex-wrap: wrap; }
+.swatch { width: 28px; height: 28px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+.swatch.selected { border-color: #fff; }
+
+/* Profil penceresi */
+.modal-back {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-back .card { margin: 0; width: 100%; max-height: 90vh; overflow: auto; }
+.avatar { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; display: block; margin-bottom: 8px; }
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.row input { width: auto; margin: 0; }
+.buttons { display: flex; gap: 8px; justify-content: flex-end; }
+.home { max-width: 480px; margin: 10vh auto; text-align: center; }
+.home button { margin: 4px; }
+
+/* Ana düzen: şerit 72px | kanal paneli 240px | ana alan esnek */
+#app:has(.server-rail) { display: flex; height: 100vh; }
+.server-rail {
+  width: 72px; flex: none; background: var(--server-rail);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 12px 0; overflow-y: auto;
+}
+.server-icon {
+  position: relative; width: 48px; height: 48px; padding: 0; border-radius: 50%;
+  background: var(--selected); color: var(--text); font-weight: 600; font-size: 1.1em;
+}
+.server-icon:hover, .server-icon.selected { border-radius: 16px; background: var(--accent-strong); color: var(--on-accent); }
+/* Seçili sunucunun solunda vurgu çubuğu */
+.server-icon.selected::before {
+  content: ''; position: absolute; left: -12px; top: 12px; width: 4px; height: 24px;
+  background: var(--accent-strong); border-radius: 0 4px 4px 0;
+}
+.server-icon.add { color: var(--speaking); }
+.channel-panel {
+  width: 240px; flex: none; background: var(--channel-panel);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.panel-top { padding: 14px 12px; border-bottom: 1px solid var(--server-rail); }
+.panel-top h2 { margin: 0 0 8px; font-size: 1.05em; overflow-wrap: anywhere; }
+.invite-btn { width: 100%; padding: 6px 10px; font-size: 0.85em; }
+.muted { color: var(--muted); font-size: 0.9em; margin: 0; }
+.channel-scroll { flex: 1; overflow-y: auto; padding: 8px; }
+.section-head { display: flex; justify-content: space-between; align-items: center; margin: 12px 4px 4px; }
+.section-title { font-size: 0.75em; text-transform: uppercase; color: var(--muted); letter-spacing: 0.04em; }
+.link-btn { background: none; color: var(--muted); padding: 2px 4px; font-size: 0.8em; }
+.link-btn:hover { color: var(--text); }
+.channel-item {
+  display: block; width: 100%; text-align: left; padding: 6px 10px;
+  background: none; color: var(--muted); border-radius: 4px;
+}
+.channel-item:hover, .channel-item.selected { background: var(--selected); color: var(--text); }
+.user-bar { display: flex; align-items: center; gap: 8px; padding: 10px; background: var(--server-rail); }
+.user-avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex: none; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600;
+}
+.user-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn { background: none; color: var(--muted); padding: 4px 6px; font-size: 0.85em; }
+.icon-btn:hover { color: var(--text); }
+.main-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.main-header { padding: 14px 16px; font-weight: 600; border-bottom: 1px solid var(--server-rail); }
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--selected); color: var(--text); padding: 10px 16px; border-radius: 6px;
+}
+.modal-back select {
+  width: 100%; padding: 10px; margin: 4px 0 12px;
+  background: var(--input); color: var(--text); border: 0; border-radius: 6px;
+}
+
+/* Sohbet */
+.message-list { flex: 1; overflow-y: auto; padding: 8px 16px; }
+.message { display: flex; gap: 12px; padding: 2px 0; }
+.message:not(.grouped) { margin-top: 12px; }
+.message.grouped .msg-body { margin-left: 44px; }
+.msg-avatar { width: 32px; height: 32px; border-radius: 50%; flex: none; object-fit: cover; display: flex; align-items: center; justify-content: center; font-weight: 600; color: #fff; }
+.msg-body { min-width: 0; }
+.msg-author { font-weight: 600; margin-right: 8px; }
+.msg-time { color: var(--muted); font-size: 12px; }
+.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.day-separator { display: flex; align-items: center; gap: 12px; margin: 16px 0 4px; color: var(--muted); font-size: 12px; }
+.day-separator::before, .day-separator::after { content: ''; flex: 1; border-top: 1px solid var(--selected); }
+.composer { padding: 0 16px 16px; }
+.composer textarea { width: 100%; resize: none; padding: 10px 12px; background: var(--input); color: var(--text); border: 0; border-radius: 8px; font: inherit; }
+.composer-warning { min-height: 1.2em; font-size: 12px; color: var(--muted); text-align: right; }
+.composer-warning.over { color: var(--danger); }
+
+/* Çevrimiçi durumu: renkli noktalar ve üye paneli */
+.status-dot {
+  position: absolute; right: -2px; bottom: -2px; width: 11px; height: 11px;
+  border-radius: 50%; border: 2px solid var(--channel-panel);
+}
+.avatar-wrap { position: relative; display: inline-flex; flex: none; }
+.user-bar .status-dot { border-color: var(--server-rail); }
+.member-panel {
+  width: 240px; flex: none; background: var(--channel-panel);
+  padding: 12px 8px; overflow-y: auto; min-height: 0;
+}
+.member-group-title { margin: 12px 8px 6px; }
+.member-row { display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 4px; }
+.member-row:hover { background: var(--selected); }
+.member-row.offline { opacity: 0.5; }
+.member-avatar {
+  width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600;
+}
+.member-text { min-width: 0; }
+.member-name, .member-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-status-text { font-size: 0.8em; color: var(--muted); }
+
+/* Mikrofon testi */
+.level-bar { height: 12px; background: var(--input); border-radius: 6px; overflow: hidden; margin: 12px 0; }
+.level-fill { height: 100%; width: 0; background: var(--speaking); }
+.recording { margin: 8px 0; }
+.recording audio { display: block; width: 100%; margin-top: 4px; }
+
+/* Sesli kanallar: kanalın altındaki kişiler ve konuşan halkası */
+.voice-members { padding: 0 0 4px 24px; }
+.voice-member { display: flex; align-items: center; gap: 8px; padding: 3px 6px; color: var(--muted); font-size: 0.9em; }
+.voice-avatar {
+  width: 22px; height: 22px; border-radius: 50%; flex: none; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; color: #fff; font-size: 0.75em; font-weight: 600;
+  box-shadow: 0 0 0 2px transparent; transition: box-shadow 0.1s;
+}
+.voice-avatar.speaking { box-shadow: 0 0 0 2px var(--speaking); } /* #3be37a */
+.voice-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Alttaki ses paneli (kullanıcı çubuğunun üstünde) */
+.voice-panel { padding: 8px 10px; background: var(--server-rail); border-bottom: 1px solid var(--channel-panel); }
+.voice-status { font-size: 0.85em; font-weight: 600; color: var(--muted); }
+.voice-status.connected { color: var(--speaking); }
+.voice-status.failed { color: var(--danger); }
+.voice-channel-name { font-size: 0.8em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-error { font-size: 0.8em; color: var(--danger); margin-top: 2px; }
+.voice-buttons { display: flex; gap: 4px; margin-top: 6px; }
+.voice-btn { flex: 1; padding: 5px 4px; font-size: 0.75em; background: var(--selected); color: var(--text); }
+.voice-btn.active { background: var(--danger); color: #fff; }
+.voice-btn.leave { background: none; color: var(--danger); }
+.voice-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* hidden özniteliği .row gibi display veren sınıflara karşı da çalışsın */
+[hidden] { display: none !important; }
+
+/* Susturma / sağırlaştırma simgeleri */
+.icon { flex: none; vertical-align: middle; }
+.voice-btn .icon { margin-right: 4px; }
+.voice-member .icon { margin-left: auto; }
+
+/* Giriş ekranı başlığı: küçük logo + Voxen */
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand img { width: 32px; height: 32px; border-radius: 8px; }
+
+/* Güncelleme bandı (masaüstü) */
+.update-banner {
+  position: fixed; top: 12px; right: 12px; z-index: 50;
+  background: var(--selected); color: var(--text); padding: 8px 12px; border-radius: 6px;
+  display: flex; align-items: center; gap: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.4);
+}
