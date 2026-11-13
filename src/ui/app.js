@@ -796,7 +796,10 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (dm === dmPaneli) return
     dmPaneli = dm
     if (dm) uyePaneli.hidden = false
-    else uyeDugmesi.refresh()
+    else {
+      uyeDugmesi.refresh()
+      cizUyeler() // DM profil kartı kalmasın: panel üye listesiyle (ya da boş) yeniden çizilir
+    }
   }
 
   // ---- Ana sayfa: Arkadaşlar sayfası ve DM'ler ----

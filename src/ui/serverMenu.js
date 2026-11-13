@@ -28,6 +28,18 @@ export function menuPosition(r, boyut, pencere, yan = 'alt') {
 }
 
 let acik = null // { menu, acan, birak } açık menü (en fazla bir tane)
+const kapanisIsleri = [] // menü kapanınca bir kez çalışacak işler (ertelenmiş çizimler için)
+
+// Menü kapanınca fn bir kez çalışır (çağıran önce herhangiMenuAcikMi() ile menünün açık olduğunu görür).
+export function menuKapaninca(fn) {
+  kapanisIsleri.push(fn)
+}
+
+function kapanisIsleriniCalistir() {
+  for (const fn of kapanisIsleri.splice(0)) {
+    try { fn() } catch (e) { console.error(e) } // biri patlarsa diğerleri yine çalışır
+  }
+}
 
 // Açık menüyü kapatır. returnFocus: odak açan düğmeye dönsün mü (Esc ve seçimde evet; dışarı tıklamada hayır).
 export function closeMenu({ returnFocus = false } = {}) {
@@ -37,7 +49,7 @@ export function closeMenu({ returnFocus = false } = {}) {
   birak()
   menu.remove()
   acan?.setAttribute?.('aria-expanded', 'false')
-  if (!returnFocus) return
+  if (!returnFocus) { kapanisIsleriniCalistir(); return }
   // Açan düğme bu arada yeniden çizildiyse (kanal paneli) aynı odak anahtarlı yeni düğmeye dön
   let donulecek = acan
   const anahtar = acan?.dataset?.odak
@@ -45,11 +57,17 @@ export function closeMenu({ returnFocus = false } = {}) {
     donulecek = [...document.querySelectorAll('[data-odak]')].find((e) => e.dataset.odak === anahtar)
   }
   if (donulecek?.isConnected) donulecek.focus()
+  kapanisIsleriniCalistir()
 }
 
 // Bu düğmenin menüsü şu an açık mı? (ikinci tıklama menüyü kapatsın diye)
 export function menuAcikMi(opener) {
   return acik?.acan === opener
+}
+
+// Herhangi bir menü şu an açık mı?
+export function herhangiMenuAcikMi() {
+  return !!acik
 }
 
 // opener: menüyü açan düğme; etiket: ekran okuyucu için menü adı

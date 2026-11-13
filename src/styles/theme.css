@@ -14,6 +14,8 @@
   --speaking: #3be37a;      /* konuşan kişinin halkası */
   --link: #2dd4bf;          /* mesajdaki linkler (yeşil-mavi) */
   --danger: #ef5b5b;
+  --warn: #e3c34a;          /* uyarı notu yazısı (soluk sarı) */
+  --warn-bg: rgba(227, 195, 74, 0.1); /* uyarı notunun hafif sarı zemini */
   --muted: #8d93a1;
   --mention-tag-bg: rgba(59, 227, 122, 0.16);   /* @ad etiketinin yeşil zemini */
   --mention-tag-hover: rgba(59, 227, 122, 0.3); /* etiketin üzerine gelince */
@@ -271,6 +273,8 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .field input[type='range'] { width: 100%; }
 .hint { margin: var(--sp-1) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* Bas-konuş tuşu: tuş rozeti + Değiştir */
+.key-warning { margin: var(--sp-2) 0 0; padding: var(--sp-2) var(--sp-3); font-size: var(--fs-xs); color: var(--warn); background: var(--warn-bg); border-radius: 6px; }
+.key-warning[hidden] { display: none; }
 .key-row { display: flex; align-items: center; gap: var(--sp-2); }
 .key-chip { /* klavye tuşu görünümü (<kbd>): alt kenarı kalın, basılabilir düğmeden ayrı durur */
   font: inherit; font-size: var(--fs-sm); font-weight: 700; min-width: 28px; text-align: center;

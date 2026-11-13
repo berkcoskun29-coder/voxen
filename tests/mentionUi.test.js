@@ -124,7 +124,7 @@ describe('öneri listesi (klavye)', () => {
     kutu.setSelectionRange(2, 2)
     kutu.dispatchEvent(new Event('input', { bubbles: true }))
     expect(tus(kutu, 'Tab').defaultPrevented).toBe(true)
-    expect(kutu.value).toBe('@ali  sonra')
+    expect(kutu.value).toBe('@ali sonra')
   })
 
   it('Esc kapatır ve olay yukarı (ör. açık pencereye) gitmez', () => {
@@ -280,5 +280,65 @@ describe('sohbette @bahsetme', () => {
     expect(alan.querySelector('.mention')).toBeNull()
     expect(alan.querySelector('.message.mentioned')).toBeNull()
     s.destroy()
+  })
+})
+
+describe('öneri listesi: imleç taşınınca yeniden değerlendirme', () => {
+  const kur = () => {
+    const kutu = document.createElement('textarea')
+    document.body.appendChild(kutu)
+    const oneri = mountMentionSuggest(kutu, { getMembers: () => uyeler, selfId: 'u1' })
+    document.body.appendChild(oneri.el)
+    return { kutu, oneri }
+  }
+  const keyup = (kutu, key) => kutu.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }))
+  const imlec = (kutu, n) => kutu.setSelectionRange(n, n)
+  const sec = (oneri, ad) => [...oneri.el.querySelectorAll('.mention-option')].find((li) => li.querySelector('.mention-option-name').textContent === ad).click()
+
+  it('ok tuşları, Home ve End ile imleç taşınınca liste kapanır / açılır', () => {
+    const { kutu, oneri } = kur()
+    yaz(kutu, 'selam @al')
+    expect(oneri.isOpen()).toBe(true)
+    imlec(kutu, 5) // "selam" sonu, @'ten önce
+    keyup(kutu, 'ArrowLeft')
+    expect(oneri.isOpen()).toBe(false)
+    imlec(kutu, 9)
+    keyup(kutu, 'ArrowRight')
+    expect(oneri.isOpen()).toBe(true)
+    imlec(kutu, 0)
+    keyup(kutu, 'Home')
+    expect(oneri.isOpen()).toBe(false)
+    imlec(kutu, 9)
+    keyup(kutu, 'End')
+    expect(oneri.isOpen()).toBe(true)
+  })
+
+  it('fareyle (click) imleç taşınınca da güncellenir', () => {
+    const { kutu, oneri } = kur()
+    yaz(kutu, 'selam @al')
+    imlec(kutu, 2)
+    kutu.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(oneri.isOpen()).toBe(false)
+  })
+
+  it('kelime ortasında seçince imleçten sonraki harfler de değişir (@Alper olur, @Alper li değil)', () => {
+    const { kutu, oneri } = kur()
+    kutu.value = '@ali'
+    imlec(kutu, 3) // @al|i -> sorgu "al"
+    kutu.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(adlar(oneri.el)).toContain('Alper')
+    sec(oneri, 'Alper')
+    expect(kutu.value).toBe('@Alper ')
+    expect(kutu.selectionStart).toBe(7)
+  })
+
+  it('imleçten sonraki noktalama ve sonraki kelime korunur', () => {
+    const { kutu, oneri } = kur()
+    kutu.value = '@ali, selam'
+    imlec(kutu, 3)
+    kutu.dispatchEvent(new Event('input', { bubbles: true }))
+    sec(oneri, 'ali')
+    expect(kutu.value).toBe('@ali, selam')
+    expect(kutu.selectionStart).toBe(4)
   })
 })

@@ -13,7 +13,7 @@ import { avatarWithDot } from './memberList.js'
 import { STATUS_LABELS } from './profileCard.js'
 import { makeProfileOpener } from './profileOpener.js'
 import { sayiYazisi } from './unread.js'
-import { openMenu, closeMenu, menuAcikMi } from './serverMenu.js'
+import { openMenu, closeMenu, menuAcikMi, herhangiMenuAcikMi, menuKapaninca } from './serverMenu.js'
 import { createModalShell } from './modal.js'
 import { usersIcon, messageIcon, moreIcon, checkIcon, closeIcon } from './icons.js'
 
@@ -170,6 +170,13 @@ function onayPenceresi(baslik, metin, yazi, is) {
     },
     tehlikeli: true,
   })
+}
+
+// Fare düğmesi şu an basılı mı? (ertelenmiş çizim, tıklamanın ortasında düğmeyi değiştirmesin)
+let fareBasili = false
+if (typeof document !== 'undefined') {
+  document.addEventListener('mousedown', () => { fareBasili = true }, true)
+  document.addEventListener('mouseup', () => { fareBasili = false }, true)
 }
 
 // Sayfa bir kez kurulur (yazılan kullanıcı adı ve seçili sekme kaybolmasın); veri gelince update() çağrılır.
@@ -439,8 +446,31 @@ export function createFriendsPage({ handlers = {} } = {}) {
   function update(yeni) {
     durum = { ...durum, ...yeni }
     sekmeleriIsaretle()
-    if (sekme !== 'add') listeyiCiz()
+    if (sekme === 'add') return
+    // Açık bir ⋯ menüsü varken liste baştan çizilirse menünün düğmesi ve odak kaybolur:
+    // çizimi menü kapanana kadar ertele (veri durumda güncel; kapanınca son haliyle çizilir)
+    if (herhangiMenuAcikMi()) {
+      if (!cizimBekliyor) {
+        cizimBekliyor = true
+        // Kapanış, tıklamanın ortasında olabilir (dışarı basış, başka menü açma): fare basılıysa tıklama
+        // bitince, değilse olay bitince çizilir; o arada başka menü açıldıysa yine ertelenir
+        menuKapaninca(() => {
+          let yapildi = false
+          const ciz = () => {
+            if (yapildi) return
+            yapildi = true
+            document.removeEventListener('mouseup', ciz)
+            document.removeEventListener('click', ciz, true)
+            setTimeout(() => { cizimBekliyor = false; if (sekme !== 'add') update({}) }, 0)
+          }
+          if (fareBasili) { document.addEventListener('mouseup', ciz); document.addEventListener('click', ciz, true) } else ciz()
+        })
+      }
+      return
+    }
+    listeyiCiz()
   }
+  let cizimBekliyor = false
 
   showTab('online')
   return { header, body, update, showTab, tab: () => sekme }

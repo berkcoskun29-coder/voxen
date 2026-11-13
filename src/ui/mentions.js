@@ -121,8 +121,11 @@ export function mountMentionSuggest(kutu, { getMembers, selfId = null }) {
   function sec(i) {
     const k = kisiler[i]
     if (!k || !sorgu) return
-    const ek = `@${k.username} `
-    const son = sorgu.bas + 1 + sorgu.sorgu.length
+    // İmleç kelimenin ortasındaysa (@a|li) imleçten sonraki harfler de değişir: "@Alper " olur, "@Alper li" değil
+    const imlecYeri = sorgu.bas + 1 + sorgu.sorgu.length
+    const son = imlecYeri + /^[\p{L}\p{N}_]*/u.exec(kutu.value.slice(imlecYeri))[0].length
+    // Sonrasında metin bitmişse boşluk eklenir; noktalama ya da boşluk varsa eklenmez ("@Alper, selam")
+    const ek = `@${k.username}${son >= kutu.value.length ? ' ' : ''}`
     kutu.value = kutu.value.slice(0, sorgu.bas) + ek + kutu.value.slice(son)
     const imlec = sorgu.bas + ek.length
     kutu.setSelectionRange(imlec, imlec)
@@ -151,6 +154,9 @@ export function mountMentionSuggest(kutu, { getMembers, selfId = null }) {
   kutu.addEventListener('keydown', tus)
   kutu.addEventListener('input', guncelle)
   kutu.addEventListener('click', guncelle) // imleç fareyle başka yere götürüldü
+  // İmleç ok tuşlarıyla taşınınca da liste yeniden değerlendirilir (↑↓ listede gezmek içindir, burada yok)
+  const imlecTasindi = (e) => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) guncelle() }
+  kutu.addEventListener('keyup', imlecTasindi)
   kutu.addEventListener('blur', kapat)
 
   return {
@@ -162,6 +168,7 @@ export function mountMentionSuggest(kutu, { getMembers, selfId = null }) {
       kutu.removeEventListener('keydown', tus)
       kutu.removeEventListener('input', guncelle)
       kutu.removeEventListener('click', guncelle)
+      kutu.removeEventListener('keyup', imlecTasindi)
       kutu.removeEventListener('blur', kapat)
     },
   }

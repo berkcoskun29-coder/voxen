@@ -267,3 +267,36 @@ describe('Arkadaşlar sayfası', () => {
     expect(document.activeElement).toBe(s.body.querySelector('.friend-message'))
   })
 })
+
+describe('arkadaş listesi: açık menü varken varlık olayı', () => {
+  it('menü A açıkken varlık olayı, sonra 2. arkadaşın ⋯ düğmesine basış: menü B bağlı düğmeye çıpalı açılır', async () => {
+    const s = sayfaKur({})
+    document.body.appendChild(s.body)
+    s.showTab('all')
+    s.update(veri({ friends: [ali, veli], presence: new Map() }))
+    const dugmeler = () => [...s.body.querySelectorAll('.friend-more')]
+    const [d1, d2] = dugmeler()
+    d1.click()
+    const menuA = document.querySelector('.popup-menu')
+    expect(menuA).not.toBeNull()
+    s.update(veri({ friends: [ali, veli], presence: new Map([['u2', { status: 'online' }]]) }))
+    expect(dugmeler()[1]).toBe(d2) // menü açıkken çizilmedi
+    // 2. düğmeye gerçek basış: önce fare basılır (menü A kapanır), sonra tıklanır
+    d2.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    expect(document.querySelector('.popup-menu')).toBeNull()
+    expect(dugmeler()[1]).toBe(d2) // basış sürerken düğme değişmedi
+    d2.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    d2.click()
+    const menuB = document.querySelector('.popup-menu')
+    expect(menuB).not.toBeNull()
+    expect(d2.isConnected).toBe(true)
+    expect(d2.getAttribute('aria-expanded')).toBe('true')
+    await bosalt()
+    // Menü B hâlâ açık: ertelenmiş çizim yapılmadı
+    expect(document.querySelector('.popup-menu')).toBe(menuB)
+    expect(dugmeler()[1]).toBe(d2)
+    closeMenu()
+    await bosalt()
+    expect(s.body.querySelector('.friend-row .status-dot').dataset.status).toBe('online') // sonunda çizildi
+  })
+})

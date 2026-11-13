@@ -3,7 +3,7 @@
 // Solda bölüm menüsü (sekmeler), sağda o an seçili tek bölüm görünür; son açılan bölüm hatırlanır.
 // Her değişiklik hemen kaydedilir (src/settings.js); canlı oturuma uygulamayı app.js yapar.
 import { getSettings, updateSettings, onSettingsChange, BITRATE_MIN, BITRATE_MAX, UPLOAD_SECENEKLERI } from '../settings.js'
-import { keyLabel } from '../voice/ptt.js'
+import { keyLabel, isPrintableCode } from '../voice/ptt.js'
 import { isTauri } from '../desktop.js'
 import { openMicTest } from './micTest.js'
 import { createModalShell } from './modal.js'
@@ -20,6 +20,18 @@ function el(tag, cls, text) {
 let ayarPenceresi = null // aynı anda en fazla bir ayarlar penceresi (açıksa ortak kalıbın döndürdüğü nesne)
 let tusPenceresi = null // aynı anda en fazla bir tuş seçme penceresi
 
+// Yazı yazan bir tuş bas-konuş için seçildiyse uyarı metni: ptt.js yazı alanı odaktayken bu tuşları
+// bilerek yok sayar (yazarken kapı açılmasın diye); kullanıcı bunu bilsin.
+export const YAZI_TUSU_UYARISI = 'Bu tuş yazı yazarken çalışmaz. F tuşları, Ctrl/Alt ya da fare yan tuşu daha iyi olur.'
+
+// Uyarı satırı (role="note"); tus yazı tuşu değilse ya da boşsa gizli kalır. Dönen: { el, guncelle(tus) }
+function yaziTusuUyarisi() {
+  const e = el('p', 'key-warning', YAZI_TUSU_UYARISI)
+  e.setAttribute('role', 'note')
+  e.hidden = true
+  return { el: e, guncelle: (tus) => { e.hidden = !(tus && isPrintableCode(tus)) } }
+}
+
 // "Bas-konuş tuşunu seç" penceresi.
 // Ortadaki kutu "Dinliyorum… bir tuşa bas" der ve hafifçe nabız atar (hareket azaltma tercihinde durur).
 // Basılan tuşun adı kutuda görünür; başka tuşa basınca seçim değişir. Kaydetmek için onay gerekir:
@@ -34,10 +46,11 @@ export function askPttKey(ptt, onDone) {
   const ipucu = el('p', 'muted', "Kullanmak istediğin tuşa bas. Vazgeçmek için Esc. Enter'ı seçmek istiyorsan ilk tuş olarak Enter'a bas.")
   // Tuş kutusu: ekran okuyucu seçilen tuşun adını da okusun (aria-live)
   const kutu = el('div', 'key-listen dinliyor', 'Dinliyorum… bir tuşa bas')
+  const uyari = yaziTusuUyarisi()
   kutu.setAttribute('aria-live', 'polite')
   const kabuk = createModalShell({
     baslik: 'Bas-konuş tuşu', // başlık kısa, açıklama altında
-    govde: [ipucu, kutu],
+    govde: [ipucu, kutu, uyari.el],
     birincil: { yazi: 'Kaydet', tik: () => { onaylandi = true; return null } },
     // Pencere hangi yolla kapanırsa kapansın (Kaydet, Enter, Esc, Vazgeç, X, arka plan) buradan geçer
     onKapat: () => {
@@ -67,6 +80,7 @@ export function askPttKey(ptt, onDone) {
     // Yeni seçim: kutuda tuşun adı görünür, nabız durur, Kaydet açılır
     secilen = e.code
     kutu.textContent = keyLabel(secilen)
+    uyari.guncelle(secilen)
     kutu.classList.remove('dinliyor')
     ipucu.textContent = "Kaydetmek için Enter'a ya da Kaydet'e bas. Değiştirmek için başka bir tuşa bas."
     kabuk.anaDugme.disabled = false
@@ -227,10 +241,12 @@ export function openSettings({ ptt, onProfile, onSignOut, account, notify } = {}
   tusBtn.type = 'button'
   const tusKutusu = el('div', 'key-row')
   tusKutusu.append(tusYazi, tusBtn)
+  const tusUyarisi = yaziTusuUyarisi()
   const tusSatiri = alan('Bas-konuş tuşu', tusKutusu, 'Oyunda kullandığın bas-konuş tuşundan farklı bir tuş seç.')
   // Masaüstünde: oyun yönetici olarak çalışıyorsa Windows, yönetici olmayan programın tuşu görmesine izin vermez
   if (isTauri()) tusSatiri.appendChild(el('p', 'hint', "Oyun yönetici olarak çalışıyorsa ve tuş algılanmıyorsa Voxen'i de yönetici olarak çalıştır."))
-  const tusGoster = () => { tusYazi.textContent = keyLabel(getSettings().pttKey) || 'seçilmedi' }
+  tusSatiri.appendChild(tusUyarisi.el)
+  const tusGoster = () => { const t = getSettings().pttKey; tusYazi.textContent = keyLabel(t) || 'seçilmedi'; tusUyarisi.guncelle(t) }
   tusBtn.onclick = () => askPttKey(ptt, tusGoster)
 
   // Sesle algılama hassasiyeti (yalnız vad modunda)
@@ -450,7 +466,7 @@ export function openSettings({ ptt, onProfile, onSignOut, account, notify } = {}
         sesSatiri,
         sessizBaslik,
         sessizListe,
-      ), acilinca: () => { sessizleriCiz(); requestNotifyPermission({ acik: true }) } },
+      ), acilinca: () => { sessizleriCiz(); requestNotifyPermission() } },
       { ad: 'hesap', baslik: 'Hesap', kutu: bolum('Hesap', hesapSatiri) },
     ])],
     onKapat: () => {

@@ -11,7 +11,7 @@ vi.mock('../src/lib/supabase.js', () => {
   fake.vsOps = [] // voice_states yazmaları: ['upsert', satır] | ['delete', filtre]
   fake.from = vi.fn((tablo) => {
     // Bekletme ve satırlar, sorgu BAŞLADIĞI anda yakalanır (sonradan değişse de bu sorgu etkilenmez)
-    const kapi = tablo === 'channels' ? fake.channelsGate : null
+    const kapi = tablo === 'channels' ? fake.channelsGate : tablo === 'server_members' ? fake.membersGate : null
     const satirlar = fake.rows[tablo] ?? []
     const filtre = {} // yalnız voice_states için uygulanır
     let islem = 'select'
@@ -1529,6 +1529,56 @@ describe('özel mesaj sohbeti ve canlı DM okunmamış (sosyal T3)', () => {
     fake.syncCb?.()
     await bosalt()
     expect(kart()).toBe(ikinciKart)
+  })
+
+  it('DM\'den sunucuya geçince sağ panelde eski profil kartı kalmaz, üye listesi gelir', async () => {
+    rpcKur()
+    fake.rows.dm_messages = [dmMesaj(1, 't1', 'u2')]
+    fake.rows.profiles = [ali]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    dmSatiri('ali').click()
+    await bosalt()
+    const panel = document.querySelector('.member-panel')
+    expect(panel.querySelector('.dm-profile-card')).not.toBeNull()
+    // Üye listesi yüklenirken (bekletilir) eski kart görünmemeli
+    let ac
+    fake.membersGate = new Promise((r) => { ac = r })
+    document.querySelector('.server-icon').click()
+    await bosalt()
+    expect(panel.classList.contains('dm-profil')).toBe(false)
+    expect(panel.querySelector('.dm-profile-card')).toBeNull()
+    ac()
+    fake.membersGate = null
+    await bosalt()
+    expect(panel.querySelector('.dm-profile-card')).toBeNull()
+  })
+
+  it('arkadaş listesinde ⋯ menüsü açıkken varlık olayı menüyü ve odağı bozmaz', async () => {
+    rpcKur()
+    fake.rows.friendships = [{ user_a: 'u1', user_b: 'u2', requester: 'u2', status: 'accepted', created_at: '2026-11-13T00:00:00Z' }]
+    fake.rows.profiles = [ali]
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    ;[...document.querySelectorAll('[role="tab"]')].find((b) => b.textContent.startsWith('Tümü')).click()
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })) // önceki testlerden kalan basılı fare durumu
+    const diger = document.querySelector('.friend-more')
+    diger.click()
+    const menu = document.querySelector('.popup-menu')
+    const odakli = document.activeElement
+    expect(menu).not.toBeNull()
+    fake.presenceState = { u2: [{ user_id: 'u2', status: 'online', client_id: 'x' }] }
+    fake.syncCb?.()
+    await bosalt()
+    expect(document.querySelector('.friend-more')).toBe(diger) // liste baştan çizilmedi
+    expect(document.querySelector('.popup-menu')).toBe(menu)
+    expect(document.activeElement).toBe(odakli)
+    // Menü kapanınca bekleyen çizim yapılır: yeni durum görünür
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await bosalt()
+    expect(document.querySelector('.popup-menu')).toBeNull()
+    expect(document.querySelector('.friend-row .status-dot').dataset.status).toBe('online')
   })
 
   it('engelli konuşma (can_send=false): eski mesajlar görünür, kutu yerine "Bu kişiye mesaj gönderemezsin."', async () => {

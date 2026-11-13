@@ -109,3 +109,63 @@ describe('Ayarlar > Bildirimler', () => {
     expect(istek).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('Ayarlar > Bildirimler: izin sorusu', () => {
+  it('bölüm açılınca izin oturum başına bir kez sorulur; düğmeyi açınca yine sorulur', async () => {
+    vi.resetModules() // bayrak temiz başlasın
+    const istek = vi.fn(async () => 'default') // kişi soruyu kapatıp geçti
+    vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'default', requestPermission: istek }))
+    const taze = await import('../src/ui/settings.js')
+    const ayarlar = await import('../src/settings.js')
+    const bildirim = await import('../src/notify.js')
+    ayarlar.updateSettings({ pttKey: 'KeyV' })
+    bildirim.setNotifySettings({ masaustu: true })
+    const a = taze.openSettings({})
+    for (let i = 0; i < 3; i++) { sekme('Bildirimler').click(); sekme('Konuşma').click() }
+    await bosalt()
+    expect(istek).toHaveBeenCalledTimes(1) // üç kez açıldı, bir kez soruldu
+    // Kullanıcı açma düğmesine açıkça basınca sınır aşılır
+    sekme('Bildirimler').click()
+    const kutu = document.querySelector('#ayar-bildirim')
+    kutu.checked = false; kutu.dispatchEvent(new Event('change'))
+    kutu.checked = true; kutu.dispatchEvent(new Event('change'))
+    await bosalt()
+    expect(istek).toHaveBeenCalledTimes(2)
+    a.close()
+  })
+})
+
+describe('Ayarlar > Konuşma: yazı tuşu uyarısı', () => {
+  const ayarUyarisi = () => document.querySelector('.field .key-warning')
+  const pencereUyarisi = () => [...document.querySelectorAll('.key-warning')].find((e) => !e.closest('.field'))
+  const tus = (code) => window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true, cancelable: true }))
+
+  it('yazı tuşunda uyarı görünür (role=note); F8, Mouse4, ControlLeft\'te görünmez', () => {
+    for (const [kod, gorunur] of [['Backquote', true], ['KeyV', true], ['Quote', true], ['F8', false], ['Mouse4', false], ['ControlLeft', false]]) {
+      updateSettings({ pttKey: kod })
+      ayar = openSettings({})
+      const u = ayarUyarisi()
+      expect(u.getAttribute('role')).toBe('note')
+      expect(u.hidden).toBe(!gorunur)
+      expect(u.textContent).toBe('Bu tuş yazı yazarken çalışmaz. F tuşları, Ctrl/Alt ya da fare yan tuşu daha iyi olur.')
+      ayar.close(); ayar = null
+    }
+  })
+
+  it('tuş seçme penceresinde seçilen tuşa göre güncellenir; kaydedince ayarlardaki uyarı da güncellenir', async () => {
+    updateSettings({ pttKey: 'F8' })
+    ayar = openSettings({})
+    expect(ayarUyarisi().hidden).toBe(true)
+    document.querySelector('.key-row button').click() // Değiştir
+    expect(pencereUyarisi().hidden).toBe(true) // henüz tuş seçilmedi
+    tus('Backquote')
+    expect(pencereUyarisi().hidden).toBe(false)
+    tus('F9')
+    expect(pencereUyarisi().hidden).toBe(true)
+    tus('Quote')
+    expect(pencereUyarisi().hidden).toBe(false)
+    tus('Enter') // kaydet
+    await bosalt()
+    expect(ayarUyarisi().hidden).toBe(false)
+  })
+})
