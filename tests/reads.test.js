@@ -45,7 +45,16 @@ describe('fetchUnreadCounts', () => {
     }))
     const m = await fetchUnreadCounts()
     expect(fake.rpc).toHaveBeenCalledWith('unread_counts')
-    expect([...m]).toEqual([['c1', { serverId: 's1', count: 3 }], ['c2', { serverId: 's1', count: 0 }]])
+    expect([...m]).toEqual([['c1', { serverId: 's1', count: 3, mentions: 0 }], ['c2', { serverId: 's1', count: 0, mentions: 0 }]])
+  })
+  it('mentions sütununu taşır (007); eski şemada yoksa 0', async () => {
+    fake.rpc.mockImplementation(async () => ({
+      data: [{ channel_id: 'c1', server_id: 's1', count: 4, mentions: 2 }, { channel_id: 'c2', server_id: 's2', count: 1 }],
+      error: null,
+    }))
+    const m = await fetchUnreadCounts()
+    expect(m.get('c1')).toEqual({ serverId: 's1', count: 4, mentions: 2 })
+    expect(m.get('c2')).toEqual({ serverId: 's2', count: 1, mentions: 0 })
   })
   it('hatada fırlatır', async () => {
     fake.rpc.mockImplementation(async () => ({ data: null, error: { message: 'olmadı' } }))

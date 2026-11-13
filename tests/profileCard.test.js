@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Avatara tıklayınca açılan küçük profil kartı (tasarım turu 2, U06)
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { openProfileCard, closeProfileCard, profileCardPosition, makeProfileOpener, installProfileCards } from '../src/ui/profileCard.js'
 import { renderMemberList } from '../src/ui/memberList.js'
 import { renderMessage } from '../src/ui/chatView.js'
@@ -229,5 +229,61 @@ describe('düzeltme turu 1', () => {
     ad.click()
     expect(kart().querySelector('.profile-card-name').textContent).toBe('ali')
     birak()
+  })
+})
+
+describe('profil kartı: arkadaşlık ve mesaj düğmeleri (Ana sayfa, spec §1)', () => {
+  const dugmeler = () => [...kart().querySelectorAll('.profile-card-social button')].map((b) => [b.textContent, b.disabled])
+  const bekle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)) }
+
+  it('arkadaş değil, sunucu arkadaşı: Mesaj gönder + Arkadaş ekle', () => {
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'none', canMessage: true } })
+    expect(dugmeler()).toEqual([['Mesaj gönder', false], ['Arkadaş ekle', false]])
+  })
+
+  it('arkadaş: yalnız Mesaj gönder; istek gönderilmiş: İstek gönderildi (pasif)', () => {
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'friend', canMessage: true } })
+    expect(dugmeler()).toEqual([['Mesaj gönder', false]])
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'outgoing', canMessage: false } })
+    expect(dugmeler()).toEqual([['İstek gönderildi', true]])
+  })
+
+  it('social yoksa (engellenmiş kişi) ya da kendi kartımızda düğme yok', () => {
+    openProfileCard({ person: ali, status: 'online', opener: acan() })
+    expect(kart().querySelector('.profile-card-social')).toBeNull()
+    openProfileCard({ person: ali, status: 'online', opener: acan(), own: {}, social: { friend: 'none', canMessage: true } })
+    expect(kart().querySelector('.profile-card-social')).toBeNull()
+  })
+
+  it('Arkadaş ekle -> istek gider, düğme "İstek gönderildi" olur', async () => {
+    const onAdd = vi.fn(async () => 'sent')
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'none', canMessage: false, onAdd } })
+    kart().querySelector('.profile-card-friend').click()
+    await bekle()
+    expect(onAdd).toHaveBeenCalled()
+    expect(dugmeler()).toEqual([['İstek gönderildi', true]])
+  })
+
+  it('karşı taraf zaten istemişse arkadaş olunur: Mesaj gönder çıkar', async () => {
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'none', canMessage: false, onAdd: async () => 'accepted' } })
+    kart().querySelector('.profile-card-friend').click()
+    await bekle()
+    expect(dugmeler()).toEqual([['Mesaj gönder', false]])
+  })
+
+  it('hata olursa kartta Türkçe metin, düğme yeniden basılabilir', async () => {
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'none', canMessage: false, onAdd: async () => { throw new Error('Böyle bir kullanıcı yok.') } } })
+    kart().querySelector('.profile-card-friend').click()
+    await bekle()
+    expect(kart().querySelector('.profile-card-error').textContent).toBe('Böyle bir kullanıcı yok.')
+    expect(dugmeler()).toEqual([['Arkadaş ekle', false]])
+  })
+
+  it('Mesaj gönder kartı kapatır ve onMessage çağırır', () => {
+    const onMessage = vi.fn()
+    openProfileCard({ person: ali, status: 'online', opener: acan(), social: { friend: 'friend', canMessage: true, onMessage } })
+    kart().querySelector('.profile-card-message').click()
+    expect(onMessage).toHaveBeenCalled()
+    expect(kart()).toBeNull()
   })
 })

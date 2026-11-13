@@ -287,7 +287,7 @@ describe('ayarlar penceresi', () => {
     updateSettings({ pttKey: 'KeyV' })
     openSettings({})
     const basliklar = [...document.querySelectorAll('.settings-section-title')].map((h) => h.textContent)
-    expect(basliklar).toEqual(['Konuşma', 'Cihazlar', 'Ses kalitesi', 'Hesap'])
+    expect(basliklar).toEqual(['Konuşma', 'Cihazlar', 'Ses kalitesi', 'Bildirimler', 'Hesap'])
     // Etiket kutunun üstünde: aynı alan kutusunda önce label, sonra kontrol
     const mod = document.querySelector('select[data-ayar=mod]')
     expect(mod.previousElementSibling.tagName).toBe('LABEL')
@@ -363,16 +363,16 @@ describe('ayarlar menüsü (solda bölümler, sağda tek bölüm)', () => {
   const sekmeler = () => [...document.querySelectorAll('[role=tablist] [role=tab]')]
   const gorunenBolum = () => [...document.querySelectorAll('[role=tabpanel]')].filter((p) => !p.hidden)
 
-  it('dört sekme vardır; ilk açılışta Konuşma seçilidir ve yalnız o bölüm görünür', () => {
+  it('beş sekme vardır; ilk açılışta Konuşma seçilidir ve yalnız o bölüm görünür', () => {
     updateSettings({ pttKey: 'KeyV' })
     openSettings({})
-    expect(sekmeler().map((t) => t.textContent)).toEqual(['Konuşma', 'Cihazlar', 'Ses kalitesi', 'Hesap'])
+    expect(sekmeler().map((t) => t.textContent)).toEqual(['Konuşma', 'Cihazlar', 'Ses kalitesi', 'Bildirimler', 'Hesap'])
     expect(sekmeler()[0].getAttribute('aria-selected')).toBe('true')
     expect(gorunenBolum()).toHaveLength(1)
     expect(gorunenBolum()[0].getAttribute('aria-labelledby')).toBe(sekmeler()[0].id)
     expect(sekmeler()[0].getAttribute('aria-controls')).toBe(gorunenBolum()[0].id)
     // Seçili olmayan sekmeler Tab sırasında değil (oklarla gezilir)
-    expect(sekmeler().map((t) => t.tabIndex)).toEqual([0, -1, -1, -1])
+    expect(sekmeler().map((t) => t.tabIndex)).toEqual([0, -1, -1, -1, -1])
   })
 
   it('sekmeye tıklayınca o bölüm görünür; ayarlar bölümler arasında yerinde kalır', () => {
@@ -381,8 +381,8 @@ describe('ayarlar menüsü (solda bölümler, sağda tek bölüm)', () => {
     const mod = document.querySelector('select[data-ayar=mod]')
     mod.value = 'vad'
     mod.dispatchEvent(new Event('change'))
-    sekmeler()[3].click()
-    expect(sekmeler()[3].getAttribute('aria-selected')).toBe('true')
+    sekmeler()[4].click()
+    expect(sekmeler()[4].getAttribute('aria-selected')).toBe('true')
     expect(sekmeler()[0].getAttribute('aria-selected')).toBe('false')
     expect(gorunenBolum()[0].contains(dugme('Profili düzenle'))).toBe(true)
     sekmeler()[0].click()
@@ -405,13 +405,13 @@ describe('ayarlar menüsü (solda bölümler, sağda tek bölüm)', () => {
     bas('ArrowLeft')
     expect(document.activeElement).toBe(sekmeler()[0])
     bas('ArrowUp') // baştan sona sarar
-    expect(document.activeElement).toBe(sekmeler()[3])
-    expect(gorunenBolum()[0].getAttribute('aria-labelledby')).toBe(sekmeler()[3].id)
+    expect(document.activeElement).toBe(sekmeler()[4])
+    expect(gorunenBolum()[0].getAttribute('aria-labelledby')).toBe(sekmeler()[4].id)
     bas('Home')
     expect(document.activeElement).toBe(sekmeler()[0])
     bas('End')
-    expect(document.activeElement).toBe(sekmeler()[3])
-    expect(sekmeler().map((t) => t.tabIndex)).toEqual([-1, -1, -1, 0])
+    expect(document.activeElement).toBe(sekmeler()[4])
+    expect(sekmeler().map((t) => t.tabIndex)).toEqual([-1, -1, -1, -1, 0])
   })
 
   it('pencere açılınca odak başlığa gider (ilk kutuya değil)', () => {

@@ -112,19 +112,95 @@ function kendiBolumu(own, status, durumSatiri) {
   return kutu
 }
 
+// Başkasının kartında arkadaşlık ve mesaj düğmeleri (spec §1 "Profil kartı").
+// social: { friend: 'friend' | 'outgoing' | 'none' | null, canMessage, onAdd() -> Promise<'sent'|'accepted'>, onMessage() }
+//   friend 'none'    -> "Arkadaş ekle" (basınca istek gider; sonra "İstek gönderildi" olur)
+//   friend 'outgoing'-> "İstek gönderildi" (pasif)
+//   friend 'friend' ya da null (bilinmiyor) -> arkadaşlık düğmesi yok
+//   canMessage       -> "Mesaj gönder" (arkadaşa da sunucu arkadaşına da)
+function sosyalBolumu(social) {
+  const kutu = document.createElement('div')
+  kutu.className = 'profile-card-social'
+  const hata = document.createElement('div')
+  hata.className = 'profile-card-error'
+  hata.setAttribute('role', 'alert')
+  let mesaj = null
+
+  function mesajDugmesi() {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'profile-card-message'
+    b.textContent = 'Mesaj gönder'
+    b.onclick = () => {
+      closeProfileCard()
+      social.onMessage?.()
+    }
+    return b
+  }
+  function gonderildi() {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'secondary profile-card-friend'
+    b.textContent = 'İstek gönderildi'
+    b.disabled = true
+    return b
+  }
+
+  let arkadasDugmesi = null
+  if (social.friend === 'outgoing') arkadasDugmesi = gonderildi()
+  else if (social.friend === 'none') {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'secondary profile-card-friend'
+    b.textContent = 'Arkadaş ekle'
+    b.onclick = async () => {
+      b.disabled = true
+      hata.textContent = ''
+      try {
+        const r = await social.onAdd?.()
+        if (r === 'accepted') {
+          // İki istek eşleşti: artık arkadaşsınız; mesaj düğmesi yoksa eklenir
+          b.remove()
+          if (!mesaj) { mesaj = mesajDugmesi(); kutu.prepend(mesaj) }
+        } else {
+          b.replaceWith(gonderildi())
+        }
+      } catch (e) {
+        hata.textContent = e?.message || 'Bir şeyler ters gitti. İnternetini kontrol edip tekrar dene.'
+        b.disabled = false
+      }
+    }
+    arkadasDugmesi = b
+  }
+  if (social.canMessage) { mesaj = mesajDugmesi(); kutu.appendChild(mesaj) }
+  if (arkadasDugmesi) kutu.appendChild(arkadasDugmesi)
+  kutu.appendChild(hata)
+  return kutu
+}
+
 // person: profil { id, username, color, avatar_url }
 // status: 'online' | 'idle' | 'dnd' | 'offline'; statusText: durum yazısı (boş olabilir)
 // voiceChannelName: kişi bir sesli kanaldaysa kanalın adı (yoksa null)
 // opener: tıklanan öğe (konum ve odak dönüşü için)
 // own: yalnız KENDİ kartımızda: { onStatus(dnd), onEdit() }. Durum seçimi ve "Profili düzenle" düğmesi çıkar;
 // seçimi yapan kod (tercihi yazıp varlığı yenilemek) app.js'tedir, kart yalnız çağırır.
-export function openProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, opener = null, own = null }) {
+// social: yalnız BAŞKASININ kartında: arkadaşlık / mesaj düğmeleri (bkz. sosyalBolumu).
+export function openProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, opener = null, own = null, social = null }) {
   closeProfileCard() // tek kart
+  const kart = buildProfileCard({ person, status, statusText, voiceChannelName, own, social })
+  kart.setAttribute('role', 'dialog')
+  kart.tabIndex = -1
+  document.body.appendChild(kart)
+  baglaAcikKart(kart, opener)
+  return kart
+}
+
+// Kartın kendisi (konumsuz, dinleyicisiz). openProfileCard açılır kart olarak kullanır;
+// DM ekranında sağ panel aynı kartı sabit olarak gösterir (app.js, .member-panel içinde).
+export function buildProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, own = null, social = null }) {
   const kart = document.createElement('div')
   kart.className = 'profile-card'
-  kart.setAttribute('role', 'dialog')
   kart.setAttribute('aria-label', `${person.username} profili`)
-  kart.tabIndex = -1
 
   const serit = document.createElement('div')
   serit.className = 'profile-card-banner'
@@ -142,9 +218,13 @@ export function openProfileCard({ person, status = 'offline', statusText = '', v
   if (statusText) govde.appendChild(satir('profile-card-text', statusText))
   if (own) govde.appendChild(kendiBolumu(own, status, durum))
   if (voiceChannelName) govde.appendChild(satir('profile-card-voice', `Sesli kanalda: ${voiceChannelName}`))
+  if (social && !own) govde.appendChild(sosyalBolumu(social))
   kart.append(serit, govde)
-  document.body.appendChild(kart)
+  return kart
+}
 
+// Açılır kartı konumlar ve kapanma yollarını bağlar (Esc, dışarı tıklama, boyut, odak çıkışı)
+function baglaAcikKart(kart, opener) {
   // Konum: ekrana sığacak şekilde, tıklanan öğenin yanında
   const konumla = () => {
     const r = opener?.getBoundingClientRect?.() ?? { left: 0, right: 0, top: 0, bottom: 0 }
@@ -188,11 +268,10 @@ export function openProfileCard({ person, status = 'offline', statusText = '', v
   }
   acik = { kart, acan: opener, birak }
   kart.focus()
-  return kart
 }
 
 // kok içindeki işaretli öğelere (makeProfileOpener) tıklanınca ya da Enter/Boşluk basılınca kartı açar.
-// getInfo(kisi) -> { status, statusText, voiceChannelName }: güncel durum çizen yerden değil buradan gelir.
+// getInfo(kisi) -> { status, statusText, voiceChannelName, own?, social? }: güncel durum çizen yerden değil buradan gelir.
 // Dönen fonksiyon dinleyicileri bırakır (ve açık kartı kapatır).
 export function installProfileCards(kok, getInfo) {
   function ac(el) {

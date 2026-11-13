@@ -1,5 +1,5 @@
 // Ayarlar penceresi + bas-konuş tuşu seçme penceresi (ikisi de ortak pencere kalıbını kullanır: modal.js).
-// Ayarlar dört bölümdür: Konuşma, Cihazlar, Ses kalitesi, Hesap.
+// Ayarlar beş bölümdür: Konuşma, Cihazlar, Ses kalitesi, Bildirimler, Hesap.
 // Solda bölüm menüsü (sekmeler), sağda o an seçili tek bölüm görünür; son açılan bölüm hatırlanır.
 // Her değişiklik hemen kaydedilir (src/settings.js); canlı oturuma uygulamayı app.js yapar.
 import { getSettings, updateSettings, onSettingsChange, BITRATE_MIN, BITRATE_MAX, UPLOAD_SECENEKLERI } from '../settings.js'
@@ -8,6 +8,7 @@ import { isTauri } from '../desktop.js'
 import { openMicTest } from './micTest.js'
 import { createModalShell } from './modal.js'
 import { avatarTextColor } from './avatarColor.js'
+import { getNotifySettings, setNotifySettings, requestNotifyPermission } from '../notify.js'
 
 function el(tag, cls, text) {
   const e = document.createElement(tag)
@@ -115,7 +116,8 @@ function sonBolumuYaz(ad) {
   try { localStorage.setItem(BOLUM_ANAHTARI, ad) } catch { /* hatırlanmazsa sorun değil */ }
 }
 
-// Solda menü, sağda tek bölüm. bolumler: [{ ad, baslik, kutu }] (kutu: bolum() ile kurulan section)
+// Solda menü, sağda tek bölüm. bolumler: [{ ad, baslik, kutu, acilinca? }] (kutu: bolum() ile kurulan section;
+// acilinca: bölüm her gösterildiğinde çağrılır)
 // Menü bir sekme listesidir (role="tablist"): yalnız seçili sekme Tab sırasındadır,
 // sekmeler arasında ok tuşlarıyla gezilir (aşağı/sağ sonraki, yukarı/sol önceki, başa/sona sarar),
 // Home ilk, End son sekmeye gider. Bölümler yeniden kurulmaz, yalnız gizlenir: ayarlar yerinde kalır.
@@ -150,6 +152,7 @@ function sekmeliDuzen(bolumler) {
       sekmeler[i].tabIndex = secili ? 0 : -1
       b.kutu.hidden = !secili
       if (secili && odakla) sekmeler[i].focus()
+      if (secili) b.acilinca?.()
     })
     sonBolumuYaz(ad)
   }
@@ -201,7 +204,9 @@ async function cihazlariDoldur(girisSec, cikisSec, kameraSec, s) {
 // onSignOut: "Çıkış yap" düğmesi. app.js'teki çıkış işleyicisinin kendisi verilir
 // (önce varlık/ses temizliği, sonra signOut); burada yeniden yazılmaz.
 // account: { profile, email } hesap kartı için (verilmezse kartta yalnız "Profili düzenle" düğmesi olur).
-export function openSettings({ ptt, onProfile, onSignOut, account } = {}) {
+// notify: { mutedServers() -> [{ id, name }], onUnmute(serverId) -> Promise } Bildirimler bölümündeki
+// "Sessize alınan sunucular" listesi için (sessize alma hesapta saklanır; işi app.js yapar).
+export function openSettings({ ptt, onProfile, onSignOut, account, notify } = {}) {
   if (ayarPenceresi?.arka.isConnected) return { close: () => ayarPenceresi?.kapat() } // zaten açık
   const s = getSettings()
 
@@ -312,6 +317,52 @@ export function openSettings({ ptt, onProfile, onSignOut, account } = {}) {
   ekranKalite.value = s.screenMode
   ekranKalite.onchange = () => updateSettings({ screenMode: ekranKalite.value })
 
+  // ---- Bildirimler ----
+  // İki açma kapama düğmesi (cihazda saklanır, src/notify.js) ve sessize alınan sunucular (hesapta saklanır)
+  const onayKutusu = (id, yazi, deger, degisince) => {
+    const kutu = document.createElement('input')
+    kutu.type = 'checkbox'; kutu.id = id; kutu.checked = deger
+    kutu.onchange = () => degisince(kutu.checked)
+    const satir = el('div', 'check-row')
+    const etiket = el('label', '', yazi)
+    etiket.htmlFor = id
+    satir.append(kutu, etiket)
+    return satir
+  }
+  const bs = getNotifySettings()
+  const masaustuSatiri = onayKutusu('ayar-bildirim', 'Masaüstü bildirimleri', bs.masaustu, (acik) => {
+    setNotifySettings({ masaustu: acik })
+    if (acik) requestNotifyPermission({ acik: true }) // tarayıcıda izin daha önce sorulmadıysa şimdi sorulur
+  })
+  const sesSatiri = onayKutusu('ayar-bildirim-ses', 'Bildirim sesi', bs.ses, (acik) => setNotifySettings({ ses: acik }))
+
+  const sessizBaslik = el('span', 'group-label', 'Sessize alınan sunucular')
+  const sessizListe = el('ul', 'muted-servers')
+  function sessizleriCiz() {
+    sessizListe.replaceChildren()
+    const liste = notify?.mutedServers?.() ?? []
+    if (liste.length === 0) {
+      sessizListe.appendChild(el('li', 'muted-servers-empty', 'Sessize alınan sunucu yok.'))
+      return
+    }
+    for (const sunucu of liste) {
+      const satir = el('li', 'muted-server-row')
+      const ad = el('span', 'muted-server-name', sunucu.name) // kullanıcı yazısı: textContent
+      ad.title = sunucu.name
+      const ac = el('button', 'secondary small', 'Sesi aç')
+      ac.type = 'button'
+      ac.setAttribute('aria-label', `${sunucu.name} sesini aç`)
+      ac.onclick = async () => {
+        ac.disabled = true
+        try { await notify?.onUnmute?.(sunucu.id) } catch { ac.disabled = false; return } // hata metnini app.js gösterir
+        sessizleriCiz()
+      }
+      satir.append(ad, ac)
+      sessizListe.appendChild(satir)
+    }
+  }
+  sessizleriCiz()
+
   // ---- Hesap ----
   // Profil: ayarları kapatıp profil penceresini açar
   const profilBtn = el('button', 'secondary', 'Profili düzenle')
@@ -394,6 +445,12 @@ export function openSettings({ ptt, onProfile, onSignOut, account } = {}) {
         alan('Yükleme hızın', upload, 'Ekran paylaşımı ve kamera bu hızın bir kısmını kullanır'),
         alan('Ekran paylaşımı', ekranKalite, 'Bir sonraki paylaşımda geçerli olur.'),
       ) },
+      { ad: 'bildirimler', baslik: 'Bildirimler', kutu: bolum('Bildirimler',
+        masaustuSatiri,
+        sesSatiri,
+        sessizBaslik,
+        sessizListe,
+      ), acilinca: () => { sessizleriCiz(); requestNotifyPermission({ acik: true }) } },
       { ad: 'hesap', baslik: 'Hesap', kutu: bolum('Hesap', hesapSatiri) },
     ])],
     onKapat: () => {

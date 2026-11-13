@@ -129,10 +129,14 @@ export function openMenu({ opener, etiket, secenekler, yan = 'alt' }) {
 }
 
 // ---- Sunucu menüsü ----
-// sunucu: { name }, sahip: bool, tik: { onInvite, onSettings, onAddChannel, onLeave, onDelete }
-export function openServerMenu({ opener, sunucu, sahip, tik }) {
+// sunucu: { name }, sahip: bool, sessiz: sunucu sessizde mi (bildirimler),
+// tik: { onInvite, onToggleMute, onSettings, onAddChannel, onLeave, onDelete }
+export function openServerMenu({ opener, sunucu, sahip, sessiz = false, tik }) {
   if (menuAcikMi(opener)) { closeMenu({ returnFocus: true }); return null }
-  const secenekler = [{ yazi: 'Davet et', tik: () => tik.onInvite?.() }]
+  const secenekler = [
+    { yazi: 'Davet et', tik: () => tik.onInvite?.() },
+    { yazi: sessiz ? 'Sessizden çıkar' : 'Sunucuyu sessize al', tik: () => tik.onToggleMute?.() },
+  ]
   if (sahip) {
     secenekler.push({ yazi: 'Sunucu ayarları', tik: () => tik.onSettings?.() })
     secenekler.push({ yazi: 'Kanal ekle', tik: () => tik.onAddChannel?.() })

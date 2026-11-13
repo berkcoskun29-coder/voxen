@@ -187,8 +187,17 @@ function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli, 
       const say = document.createElement('span')
       say.className = 'unread-count'
       say.textContent = sayiYazisi(okunmamis)
+      // Seni anan okunmamış mesaj varsa sayının önünde küçük "@" işareti
+      const anma = unread?.mentions?.(k.id) ?? 0
+      if (anma > 0) {
+        const isaret = document.createElement('span')
+        isaret.className = 'mention-mark'
+        isaret.setAttribute('aria-hidden', 'true') // bilgi aria-label'da
+        isaret.textContent = '@'
+        say.prepend(isaret)
+      }
       satir.appendChild(say)
-      satir.setAttribute('aria-label', `${k.name}, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
+      satir.setAttribute('aria-label', `${k.name}, ${sayiYazisi(okunmamis)} okunmamış mesaj` + (anma > 0 ? `, ${sayiYazisi(anma)} bahsetme` : ''))
     }
     satir.dataset.odak = `kanal-${k.id}`
     satir.onclick = () => handlers.onSelectChannel?.(k.id)
@@ -256,9 +265,10 @@ function odakAnahtariylaBul(kok, anahtar) {
 
 // ctx: { server, channels, profile, selectedChannelId, handlers,
 //        voiceMembers (Map<kanalId, profil[]>), speaking (Set<userId>), voiceStates (Map<userId, durum>),
-//        unread ({ count(kanalId) }, isteğe bağlı: okunmamış sayaçları),
+//        unread ({ count(kanalId), mentions(kanalId) }, isteğe bağlı: okunmamış ve bahsetme sayaçları),
 //        voice (sesli kanaldaysak: { channelName, state, handlers } -> ses paneli) }
-//        audio (sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi: { muted, deafened }) }
+//        audio (sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi: { muted, deafened }),
+//        home (Ana sayfadayken, server yokken: kanal listesinin yerine konan öğe; bkz. home.js) }
 // handlers: onSelectChannel(id), onAddChannel(kind), onServerMenu(düğme), onChannelMenu(kanal, düğme), onCopyInvite(), onSettings(), onToggleMute(), onToggleDeafen()
 export function renderChannelList(panel, ctx) {
   const { server, channels, profile, selectedChannelId, handlers } = ctx
@@ -306,6 +316,9 @@ export function renderChannelList(panel, ctx) {
       speaking: ctx.speaking ?? new Set(),
       voiceStates: ctx.voiceStates,
     })
+  } else if (ctx.home) {
+    // Ana sayfada kanal listesinin yerinde Arkadaşlar satırı ve DM listesi (home.js); çubuk aynen kalır
+    liste.appendChild(ctx.home)
   }
   panel.appendChild(liste)
   if (ctx.voice) panel.appendChild(renderVoicePanel(ctx.voice))

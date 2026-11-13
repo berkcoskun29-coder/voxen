@@ -1,5 +1,7 @@
 // Mesaj işlemleri: okuma, gönderme, düzenleme, silme, anlık abonelik, yazar profilleri.
 import { supabase } from '../lib/supabase.js'
+import { joinTyping } from './typing.js'
+import { markRead } from './reads.js'
 
 export const MAX_UZUNLUK = 2000
 export const SAYFA = 50
@@ -108,4 +110,33 @@ export async function fetchProfiles(ids) {
     .from('profiles').select('id, username, color, avatar_url').in('id', ids)
   if (error) throw new Error(error.message)
   return data ?? []
+}
+
+// ---------- chatView kaynağı ----------
+// Sohbet ekranı (mountChat) mesajları bir "kaynak" nesnesinden alır; aynı ekran hem kanalı hem DM'i
+// gösterir (DM karşılığı: dms.js dmSource). Kanal kaynağı buradaki fonksiyonları sarar.
+// channel: { id, name }. isOwner: sunucunun sahibi mi (başkasının mesajını da silebilir). selfId: kendi id'miz.
+// Dönen: { kind:'channel', id, title, placeholder, other:null, canSend, fetch(beforeId, { after, limit }),
+//   send(content), edit(id, content), remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
+//   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg) }
+export function channelSource(channel, { isOwner = false, selfId } = {}) {
+  const id = channel.id
+  return {
+    kind: 'channel',
+    id,
+    title: channel.name,
+    placeholder: `#${channel.name} kanalına mesaj yaz…`,
+    other: null,
+    canSend: true,
+    fetch: (beforeId, { after, limit } = {}) => fetchMessages(id, { before: beforeId ?? undefined, after, limit }),
+    send: (content) => sendMessage(id, content, selfId),
+    edit: (mesajId, content) => editMessage(mesajId, content),
+    remove: (mesajId) => deleteMessage(mesajId),
+    subscribe: ({ onInsert, onUpdate, getLastId, onReconnect } = {}) =>
+      subscribeMessages(id, (m) => onInsert?.(m), { onUpdate, getLastId, onReconnect }),
+    joinTyping: (opts = {}) => joinTyping(id, opts),
+    markRead: (mesajId) => markRead(id, mesajId),
+    // Sunucu sahibi başkasının mesajını da silebilir
+    canDelete: (msg) => msg?.author_id === selfId || isOwner,
+  }
 }

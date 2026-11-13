@@ -40,11 +40,11 @@ describe('menuPosition', () => {
 describe('sunucu menüsü', () => {
   it('sahip ve üye için doğru öğeler; tehlikeli olanlar kırmızı', () => {
     openServerMenu({ opener: dugmeKur(), sunucu: { name: 'S' }, sahip: true, tik: {} })
-    expect(ogeler().map((b) => b.textContent)).toEqual(['Davet et', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
+    expect(ogeler().map((b) => b.textContent)).toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
     expect(ogeler().filter((b) => b.classList.contains('danger')).map((b) => b.textContent)).toEqual(['Sunucuyu sil'])
     closeMenu()
     openServerMenu({ opener: dugmeKur(), sunucu: { name: 'S' }, sahip: false, tik: {} })
-    expect(ogeler().map((b) => b.textContent)).toEqual(['Davet et', 'Sunucudan ayrıl'])
+    expect(ogeler().map((b) => b.textContent)).toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucudan ayrıl'])
     expect(document.querySelector('.popup-menu').getAttribute('role')).toBe('menu')
   })
 
@@ -92,7 +92,7 @@ describe('sunucu menüsü', () => {
     openServerMenu({ opener: d, sunucu: { name: 'S' }, sahip: true, tik: { onSettings } })
     d.remove() // panel yeniden çizildi
     const yeni = dugmeKur()
-    ogeler()[1].click()
+    ogeler()[2].click()
     expect(onSettings).toHaveBeenCalledTimes(1)
     expect(document.querySelector('.popup-menu')).toBeNull()
     expect(document.activeElement).toBe(yeni)
@@ -194,5 +194,21 @@ describe('pencereler', () => {
     dugme('Kaydet').click()
     await vi.waitFor(() => expect(document.querySelector('.field-error').textContent).toContain('Sunucu adı boş olamaz'))
     expect(kaydet).not.toHaveBeenCalled()
+  })
+})
+
+describe('sunucuyu sessize alma (bildirimler)', () => {
+  it('sessizde değilse "Sunucuyu sessize al", sessizdeyse "Sessizden çıkar"; seçilince onToggleMute çalışır', () => {
+    const onToggleMute = vi.fn()
+    openServerMenu({ opener: dugmeKur(), sunucu: { name: 'S' }, sahip: false, sessiz: false, tik: { onToggleMute } })
+    const sessizeAl = ogeler().find((b) => b.textContent === 'Sunucuyu sessize al')
+    expect(sessizeAl.classList.contains('danger')).toBe(false)
+    sessizeAl.click()
+    expect(onToggleMute).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.popup-menu')).toBeNull()
+    openServerMenu({ opener: dugmeKur(), sunucu: { name: 'S' }, sahip: true, sessiz: true, tik: { onToggleMute } })
+    expect(ogeler().map((b) => b.textContent)).toEqual(['Davet et', 'Sessizden çıkar', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
+    ogeler()[1].click()
+    expect(onToggleMute).toHaveBeenCalledTimes(2)
   })
 })

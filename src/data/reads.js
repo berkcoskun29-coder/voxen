@@ -4,68 +4,88 @@
 import { supabase } from '../lib/supabase.js'
 
 // Üyesi olduğum bütün yazılı kanalların okunmamış sayıları.
-// Dönüş: Map<kanalId, { serverId, count }> (okunmamışı olmayan kanallar count: 0 ile gelir)
+// Dönüş: Map<kanalId, { serverId, count, mentions }> (okunmamışı olmayan kanallar count: 0 ile gelir).
+// mentions: okunmamışlardan beni ananların sayısı (007; sütun yoksa 0).
 export async function fetchUnreadCounts() {
   const { data, error } = await supabase.rpc('unread_counts')
   if (error) throw new Error(error.message)
-  return new Map((data ?? []).map((r) => [r.channel_id, { serverId: r.server_id, count: r.count }]))
+  return new Map((data ?? []).map((r) => [
+    r.channel_id,
+    { serverId: r.server_id, count: r.count, mentions: r.mentions ?? 0 },
+  ]))
 }
 
 // ---------- Okundu işaretleme ----------
 // markRead sık çağrılabilir (her yeni mesajda, her kaydırmada). Burada:
 //  - Yalnız ileri gider: daha önce işaretlenenden küçük ya da eşit id yok sayılır.
-//  - En fazla coalesceMs'de bir yazılır; arada gelenler birleşir (kanal başı en büyük id gider).
-//  - Yazma başarısız olursa o kanal için "gönderildi" bilgisi geri alınır: sonraki çağrı yeniden dener.
+//  - En fazla coalesceMs'de bir yazılır; arada gelenler birleşir (hedef başı en büyük id gider).
+//  - Yazma başarısız olursa o hedef için "gönderildi" bilgisi geri alınır: sonraki çağrı yeniden dener.
+// Aynı kalıp DM'lerde de kullanılır (dms.js, mark_dm_read): createReadMarker.
 export const readTiming = { coalesceMs: 1000 }
 
-const gonderilen = new Map() // kanalId -> veritabanına gönderdiğimiz en büyük id
-const bekleyen = new Map() // kanalId -> henüz gönderilmemiş en büyük id
-let zamanlayici = null
+// rpcAdi: çağrılacak RPC; argumanlar(hedefId, mesajId) -> RPC argüman nesnesi.
+// Dönen: { mark(hedefId, mesajId), flush() -> Promise, reset() }
+export function createReadMarker(rpcAdi, argumanlar) {
+  const gonderilen = new Map() // hedefId -> veritabanına gönderdiğimiz en büyük id
+  const bekleyen = new Map() // hedefId -> henüz gönderilmemiş en büyük id
+  let zamanlayici = null
+
+  function mark(hedefId, messageId) {
+    if (!hedefId || messageId == null) return
+    const id = Number(messageId)
+    if (!Number.isFinite(id)) return
+    const enBuyuk = Math.max(gonderilen.get(hedefId) ?? -1, bekleyen.get(hedefId) ?? -1)
+    if (id <= enBuyuk) return
+    bekleyen.set(hedefId, id)
+    if (!zamanlayici) zamanlayici = setTimeout(gonder, readTiming.coalesceMs)
+  }
+
+  function gonder() {
+    zamanlayici = null
+    const liste = [...bekleyen]
+    bekleyen.clear()
+    return Promise.all(liste.map(async ([hid, mid]) => {
+      const onceki = gonderilen.get(hid)
+      gonderilen.set(hid, mid)
+      try {
+        const { error } = await supabase.rpc(rpcAdi, argumanlar(hid, mid))
+        if (error) throw new Error(error.message)
+      } catch {
+        // Gitmedi: geri al (bu arada daha büyüğü gönderildiyse dokunma)
+        if (gonderilen.get(hid) === mid) {
+          if (onceki == null) gonderilen.delete(hid)
+          else gonderilen.set(hid, onceki)
+        }
+      }
+    }))
+  }
+
+  return {
+    mark,
+    // Bekleyen işaretleri hemen yazar (örn. pencere kapanırken). Yazmalar bitince çözülür.
+    flush() {
+      clearTimeout(zamanlayici)
+      return gonder().then(() => {})
+    },
+    reset() {
+      clearTimeout(zamanlayici)
+      zamanlayici = null
+      gonderilen.clear()
+      bekleyen.clear()
+    },
+  }
+}
+
+const kanalOkuma = createReadMarker('mark_read', (cid, mid) => ({ cid, mid }))
 
 // Kanalı bu mesaja kadar okundu işaretler (birleştirilerek, gecikmeli yazılır)
-export function markRead(channelId, messageId) {
-  if (!channelId || messageId == null) return
-  const id = Number(messageId)
-  if (!Number.isFinite(id)) return
-  const enBuyuk = Math.max(gonderilen.get(channelId) ?? -1, bekleyen.get(channelId) ?? -1)
-  if (id <= enBuyuk) return
-  bekleyen.set(channelId, id)
-  if (!zamanlayici) zamanlayici = setTimeout(gonder, readTiming.coalesceMs)
-}
-
-function gonder() {
-  zamanlayici = null
-  const liste = [...bekleyen]
-  bekleyen.clear()
-  return Promise.all(liste.map(async ([cid, mid]) => {
-    const onceki = gonderilen.get(cid)
-    gonderilen.set(cid, mid)
-    try {
-      const { error } = await supabase.rpc('mark_read', { cid, mid })
-      if (error) throw new Error(error.message)
-    } catch {
-      // Gitmedi: geri al (bu arada daha büyüğü gönderildiyse dokunma)
-      if (gonderilen.get(cid) === mid) {
-        if (onceki == null) gonderilen.delete(cid)
-        else gonderilen.set(cid, onceki)
-      }
-    }
-  }))
-}
+export function markRead(channelId, messageId) { kanalOkuma.mark(channelId, messageId) }
 
 // Bekleyen işaretleri hemen yazar (örn. pencere kapanırken). Yazmalar bitince çözülür.
-export function flushReads() {
-  clearTimeout(zamanlayici)
-  return gonder().then(() => {})
-}
+export function flushReads() { return kanalOkuma.flush() }
 
 // (test için) durumu sıfırlar
-export function resetReads() {
-  clearTimeout(zamanlayici)
-  zamanlayici = null
-  gonderilen.clear()
-  bekleyen.clear()
-}
+export function resetReads() { kanalOkuma.reset() }
 
 // ---------- Sayaç aboneliği ----------
 // Üye olduğum bütün kanalların mesajlarını TEK abonelikle dinler: süzgeç yok, RLS süzer.

@@ -3,6 +3,7 @@
 // Kurallar: kendi mesajım sayılmaz; açık kanal, pencere odaktayken ve en alttayken artmaz (okundu işaretlenir);
 // silme/yeniden bağlanma sayıları sunucudan yeniden alır (sorgu birleştirilir; her mesajda ağır sorgu yok).
 import { fetchUnreadCounts, markRead, subscribeAllMessages } from '../data/reads.js'
+import { mentionsUser } from '../mentions.js'
 
 export const unreadTiming = { refetchMs: 2000 }
 
@@ -20,8 +21,13 @@ export function baslikYazisi(toplam) {
 
 // profileId: kendi mesajlarım için. getReading(): { channelId, atBottom } | null (açık yazılı sohbet).
 // isFocused(): pencere odakta mı. onChange(): sayılar değişti.
-export function createUnreadTracker({ profileId, getReading, isFocused, onChange }) {
-  let sayilar = new Map() // kanalId -> { serverId, count }
+// getUsername(): kendi kullanıcı adım (@bahsetme sayısı için; ad değişebilir, o yüzden her mesajda sorulur).
+// Bahsetme sayısı ayrı bir sayaç değil, okunmamış sayısının yanında durur: açılışta unread_counts().mentions,
+// sonra beni anan her yeni mesajda +1 (src/mentions.js), okundu işaretlenince 0.
+// onMessage(mesaj, serverId) (isteğe bağlı): başkasının yeni mesajı geldi (bildirimler bunu kullanır; aynı
+// tek abonelik). serverId sayaçta bilinmeyen kanalda null.
+export function createUnreadTracker({ profileId, getReading, isFocused, onChange, getUsername = null, onMessage = null }) {
+  let sayilar = new Map() // kanalId -> { serverId, count, mentions }
   let kapandi = false
   let zamanlayici = null
   let aliniyor = false
@@ -37,7 +43,7 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
 
   function sifirla(channelId) {
     const s = sayilar.get(channelId)
-    if (s && s.count !== 0) { sayilar.set(channelId, { ...s, count: 0 }); return true }
+    if (s && (s.count !== 0 || s.mentions)) { sayilar.set(channelId, { ...s, count: 0, mentions: 0 }); return true }
     return false
   }
 
@@ -72,9 +78,11 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
     onInsert: (m) => {
       if (kapandi || !m || m.author_id === profileId || m.deleted_at) return
       const s = sayilar.get(m.channel_id)
+      try { onMessage?.(m, s?.serverId ?? null) } catch { /* bildirim hatası sayacı bozmasın */ }
       if (!s) { gecikmeliAl(); return } // bilmediğimiz kanal (yeni kanal / sesli): yalnız sayılar yeniden alınır
       if (okunuyor(m.channel_id)) { markRead(m.channel_id, m.id); return }
-      sayilar.set(m.channel_id, { ...s, count: s.count + 1 })
+      const anar = mentionsUser(m.content, getUsername?.())
+      sayilar.set(m.channel_id, { ...s, count: s.count + 1, mentions: (s.mentions ?? 0) + (anar ? 1 : 0) })
       degisti()
     },
     onUpdate: (m) => { if (m?.deleted_at && m.author_id !== profileId) gecikmeliAl() },
@@ -89,6 +97,13 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
     serverCount(serverId) {
       let t = 0
       for (const s of sayilar.values()) if (s.serverId === serverId) t += s.count
+      return t
+    },
+    // Kanalda / sunucuda beni anan okunmamış mesaj sayısı
+    mentions(channelId) { return sayilar.get(channelId)?.mentions ?? 0 },
+    serverMentions(serverId) {
+      let t = 0
+      for (const s of sayilar.values()) if (s.serverId === serverId) t += s.mentions ?? 0
       return t
     },
     total() {

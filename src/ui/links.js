@@ -94,19 +94,21 @@ function linkOrtaTus(e) {
 export function linkliMetin(metin) {
   const parca = document.createDocumentFragment()
   for (const p of linkParcalari(metin)) {
-    if (!p.link) {
-      parca.appendChild(document.createTextNode(p.metin))
-      continue
-    }
-    const a = document.createElement('a')
-    a.className = 'msg-link'
-    a.href = p.href
-    a.target = '_blank'
-    a.rel = 'noopener noreferrer'
-    a.textContent = p.metin
-    a.addEventListener('click', linkTiklandi)
-    a.addEventListener('auxclick', linkOrtaTus)
-    parca.appendChild(a)
+    parca.appendChild(p.link ? linkOgesi(p) : document.createTextNode(p.metin))
   }
   return parca
+}
+
+// Tek link parçasından (linkParcalari'nın { link: true, metin, href } parçası) <a> öğesi
+// (bahsetmeli metin de bunu kullanır: src/ui/mentions.js)
+export function linkOgesi(p) {
+  const a = document.createElement('a')
+  a.className = 'msg-link'
+  a.href = p.href
+  a.target = '_blank'
+  a.rel = 'noopener noreferrer'
+  a.textContent = p.metin
+  a.addEventListener('click', linkTiklandi)
+  a.addEventListener('auxclick', linkOrtaTus)
+  return a
 }

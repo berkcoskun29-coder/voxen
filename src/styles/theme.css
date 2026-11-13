@@ -15,6 +15,11 @@
   --link: #2dd4bf;          /* mesajdaki linkler (yeşil-mavi) */
   --danger: #ef5b5b;
   --muted: #8d93a1;
+  --mention-tag-bg: rgba(59, 227, 122, 0.16);   /* @ad etiketinin yeşil zemini */
+  --mention-tag-hover: rgba(59, 227, 122, 0.3); /* etiketin üzerine gelince */
+  --mention-line: #b5e33b;                     /* seni anan mesajın solundaki sarı-yeşil çizgi */
+  --mention-bg: rgba(181, 227, 59, 0.07);      /* seni anan mesajın hafif renkli zemini */
+  --mention-bg-hover: rgba(181, 227, 59, 0.11); /* üzerine gelince biraz daha belirgin */
 
   /* Yazı boyutu ölçeği: sayfadaki tüm yazılar bu 5 boydan birini kullanır.
      Kullanımı: font-size: var(--fs-sm); */
@@ -197,6 +202,11 @@ button.block { display: block; width: 100%; } /* tam genişlik ana düğme */
 .modal-body label { display: block; font-size: var(--fs-sm); color: var(--muted); }
 /* Düğme grubunun başlığı (ör. "Renk"): label gibi görünür ama tek alana değil gruba aittir */
 .group-label { display: block; font-size: var(--fs-sm); color: var(--muted); }
+/* Ayarlar > Bildirimler: sessize alınan sunucular listesi (ad solda, "Sesi aç" sağda) */
+.muted-servers { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.muted-server-row { display: flex; align-items: center; gap: var(--sp-2); }
+.muted-server-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.muted-servers-empty { font-size: var(--fs-sm); color: var(--muted); }
 .modal-body .error { margin: var(--sp-2) 0 0; }
 .modal-body .error:empty { min-height: 0; } /* hata yoksa boşluk bırakmasın */
 /* Alt şerit: ayrı (koyu) renkte; Vazgeç solda, yeşil ana düğme sağda */
@@ -698,6 +708,8 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 /* Okunmamış kanal: ismi beyaz ve kalın */
 .channel-item.unread { display: flex; align-items: center; color: #fff; font-weight: 600; }
 .server-icon.selected .server-unread-dot { display: none; } /* seçili sunucuda uzun yeşil çubuk var */
+/* Sessize alınan sunucu: harfi soluk (rozet ve nokta olduğu gibi kalır) */
+.server-icon.muted:not(.selected) { color: var(--muted); }
 /* Kanal satırının sağında küçük gri sayı */
 .unread-count { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--muted); } /* istisna: 11px */
 /* Sunucu şeridinde solda kısa beyaz nokta (seçili sunucunun uzun yeşil çubuğundan ayrı) */
@@ -770,3 +782,152 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
   display: block; margin: var(--sp-1) 0 var(--sp-3); padding: var(--sp-2) var(--sp-3);
   background: var(--input); border-radius: 6px; color: var(--text); user-select: all; overflow-wrap: anywhere;
 }
+
+/* ---- Ana sayfa: şeritteki düğme, sol sütun, Arkadaşlar sayfası (src/ui/home.js, serverRail.js) ---- */
+/* Ana sayfa düğmesi: sunucu simgesiyle aynı şekil, içinde Voxen logosu */
+.rail-home {
+  position: relative; width: 48px; height: 48px; padding: 0; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center; background: var(--selected);
+}
+.rail-home:hover, .rail-home.selected { border-radius: 16px; background: var(--rail-hover); }
+.rail-home.selected::before {
+  content: ''; position: absolute; left: -12px; top: 12px; width: 4px; height: 24px;
+  background: var(--accent-strong); border-radius: 0 4px 4px 0;
+}
+.rail-home-logo { width: 28px; height: 28px; pointer-events: none; }
+/* Ana sayfa ile sunucular arasındaki ince çizgi (.rail-separator ile aynı görünüm) */
+.rail-home-separator { width: 32px; height: 2px; flex: none; background: var(--selected); border-radius: 1px; }
+
+/* Sol sütun: "Arkadaşlar" satırı ve DM listesi */
+.home-friends { display: flex; align-items: center; gap: var(--sp-3); font-weight: 600; }
+.home-pending-badge, .tab-badge {
+  margin-left: auto; min-width: 18px; height: 18px; padding: 0 var(--sp-1);
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 9px;
+  background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; /* istisna: 11px rozet boyu */
+}
+.dm-list { display: flex; flex-direction: column; gap: 2px; }
+.dm-row { position: relative; display: flex; align-items: center; }
+.dm-item {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--sp-3); text-align: left;
+  padding: var(--sp-1) var(--sp-2); background: none; color: var(--muted); border-radius: 4px;
+}
+.dm-item:hover, .dm-item.selected { background: var(--selected); color: var(--text); }
+/* Okunmamış: ad beyaz ve kalın, sağda sayı */
+.dm-item.unread { color: #fff; font-weight: 600; }
+.dm-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-avatar {
+  width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600;
+}
+.dm-avatar.dim { opacity: 0.45; }
+.dm-item .status-dot { border-color: var(--channel-panel); }
+.dm-item:hover .status-dot, .dm-item.selected .status-dot { border-color: var(--selected); }
+/* × : üzerine gelince/odaklanınca görünür; o sırada okunmamış sayısı gizlenir (üst üste binmesin) */
+.dm-hide { position: absolute; right: var(--sp-1); width: 24px; height: 24px; opacity: 0; transition: opacity 0.12s; }
+.dm-row:hover .dm-hide, .dm-row:focus-within .dm-hide { opacity: 1; }
+.dm-row:hover .unread-count, .dm-row:focus-within .unread-count { visibility: hidden; }
+@media (prefers-reduced-motion: reduce) { .dm-hide { transition: none; } }
+
+/* Arkadaşlar sayfası üst şeridi: başlık | sekmeler | yeşil "Arkadaş ekle" */
+.friends-header { gap: var(--sp-3); flex-wrap: wrap; }
+.friends-title { display: flex; align-items: center; gap: var(--sp-2); padding-right: var(--sp-3); border-right: 1px solid var(--selected); }
+.friends-title .icon { color: var(--muted); }
+.friends-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
+.friends-tab {
+  display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1) var(--sp-3);
+  background: none; color: var(--muted); font-size: var(--fs-sm); font-weight: 600;
+}
+.friends-tab:hover { background: var(--selected); color: var(--text); }
+.friends-tab.selected { background: var(--selected); color: #fff; }
+.add-friend-btn { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); font-weight: 600; }
+.add-friend-btn.selected { background: none; color: var(--accent); }
+
+/* Arkadaşlar sayfası gövdesi */
+.friends-page { flex: 1; min-height: 0; overflow-y: auto; padding: var(--sp-4) var(--sp-6); }
+.friends-count { margin: 0 0 var(--sp-2); }
+.friend-row {
+  display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2);
+  border-top: 1px solid var(--selected); border-radius: 6px;
+}
+.friend-row:hover { background: var(--selected); }
+.friend-row.offline .friend-name { color: var(--muted); }
+.friend-text { flex: 1; min-width: 0; }
+.friend-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.friend-sub { font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.friend-actions { display: flex; gap: var(--sp-2); flex: none; }
+.friend-actions .icon-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--channel-panel); }
+.friend-actions .icon-btn:hover { color: var(--text); }
+.friend-actions .friend-accept:hover { color: var(--accent); }
+.friend-actions .friend-decline:hover, .friend-actions .friend-cancel:hover { color: var(--danger); }
+.friend-unblock { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); }
+.friends-empty-text { margin: var(--sp-6) 0 var(--sp-3); text-align: center; color: var(--muted); }
+.friends-empty-add { display: block; margin: 0 auto; }
+
+/* Arkadaş ekle kutusu ve sonuç yazısı */
+.add-friend-title { margin: 0 0 var(--sp-2); font-size: var(--fs-md); }
+.add-friend-row { display: flex; gap: var(--sp-2); align-items: center; max-width: 560px; }
+.add-friend-row input[type='text'] { margin: 0; flex: 1; min-width: 0; }
+.add-friend-row button { flex: none; }
+.add-friend-result { min-height: 1.4em; margin: var(--sp-2) 0 0; font-size: var(--fs-sm); }
+.add-friend-result[data-tur='basari'] { color: var(--accent); }
+.add-friend-result[data-tur='hata'] { color: var(--danger); }
+
+/* Profil kartı: Mesaj gönder / Arkadaş ekle / İstek gönderildi */
+.profile-card-social { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.profile-card-social button { width: 100%; padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); }
+.profile-card-friend:disabled { opacity: 0.6; cursor: default; }
+.profile-card-error { font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; }
+.profile-card-error:empty { display: none; }
+
+/* ---- Özel mesaj (DM) sohbeti ---- */
+/* Başlıkta karşı tarafın küçük avatarı ve durum noktası (kanaldaki # yerinde) */
+.header-dm-avatar { margin-right: var(--sp-2); }
+.header-avatar {
+  width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; font-size: var(--fs-xs); font-weight: 600;
+}
+.header-avatar.dim { opacity: 0.45; }
+.header-dm-avatar .status-dot { border-color: var(--bg); }
+/* Engel: yazı kutusunun yerinde açıklama */
+.composer-blocked {
+  margin-top: var(--sp-3); padding: var(--sp-3); border-radius: 8px;
+  background: var(--input); color: var(--muted); font-size: var(--fs-sm); text-align: center;
+}
+/* Sağ panelde karşı tarafın profil kartı: açılır kartla aynı çizim, ama panele oturur */
+.member-panel.dm-profil { padding: 0; }
+.member-panel .dm-profile-card { position: static; width: auto; max-width: none; border-radius: 0; box-shadow: none; background: none; }
+/* Dar pencerede DM profil kartı gizlenir (sohbete yer kalsın; eşik: layout.js DAR_PENCERE) */
+@media (max-width: 1099px) { .member-panel.dm-profil { display: none; } }
+
+/* ---- @bahsetme (src/ui/mentions.js) ---- */
+/* Mesajdaki @ad etiketi (sunucuda böyle bir üye varsa): yeşil zemin, tıklayınca profil kartı */
+.mention {
+  padding: 0 2px; border-radius: 4px; background: var(--mention-tag-bg); color: var(--accent);
+  font-weight: 500; cursor: pointer; transition: background 0.15s;
+}
+.mention:hover { background: var(--mention-tag-hover); }
+/* Seni anan mesaj: solda ince sarı-yeşil çizgi (yer kaydırmasın diye iç gölge), hafif renkli zemin */
+.message.mentioned { background: var(--mention-bg); box-shadow: inset 2px 0 0 var(--mention-line); }
+.message.mentioned:hover { background: var(--mention-bg-hover); }
+/* Öneri listesi: yazı kutusunun hemen üstünde açılır */
+.composer { position: relative; }
+.mention-suggest {
+  position: absolute; left: var(--sp-4); right: var(--sp-4); bottom: calc(100% - var(--sp-2)); z-index: 5;
+  margin: 0; padding: var(--sp-1); list-style: none; border-radius: 8px;
+  background: var(--channel-panel); border: 1px solid var(--selected); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.mention-suggest[hidden] { display: none; }
+.mention-option {
+  display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1) var(--sp-2);
+  border-radius: 4px; font-size: var(--fs-sm); cursor: pointer;
+}
+.mention-option.selected, .mention-option:hover { background: var(--selected); }
+.mention-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-option-avatar {
+  flex: none; width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; font-size: var(--fs-xs); font-weight: 600;
+}
+/* Kanal satırında ve sunucu rozetinde "@" işareti (sayının önünde) */
+.mention-mark { margin-right: 2px; font-weight: 700; }
+.unread-count .mention-mark { color: var(--mention-line); }
+@media (prefers-reduced-motion: reduce) { .mention { transition: none; } }

@@ -1,11 +1,15 @@
-// Yazılı kanal sohbeti: mesaj listesi, sonsuz kaydırma, yazı kutusu, anlık mesajlar.
-import { fetchMessages, sendMessage, editMessage, deleteMessage, subscribeMessages, fetchProfiles, MAX_UZUNLUK, SAYFA } from '../data/messages.js'
+// Sohbet ekranı (yazılı kanal ya da özel mesaj): mesaj listesi, sonsuz kaydırma, yazı kutusu, anlık mesajlar.
+// Mesajlar bir "kaynak" nesnesinden gelir (kanal: messages.js channelSource, DM: dms.js dmSource).
+import { channelSource, fetchProfiles, MAX_UZUNLUK, SAYFA } from '../data/messages.js'
+import { GONDEREMEZSIN } from '../data/dms.js'
 import { toast } from './layout.js'
 import { linkliMetin } from './links.js'
-import { joinTyping } from '../data/typing.js'
 import { avatarTextColor } from './avatarColor.js'
+import { avatarWithDot } from './memberList.js'
 import { makeProfileOpener } from './profileOpener.js'
 import { eylemCubugu, duzenlendiEtiketi, duzenlemeKutusu, silmeOnayi } from './messageActions.js'
+import { bahsetmeliMetin, mountMentionSuggest } from './mentions.js'
+import { mentionsUser } from '../mentions.js'
 
 const BES_DAKIKA = 5 * 60 * 1000
 
@@ -17,10 +21,12 @@ const tarihBicimi = new Intl.DateTimeFormat('tr-TR', { day: 'numeric', month: 'l
 // Metindeki http/https adresleri tıklanır link olur (links.js; yine innerHTML yok).
 // izin: { duzenle, sil } -> sağ üstteki simgeler; tik: { onEdit(), onDelete(shiftBasili) }.
 // editor: verilirse mesaj metni yerine bu düzenleme kutusu (öğe) konur.
-export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null } = {}) {
+// uyeler: verilirse (kanalda sunucu üyeleri) metindeki @ad üye ise etiket olur (src/ui/mentions.js).
+// anar: true ise mesaj seni anıyor: solda çizgi, hafif renkli zemin (.mentioned).
+export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null, uyeler = null, anar = false } = {}) {
   const p = profile ?? { username: 'Bilinmeyen', color: '#8d93a1', avatar_url: null }
   const el = document.createElement('div')
-  el.className = 'message' + (grouped ? ' grouped' : '')
+  el.className = 'message' + (grouped ? ' grouped' : '') + (anar ? ' mentioned' : '')
   el.dataset.id = String(msg.id)
 
   if (!grouped) {
@@ -71,7 +77,7 @@ export function renderMessage(msg, profile, { grouped = false, izin = null, tik 
     el.classList.add('editing')
     govde.appendChild(editor)
   } else {
-    metin.appendChild(linkliMetin(msg.content))
+    metin.appendChild(uyeler ? bahsetmeliMetin(msg.content, uyeler) : linkliMetin(msg.content))
     // Gruplanmış satırda görünür saat yok (yalnız hover'da); etiket bu durumda metnin sonunda kalır
     if (msg.edited_at && grouped) metin.appendChild(duzenlendiEtiketi(msg.edited_at))
     govde.appendChild(metin)
@@ -139,12 +145,19 @@ export function renderLoadError(mesaj, onRetry) {
 const gunAnahtari = (iso) => new Date(iso).toDateString()
 
 // Sohbeti container içine kurar. Dönen destroy() abonelikleri kapatır.
-// channel: {id, name}, profile: giriş yapan kullanıcının profili.
+// source: mesaj kaynağı (channelSource ya da dmSource). Verilmezse eski yol: channel: {id, name} ile
+// kanal kaynağı burada kurulur. profile: giriş yapan kullanıcının profili.
+// DM'de (source.kind 'dm') başlıkta karşı tarafın avatarı + durum noktası (peerStatus) ve adı çıkar;
+// source.canSend false ise (engel) yazı kutusu yerine "Bu kişiye mesaj gönderemezsin." yazar.
 // headerActions: başlığın sağına konacak düğmeler (ör. "Üyeler" düğmesi; app.js verir).
 // headerHost verilirse başlık container'a değil ona konur (app.js: başlık görüntü bölmesinin üstünde durur).
 // isOwner: giriş yapan kişi bu sunucunun sahibi mi (sahip başkasının mesajını da silebilir; app.js verir).
 // onBottom(sonMesajId): kullanıcı en alta indi ya da en alttayken mesaj geldi (app.js okundu işaretler).
-export function mountChat(container, { channel, profile, isOwner = false, headerActions = [], headerHost = null, onBottom = null }) {
+// members: kanalda sunucu üyeleri (@ önerisi ve @ad etiketleri; sonradan setMembers ile güncellenir). DM'de kullanılmaz.
+export function mountChat(container, { source = null, channel = null, profile, isOwner = false, headerActions = [], headerHost = null, onBottom = null, peerStatus = 'offline', members = [] }) {
+  const kaynak = source ?? channelSource(channel, { isOwner, selfId: profile.id })
+  const dm = kaynak.kind === 'dm'
+  const yazabilir = kaynak.canSend !== false
   let mesajlar = [] // eskiden yeniye
   const idler = new Set() // aynı mesaj iki kez eklenmesin
   const profiller = new Map([[profile.id, profile]])
@@ -154,19 +167,24 @@ export function mountChat(container, { channel, profile, isOwner = false, header
   // Açık düzenleme: { id, ed }. ed (düzenleme kutusu öğesi) liste yeniden çizilince AYNEN yeniden konur,
   // böylece yeni mesaj ya da canlı güncelleme gelse de yazılan kaybolmaz.
   let duzenle = null
+  let uyeler = members // @bahsetme için sunucu üyeleri (yalnız kanalda)
 
   container.innerHTML = ''
   if (headerHost) headerHost.innerHTML = ''
   const baslik = document.createElement('header')
   baslik.className = 'main-header'
-  // # simgesi süs olduğu için ekran okuyucudan gizli; kanal adı ayrı kutuda
-  const diyez = document.createElement('span')
-  diyez.className = 'header-hash'
-  diyez.setAttribute('aria-hidden', 'true')
-  diyez.textContent = '#'
+  let adi = kaynak.title // kanal yeniden adlandırılınca güncellenir (bkz. renameChannel)
+  // Kanalda # simgesi (süs: ekran okuyucudan gizli); DM'de karşı tarafın avatarı ve durum noktası
+  let diyez
+  if (dm) diyez = baslikAvatari(peerStatus)
+  else {
+    diyez = document.createElement('span')
+    diyez.className = 'header-hash'
+    diyez.setAttribute('aria-hidden', 'true')
+    diyez.textContent = '#'
+  }
   const kanalAdi = document.createElement('span')
   kanalAdi.className = 'header-name'
-  let adi = channel.name // kanal yeniden adlandırılınca güncellenir (bkz. renameChannel)
   kanalAdi.textContent = adi
   baslik.append(diyez, kanalAdi)
   if (headerActions.length) {
@@ -184,11 +202,21 @@ export function mountChat(container, { channel, profile, isOwner = false, header
   uyari.className = 'composer-warning'
   const kutu = document.createElement('textarea')
   kutu.rows = 1
-  kutu.placeholder = `#${adi} kanalına mesaj yaz…`
+  kutu.placeholder = kaynak.placeholder
   // "yazıyor…" satırı: yüksekliği sabit (boşken de yer tutar), aria-live YOK (sürekli konuşmasın)
   const yaziyor = document.createElement('div')
   yaziyor.className = 'typing-line'
-  alt.append(uyari, kutu, yaziyor)
+  // @ önerisi yalnız sunucu kanalında (DM'de iki kişisiniz). Kutunun Enter dinleyicisinden ÖNCE bağlanır.
+  const oneri = !dm && yazabilir ? mountMentionSuggest(kutu, { getMembers: () => uyeler, selfId: profile.id }) : null
+  if (oneri) alt.appendChild(oneri.el)
+  if (yazabilir) alt.append(uyari, kutu, yaziyor)
+  else {
+    // Engel: kutu kapanır, yerine açıklama (eski mesajlar görünür kalır)
+    const kapali = document.createElement('div')
+    kapali.className = 'composer-blocked'
+    kapali.textContent = GONDEREMEZSIN
+    alt.appendChild(kapali)
+  }
   if (headerHost) { headerHost.appendChild(baslik); container.append(liste, alt) }
   else container.append(baslik, liste, alt)
 
@@ -209,7 +237,16 @@ export function mountChat(container, { channel, profile, isOwner = false, header
       })
     : null // eski tarayıcı / test ortamı: yalnız mesaj gelince inilir
 
-  // Kanalın başlangıcı bloğu: büyük #, "#kanal kanalına hoş geldin!" ve kısa yazı.
+  // DM başlığındaki küçük avatar + durum noktası (durum değişince setPeerStatus yenisini koyar)
+  function baslikAvatari(durum) {
+    const av = avatarWithDot(kaynak.other ?? { username: kaynak.title, color: null }, durum, 'header-avatar')
+    av.classList.add('header-dm-avatar')
+    av.setAttribute('aria-hidden', 'true') // ad hemen yanında yazıyor
+    return av
+  }
+
+  // Konuşmanın başlangıcı bloğu. Kanal: büyük #, "#kanal kanalına hoş geldin!" ve kısa yazı.
+  // DM: büyük @, kişinin adı ve "@ad ile özel mesajlarının başlangıcı."
   // Yalnız en eski mesaj yüklendiyse (daha eskisi yoksa) listenin en tepesine konur.
   function baslangicBlogu() {
     const blok = document.createElement('div')
@@ -217,12 +254,17 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     const simge = document.createElement('div')
     simge.className = 'channel-start-icon'
     simge.setAttribute('aria-hidden', 'true')
-    simge.textContent = '#'
+    simge.textContent = dm ? '@' : '#'
     const h = document.createElement('h2')
-    h.textContent = `#${adi} kanalına hoş geldin!` // textContent: kanal adı HTML olarak çalışmaz
     const p = document.createElement('p')
-    // Henüz mesaj yoksa ilk adımı söyle; mesaj varsa yalnız başlangıç olduğunu belirt
-    p.textContent = mesajlar.length === 0 ? 'Bu kanalın başlangıcı. İlk mesajı sen yaz.' : 'Bu kanalın başlangıcı.'
+    if (dm) {
+      h.textContent = adi // textContent: kişi adı HTML olarak çalışmaz
+      p.textContent = `@${adi} ile özel mesajlarının başlangıcı.`
+    } else {
+      h.textContent = `#${adi} kanalına hoş geldin!` // textContent: kanal adı HTML olarak çalışmaz
+      // Henüz mesaj yoksa ilk adımı söyle; mesaj varsa yalnız başlangıç olduğunu belirt
+      p.textContent = mesajlar.length === 0 ? 'Bu kanalın başlangıcı. İlk mesajı sen yaz.' : 'Bu kanalın başlangıcı.'
+    }
     blok.append(simge, h, p)
     return blok
   }
@@ -253,9 +295,12 @@ export function mountChat(container, { channel, profile, isOwner = false, header
         new Date(m.created_at) - new Date(onceki.created_at) <= BES_DAKIKA
       liste.appendChild(renderMessage(m, profiller.get(m.author_id), {
         grouped: gruplu,
-        izin: { duzenle: m.author_id === profile.id, sil: m.author_id === profile.id || isOwner },
+        // Yazılamayan (engelli) DM'de düzenleme yok; silme kalır
+        izin: { duzenle: m.author_id === profile.id && yazabilir, sil: !!kaynak.canDelete(m) },
         tik: { onEdit: () => duzenleBaslat(m.id), onDelete: (shift) => silIste(m.id, shift) },
         editor: duzenle?.id === m.id ? duzenle.ed.el : null,
+        uyeler: dm ? null : uyeler,
+        anar: !dm && m.author_id !== profile.id && mentionsUser(m.content, profile.username),
       }))
       onceki = m
     }
@@ -282,7 +327,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
 
   function duzenleBaslat(id) {
     const m = bul(id)
-    if (!m || m.author_id !== profile.id || kapandi) return
+    if (!m || m.author_id !== profile.id || kapandi || !yazabilir) return
     if (duzenle?.id === id) { duzenle.ed.kutu.focus(); return }
     const ed = duzenlemeKutusu(m.content, {
       kaydet: (metin) => duzenleKaydet(id, ed, metin),
@@ -307,7 +352,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     if (metin.trim() === m.content) { duzenleKapat(true); return } // değişmedi: boşuna istek atma
     ed.kaydediyor = true
     try {
-      const sonuc = await editMessage(id, metin)
+      const sonuc = await kaynak.edit(id, metin)
       if (kapandi) return
       if (!sonuc.ok) { ed.uyar(sonuc.warning || 'Mesaj boş olamaz. Silmek için 🗑️ simgesini kullan.'); return }
       if (duzenle?.ed === ed) duzenle = null // bu arada mesaj silindiyse kutu zaten kapanmıştır
@@ -342,7 +387,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
   async function silYap(m) {
     if (siliniyor.has(m.id)) return null
     siliniyor.add(m.id)
-    try { await deleteMessage(m.id) } catch { return 'Mesaj silinemedi. Tekrar dene.' } finally { siliniyor.delete(m.id) }
+    try { await kaynak.remove(m.id) } catch { return 'Mesaj silinemedi. Tekrar dene.' } finally { siliniyor.delete(m.id) }
     if (!kapandi) mesajKaldir(m.id)
     return null
   }
@@ -356,7 +401,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     }
     silmeOnayi(m, profiller.get(m.author_id)?.username ?? 'Bilinmeyen', () => silYap(m), () => {
       // Mesaj silindiyse 🗑️ düğmesi de gitti: odak kaybolmasın, yazı kutusuna dönsün
-      if (!kapandi && !bul(id)) kutu.focus()
+      if (!kapandi && !bul(id) && yazabilir) kutu.focus()
     })
   }
 
@@ -369,7 +414,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     const gelen = []
     let tam = false
     for (let sayfa = 0; sayfa < 20 && !kapandi; sayfa++) {
-      const g = await fetchMessages(channel.id, { after: son, limit: SAYFA })
+      const g = await kaynak.fetch(null, { after: son, limit: SAYFA })
       if (kapandi) return
       gelen.push(...g)
       if (g.length < SAYFA) { tam = true; break }
@@ -430,7 +475,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     if (yukleniyor || !eskiVar || mesajlar.length === 0) return
     yukleniyor = true
     try {
-      const gelen = await fetchMessages(channel.id, { before: mesajlar[0].id, limit: SAYFA })
+      const gelen = await kaynak.fetch(mesajlar[0].id, { limit: SAYFA })
       if (kapandi) return
       if (gelen.length < SAYFA) eskiVar = false
       await ekle(gelen, 'basa')
@@ -459,11 +504,14 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     uyari.classList.toggle('over', n > MAX_UZUNLUK)
   }
   // Yazıyor göstergesi: kutuya yazınca typing(), kutu boşalınca ya da mesaj gidince stopped()
-  const yazanTakibi = joinTyping(channel.id, {
-    selfId: profile.id,
-    selfName: profile.username,
-    onChange: (adlar) => { if (!kapandi) yaziyorCiz(adlar) },
-  })
+  // Engelde kutu yok, karşı taraf da yazamaz: konuya hiç katılmayız (boş takipçi).
+  const yazanTakibi = yazabilir
+    ? kaynak.joinTyping({
+        selfId: profile.id,
+        selfName: profile.username,
+        onChange: (adlar) => { if (!kapandi) yaziyorCiz(adlar) },
+      })
+    : { typing() {}, stopped() {}, clear() {}, leave: async () => {} }
   function yaziyorCiz(adlar) {
     yaziyor.textContent = ''
     if (adlar.length === 0) return
@@ -487,7 +535,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     if (gonderiyor) return
     gonderiyor = true
     try {
-      const sonuc = await sendMessage(channel.id, kutu.value, profile.id)
+      const sonuc = await kaynak.send(kutu.value)
       if (!sonuc.ok) {
         if (sonuc.warning) uyari.textContent = sonuc.warning
         return
@@ -497,16 +545,18 @@ export function mountChat(container, { channel, profile, isOwner = false, header
       sayacGuncelle()
       await ekle([sonuc.message], 'sona')
       if (!kapandi) { liste.scrollTop = liste.scrollHeight; altaYapisik = true } // kendi mesajımızda hep en alta in
-    } catch {
-      toast('Mesaj gönderilemedi. Tekrar dene.', 'hata')
+    } catch (e) {
+      // DM'de engel (veritabanı reddetti): genel "tekrar dene" yerine nedenini söyle
+      toast(e?.message === GONDEREMEZSIN ? GONDEREMEZSIN : 'Mesaj gönderilemedi. Tekrar dene.', 'hata')
     } finally {
       gonderiyor = false
     }
   }
   kutu.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return // @ öneri listesi tuşu kullandı (seçim/gezinme)
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); gonder() }
     // Kutu boşken ↑: son kendi mesajını düzenlemeye aç (Discord alışkanlığı)
-    else if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && kutu.value === '') {
+    else if (yazabilir && e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && kutu.value === '') {
       const son = mesajlar.findLast((m) => m.author_id === profile.id)
       if (son) { e.preventDefault(); duzenleBaslat(son.id) }
     }
@@ -514,11 +564,12 @@ export function mountChat(container, { channel, profile, isOwner = false, header
 
   // Anlık mesajlar
   // getLastId: yeniden bağlanınca en son gördüğümüz mesajdan sonrası getirilsin (kopukken gelenler)
-  const abonelikiKapat = subscribeMessages(channel.id, (m) => {
-    if (kapandi) return
-    yazanTakibi.clear(m.author_id) // mesajı gelen kişinin "yazıyor" göstergesi hemen kalkar
-    ekle([m], 'sona')
-  }, {
+  const abonelikiKapat = kaynak.subscribe({
+    onInsert: (m) => {
+      if (kapandi) return
+      yazanTakibi.clear(m.author_id) // mesajı gelen kişinin "yazıyor" göstergesi hemen kalkar
+      ekle([m], 'sona')
+    },
     onUpdate: (m) => { // düzenlenen yerinde değişir, silinen listeden kalkar
       if (kapandi) return
       if (m.deleted_at) mesajKaldir(m.id)
@@ -529,7 +580,7 @@ export function mountChat(container, { channel, profile, isOwner = false, header
   })
 
   // İlk yükleme
-  fetchMessages(channel.id, { limit: SAYFA })
+  kaynak.fetch(null, { limit: SAYFA })
     .then(async (gelen) => {
       if (kapandi) return // bu arada kanal değişti
       if (gelen.length < SAYFA) eskiVar = false
@@ -546,12 +597,28 @@ export function mountChat(container, { channel, profile, isOwner = false, header
     // Kanal başka istemcide yeniden adlandırıldı: yalnız adın görüldüğü yerler güncellenir
     // (yazılan taslak, açık düzenleme kutusu ve kaydırma konumu bozulmaz; liste yeniden çizilmez)
     renameChannel(ad) {
+      if (dm) return
       adi = ad
       kanalAdi.textContent = ad
       kutu.placeholder = `#${ad} kanalına mesaj yaz…`
       const baslangic = liste?.querySelector?.('.channel-start h2')
       if (baslangic) baslangic.textContent = `#${ad} kanalına hoş geldin!`
     },
-    destroy() { kapandi = true; gozlemci?.disconnect(); abonelikiKapat(); yazanTakibi.leave().catch(() => {}); if (headerHost) baslik.remove() },
+    // Sunucu üyeleri yüklendi/değişti: @ etiketleri yeniden çizilir (kanalda)
+    setMembers(liste) {
+      if (dm) return
+      const anahtar = (l) => l.map((u) => `${u.id}:${u.username}`).join('\n')
+      const ayni = anahtar(liste ?? []) === anahtar(uyeler)
+      uyeler = liste ?? []
+      if (!ayni) yenidenCiz() // adlar değişmediyse boşuna çizme
+    },
+    // DM: karşı tarafın durumu değişti (başlıktaki nokta). Kanalda bir şey yapmaz.
+    setPeerStatus(durum) {
+      if (!dm) return
+      const yeni = baslikAvatari(durum)
+      diyez.replaceWith(yeni)
+      diyez = yeni
+    },
+    destroy() { kapandi = true; oneri?.destroy(); gozlemci?.disconnect(); abonelikiKapat(); yazanTakibi.leave().catch(() => {}); if (headerHost) baslik.remove() },
   }
 }

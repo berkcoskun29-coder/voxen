@@ -12,12 +12,13 @@ export const typingTiming = { sendEveryMs: 3000, expireMs: 5000 }
 //  selfId: kendi kullanıcı id'miz (kendi sinyalimizi saymamak ve göndermek için)
 //  selfName: başkalarına görünecek adımız
 //  onChange(adlar, idler): yazanlar değişince; adlar ilk yazmaya başlayana göre sıralı
+//  topic: (isteğe bağlı) konu; verilmezse "typing:<kanal>". DM'ler "dm-typing:<konuşma>" verir (dms.js).
 // Dönen: { typing(), stopped(), clear(userId), leave() -> Promise }
 //  - typing(): kutuya her yazışta çağrılır (gönderim kendiliğinden seyreltilir)
 //  - stopped(): mesaj gönderildi ya da kutu boşaldı
 //  - clear(userId): o kişinin mesajı geldi, göstergesi hemen kalksın
 //  - leave(): kanal değişti/kapandı; bütün zamanlayıcılar temizlenir
-export function joinTyping(channelId, { selfId, selfName, onChange } = {}) {
+export function joinTyping(channelId, { selfId, selfName, onChange, topic } = {}) {
   let kapali = false
   let bagli = false
   let sonGonderim = 0 // son "yaziyor" zamanı (0 = göndermedik ya da bıraktık)
@@ -53,7 +54,7 @@ export function joinTyping(channelId, { selfId, selfName, onChange } = {}) {
   }
 
   const ozel = openPrivateChannel(
-    `typing:${channelId}`,
+    topic ?? `typing:${channelId}`,
     (k) => {
       k.on('broadcast', { event: 'yaziyor' }, ({ payload }) => yaziyorGeldi(payload))
       k.on('broadcast', { event: 'birakti' }, ({ payload }) => biraktiGeldi(payload))

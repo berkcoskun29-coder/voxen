@@ -177,3 +177,95 @@ describe('çizimler', () => {
     expect(v.querySelector('.unread-count')).toBeNull()
   })
 })
+
+describe('@bahsetme sayısı', () => {
+  const anmali = (o) => new Map(Object.entries(o).map(([k, [serverId, count, mentions]]) => [k, { serverId, count, mentions }]))
+  let ad
+  async function kurAdli() {
+    tracker = createUnreadTracker({ profileId: 'me', getUsername: () => ad, getReading: () => reading, isFocused: () => focused, onChange: degisim })
+    await bos()
+  }
+  beforeEach(() => {
+    ad = 'berk'
+    fake.fetch.mockResolvedValue(anmali({ a: ['s1', 3, 1], b: ['s1', 0, 0], c: ['s2', 5, 2] }))
+  })
+
+  it('açılışta unread_counts().mentions kullanılır; kanal ve sunucu toplamı', async () => {
+    await kurAdli()
+    expect(tracker.mentions('a')).toBe(1)
+    expect(tracker.mentions('yok')).toBe(0)
+    expect(tracker.serverMentions('s1')).toBe(1)
+    expect(tracker.serverMentions('s2')).toBe(2)
+  })
+
+  it('beni anan yeni mesaj sayıyı artırır; anmayan, kendi mesajım ve okunan kanal artırmaz', async () => {
+    await kurAdli()
+    fake.handlers.onInsert({ id: 1, channel_id: 'b', author_id: 'x', content: 'selam @Berk.' })
+    expect(tracker.mentions('b')).toBe(1)
+    expect(tracker.count('b')).toBe(1)
+    fake.handlers.onInsert({ id: 2, channel_id: 'b', author_id: 'x', content: '@berkcan x@berk' })
+    expect(tracker.mentions('b')).toBe(1)
+    expect(tracker.count('b')).toBe(2)
+    fake.handlers.onInsert({ id: 3, channel_id: 'b', author_id: 'me', content: '@berk' })
+    expect(tracker.mentions('b')).toBe(1)
+    reading = { channelId: 'b', atBottom: true }
+    fake.handlers.onInsert({ id: 4, channel_id: 'b', author_id: 'x', content: '@berk' })
+    expect(tracker.mentions('b')).toBe(1)
+  })
+
+  it('ad değişince yeni adla taranır', async () => {
+    await kurAdli()
+    ad = 'yeniAd'
+    fake.handlers.onInsert({ id: 1, channel_id: 'b', author_id: 'x', content: '@berk @yeniad' })
+    expect(tracker.mentions('b')).toBe(1)
+  })
+
+  it('okundu işaretlenince sıfırlanır', async () => {
+    await kurAdli()
+    degisim.mockClear()
+    tracker.markChannelRead('a', 5)
+    expect(tracker.mentions('a')).toBe(0)
+    expect(tracker.serverMentions('s1')).toBe(0)
+    expect(degisim).toHaveBeenCalled()
+  })
+
+  it('getUsername verilmezse ya da içerik yoksa sayı artmaz (eski çağrılar bozulmaz)', async () => {
+    await kur()
+    fake.handlers.onInsert({ id: 1, channel_id: 'b', author_id: 'x', content: '@berk' })
+    fake.handlers.onInsert({ id: 2, channel_id: 'b', author_id: 'x' })
+    expect(tracker.mentions('b')).toBe(0)
+    expect(tracker.count('b')).toBe(2)
+  })
+
+  it('şerit ve kanal satırında "@" işareti yalnız bahsetme varsa; aria-label bahsetmeyi söyler', () => {
+    document.body.innerHTML = '<div id="r"></div><div id="p"></div>'
+    const rail = document.querySelector('#r')
+    const sayac = {
+      serverCount: (id) => ({ s1: 4, s2: 2 })[id] ?? 0,
+      serverMentions: (id) => ({ s1: 1 })[id] ?? 0,
+      count: (id) => ({ a: 4, b: 2 })[id] ?? 0,
+      mentions: (id) => ({ a: 1 })[id] ?? 0,
+    }
+    renderRail(rail, [{ id: 's1', name: 'Bir' }, { id: 's2', name: 'İki' }], null, {}, sayac)
+    const [i1, i2] = rail.querySelectorAll('.server-icon:not(.add):not(.join)')
+    expect(i1.querySelector('.unread-badge .mention-mark').textContent).toBe('@')
+    expect(i1.querySelector('.unread-badge').textContent).toBe('@4')
+    expect(i1.getAttribute('aria-label')).toBe('Bir, 4 okunmamış mesaj, 1 bahsetme')
+    expect(i2.querySelector('.mention-mark')).toBeNull()
+
+    const panel = document.querySelector('#p')
+    renderChannelList(panel, {
+      server: { id: 's1', name: 'S', owner_id: 'x' },
+      channels: [{ id: 'a', name: 'genel', kind: 'text' }, { id: 'b', name: 'sohbet', kind: 'text' }],
+      profile: { id: 'me', username: 'ben', color: '#fff' },
+      selectedChannelId: null,
+      unread: sayac,
+      handlers: {},
+    })
+    const satirlar = [...panel.querySelectorAll('.channel-item')]
+    const a = satirlar.find((s) => s.textContent.includes('genel'))
+    expect(a.querySelector('.unread-count .mention-mark').textContent).toBe('@')
+    expect(a.getAttribute('aria-label')).toBe('genel, 4 okunmamış mesaj, 1 bahsetme')
+    expect(satirlar.find((s) => s.textContent.includes('sohbet')).querySelector('.mention-mark')).toBeNull()
+  })
+})

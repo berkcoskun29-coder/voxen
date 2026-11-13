@@ -130,3 +130,29 @@ export function eyeIcon(acik = true, boyut = 18) {
   if (!acik) cizimler.push(['path', { d: 'M3 3l18 18' }])
   return svgKur(false, cizimler, boyut)
 }
+
+// --- Ana sayfa ve Arkadaşlar sayfası simgeleri ---
+
+// Konuşma balonu: "Mesaj gönder"
+export function messageIcon(boyut = 18) {
+  return svgKur(false, [['path', { d: 'M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z' }]], boyut)
+}
+
+// Üç nokta: "Diğer" menüsü
+export function moreIcon(boyut = 18) {
+  return svgKur(false, [
+    ['circle', { cx: 5, cy: 12, r: 1 }],
+    ['circle', { cx: 12, cy: 12, r: 1 }],
+    ['circle', { cx: 19, cy: 12, r: 1 }],
+  ], boyut)
+}
+
+// Onay işareti: "Kabul et"
+export function checkIcon(boyut = 18) {
+  return svgKur(false, [['path', { d: 'M5 12.5l4.5 4.5L19 7.5' }]], boyut)
+}
+
+// Çarpı: "Reddet", "İptal", DM'i gizle
+export function closeIcon(boyut = 18) {
+  return svgKur(false, [['path', { d: 'M6 6l12 12M18 6L6 18' }]], boyut)
+}

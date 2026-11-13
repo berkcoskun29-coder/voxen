@@ -22,6 +22,7 @@ vi.mock('../src/lib/supabase.js', () => {
       order: () => zincir, limit: () => zincir,
       maybeSingle: () => { tek = true; return zincir },
       upsert: (v) => { islem = 'upsert'; deger = v; return zincir },
+      insert: (v) => { (fake.inserts ??= []).push([tablo, v]); return zincir }, // server_mutes (sessize alma)
       delete: () => { islem = 'delete'; return zincir },
       then: async (res) => {
         if (kapi) await kapi
@@ -58,11 +59,16 @@ vi.mock('../src/lib/supabase.js', () => {
     const vsKanal = ad.startsWith('voice_states:')
     const srvKanal = ad.startsWith('server:') // sunucu olayları (serverEvents.js)
     const tumuKanal = ad.startsWith('messages-all:') // okunmamış sayacı: tek abonelik (data/reads.js)
+    const kisiKanal = ad.startsWith('user:') // kişiye özel olaylar (data/userEvents.js): sohbet sayılmaz
+    const dmTumu = ad.startsWith('dm-messages-all:') // DM sayacı: tek abonelik (data/dms.js): sohbet sayılmaz
     const k = {
       on: (_t, f, cb) => {
         if (srvKanal) fake.srvHandlers.push({ server: ad.slice(7), cb, k })
         if (tumuKanal) fake.allHandlers[f.event] = cb
         if (ad === 'presence:voxen') fake.syncCb = cb
+        if (kisiKanal) fake.userCb = cb
+        if (dmTumu) fake.dmAllHandlers[f.event] = cb
+        if (ad.startsWith('dm-messages:') && f.event === 'INSERT') fake.dmChatInsert = cb
         if (vsKanal && f.filter) fake.vsHandlers.push({ server: f.filter.replace('server_id=eq.', ''), cb, k })
         return k
       },
@@ -70,6 +76,7 @@ vi.mock('../src/lib/supabase.js', () => {
       subscribe: (cb) => {
         if (ad === 'presence:voxen' || tumuKanal) cb?.('SUBSCRIBED')
         if (vsKanal) Promise.resolve().then(() => { if (!k.kapandi) cb?.('SUBSCRIBED') })
+        if (dmTumu) { fake.dmAllSub = cb; cb?.('SUBSCRIBED') }
         return k
       },
       send: () => Promise.resolve(),
@@ -81,8 +88,12 @@ vi.mock('../src/lib/supabase.js', () => {
       vsKanal,
       srvKanal,
       tumuKanal,
+      kisiKanal,
+      dmTumu,
     }
     if (tumuKanal) { fake.all++; return k }
+    if (kisiKanal) { fake.user = (fake.user ?? 0) + 1; return k }
+    if (dmTumu) { fake.dmAll = (fake.dmAll ?? 0) + 1; return k }
     if (srvKanal) { fake.srv++; fake.srvTopics.push(ad) } else if (sesli) { fake.voice++; fake.voiceTopics.push(ad) } else if (vsKanal) { fake.vs++; fake.vsTopics.push(ad) } else if (!k.presence) fake.subs++
     return k
   })
@@ -93,6 +104,8 @@ vi.mock('../src/lib/supabase.js', () => {
       channel: (...a) => fake.channel(...a),
       removeChannel: (k) => {
         if (k?.tumuKanal) { fake.all--; fake.allHandlers = {} }
+        else if (k?.kisiKanal) fake.user--
+        else if (k?.dmTumu) { fake.dmAll--; fake.dmAllHandlers = {} }
         else if (k?.srvKanal) { fake.srv--; fake.srvHandlers = fake.srvHandlers.filter((h) => h.k !== k) }
         else if (k?.sesli) fake.voice--
         else if (k?.vsKanal) { fake.vs--; k.kapandi = true; fake.vsHandlers = fake.vsHandlers.filter((h) => h.k !== k) }
@@ -188,6 +201,12 @@ beforeEach(async () => {
     channels: kanallar,
   }
   fake.subs = 0
+  fake.user = 0
+  fake.userCb = null
+  fake.dmAll = 0
+  fake.dmAllHandlers = {}
+  fake.dmAllSub = null
+  fake.dmChatInsert = null
   fake.typingOpen = 0
   fake.srv = 0
   fake.srvTopics = []
@@ -200,6 +219,7 @@ beforeEach(async () => {
   fake.vsOps = []
   fake.vsTopics = []
   fake.presenceState = undefined
+  fake.inserts = []
   resetVoiceStateWriter()
   localStorage.clear()
   sessionStorage.clear()
@@ -869,7 +889,7 @@ describe('sunucu menüsü, silme/ayrılma ve canlı sunucu olayları (Görev 3)'
     await bosalt()
     sunucuMenusunuAc()
     expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent))
-      .toEqual(['Davet et', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
+      .toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     expect(document.querySelector('.popup-menu')).toBeNull()
 
@@ -880,7 +900,7 @@ describe('sunucu menüsü, silme/ayrılma ve canlı sunucu olayları (Görev 3)'
     await bosalt()
     sunucuMenusunuAc()
     expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent))
-      .toEqual(['Davet et', 'Sunucudan ayrıl'])
+      .toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucudan ayrıl'])
     // üyede kanal ⚙ düğmesi yok
     expect(document.querySelector('.channel-gear')).toBeNull()
   })
@@ -1208,5 +1228,542 @@ describe('okunmamış sayacı (T5)', () => {
     stopApp()
     await bosalt()
     expect(sayi()).toBe(2)
+  })
+})
+
+describe('Ana sayfa: arkadaşlar ve DM listesi (sosyal T2)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const veli = { id: 'u3', username: 'veli', color: '#5b7cfa', avatar_url: null }
+  const dmSatir = (id, o, ek = {}) => ({
+    thread_id: id, other_id: o.id, username: o.username, color: o.color, avatar_url: null,
+    created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true, ...ek,
+  })
+  // ozel: rpc adı -> (arg) => sonuç; diğerleri boş döner
+  function rpcKur(ozel = {}) {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ozel[ad]) return ozel[ad](arg)
+      if (ad === 'unread_counts' || ad === 'dm_list') return { data: [], error: null }
+      return { data: null, error: null }
+    })
+  }
+  const cagriSayisi = (ad) => supabase.rpc.mock.calls.filter(([a]) => a === ad).length
+  const evDugmesi = () => document.querySelector('.rail-home')
+  const sekme = (ad) => [...document.querySelectorAll('[role="tab"]')].find((b) => b.textContent.startsWith(ad))
+
+  it('şeritte Ana sayfa; tıklayınca sol sütun + Arkadaşlar sayfası, sohbet ve üye paneli kapanır, yer hatırlanır', async () => {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.subs).toBe(1)
+    expect(evDugmesi().classList.contains('selected')).toBe(false)
+    evDugmesi().click()
+    await bosalt()
+    expect(evDugmesi().classList.contains('selected')).toBe(true)
+    expect(document.querySelector('.server-icon.selected')).toBeNull()
+    expect(document.querySelector('.channel-panel .home-friends')).not.toBeNull()
+    expect(document.querySelector('.channel-panel .user-bar')).not.toBeNull() // alttaki çubuk aynen kalır
+    expect(document.querySelector('.friends-header')).not.toBeNull()
+    expect(document.querySelector('textarea')).toBeNull()
+    expect(fake.subs).toBe(0) // kanal sohbeti kapandı
+    expect(document.querySelector('.member-panel').classList.contains('sunucusuz')).toBe(true)
+    expect(localStorage.getItem('voxen.yer')).toBe('ana')
+    // Sunucuya dönünce sohbet geri gelir
+    document.querySelector('.server-icon').click()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#genel kanalına mesaj yaz…')
+    expect(localStorage.getItem('voxen.yer')).toBe('sunucu')
+  })
+
+  it('son yer Ana sayfaysa uygulama Ana sayfada açılır', async () => {
+    rpcKur()
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(evDugmesi().classList.contains('selected')).toBe(true)
+    expect(document.querySelector('.friends-header')).not.toBeNull()
+    expect(fake.subs).toBe(0)
+  })
+
+  it('Ana sayfa rozeti okunmamış DM toplamı; sol sütunda DM satırları son mesaja göre, okunmamış kalın', async () => {
+    rpcKur({
+      dm_list: () => ({
+        data: [
+          dmSatir('t1', ali, { unread: 2, last_message_at: '2026-11-10T00:00:00Z' }),
+          dmSatir('t2', veli, { unread: 3, last_message_at: '2026-11-12T00:00:00Z' }),
+        ],
+        error: null,
+      }),
+    })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(evDugmesi().querySelector('.unread-badge').textContent).toBe('5')
+    evDugmesi().click()
+    await bosalt()
+    const satirlar = [...document.querySelectorAll('.dm-item')]
+    expect(satirlar.map((s) => s.querySelector('.dm-name').textContent)).toEqual(['veli', 'ali'])
+    expect(satirlar[0].classList.contains('unread')).toBe(true)
+    expect(satirlar[0].querySelector('.unread-count').textContent).toBe('3')
+  })
+
+  it('kişi olayı gelince ve pencere odağa gelince listeler yeniden alınır', async () => {
+    rpcKur()
+    fake.rows.friendships = []
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.user).toBe(1) // kişi başına tek abonelik
+    sekme('Tümü').click()
+    expect(document.querySelector('.friends-empty-text').textContent).toBe('Henüz arkadaşın yok. Kullanıcı adıyla ekleyebilirsin.')
+    const once = cagriSayisi('dm_list')
+    // Karşı taraf isteğimizi kabul etti: veritabanı "degisti" yayınlar
+    fake.rows.friendships = [{ user_a: 'u1', user_b: 'u2', requester: 'u1', status: 'accepted', created_at: '2026-11-13T00:00:00Z', accepted_at: '2026-11-13T00:00:00Z' }]
+    fake.rows.profiles = [ali]
+    fake.userCb({ payload: { tablo: 'friendships', islem: 'UPDATE' } })
+    await bosalt()
+    expect(cagriSayisi('dm_list')).toBe(once + 1)
+    expect([...document.querySelectorAll('.friend-name')].map((e) => e.textContent)).toEqual(['ali'])
+    window.dispatchEvent(new Event('focus'))
+    await bosalt()
+    expect(cagriSayisi('dm_list')).toBe(once + 2)
+    stopApp()
+    await bosalt()
+    expect(fake.user).toBe(0)
+  })
+
+  it('💬 open_dm çağırır ve orta alanda DM sohbeti açılır; DM satırı da açar', async () => {
+    rpcKur({
+      open_dm: () => ({ data: 't9', error: null }),
+      dm_list: () => ({ data: [dmSatir('t1', veli)], error: null }),
+    })
+    fake.rows.friendships = [{ user_a: 'u1', user_b: 'u2', requester: 'u2', status: 'accepted', created_at: '2026-11-13T00:00:00Z' }]
+    fake.rows.profiles = [ali]
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    sekme('Tümü').click()
+    document.querySelector('.friend-message').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('open_dm', { other: 'u2' })
+    expect(document.querySelector('textarea').placeholder).toBe('@ali kişisine mesaj gönder')
+    expect(document.querySelector('.header-host .header-name').textContent).toBe('ali')
+    // Sol sütundaki DM satırı (open_dm çağrılmadan konuşma id'siyle açılır)
+    const once = cagriSayisi('open_dm')
+    document.querySelector('.dm-item').click()
+    await bosalt()
+    expect(cagriSayisi('open_dm')).toBe(once)
+    expect(document.querySelector('.header-host .header-name').textContent).toBe('veli')
+    expect(document.querySelector('.dm-item').classList.contains('selected')).toBe(true)
+    // Arkadaşlar satırı sayfaya geri döner
+    document.querySelector('.home-friends').click()
+    await bosalt()
+    expect(document.querySelector('.friends-header')).not.toBeNull()
+  })
+
+  it('× konuşmayı gizler (hide_dm) ve listeden kalkar; engelde açma hatası toast ile söylenir', async () => {
+    let liste = [dmSatir('t1', veli)]
+    rpcKur({
+      dm_list: () => ({ data: liste, error: null }),
+      hide_dm: () => { liste = []; return { data: null, error: null } },
+      open_dm: () => ({ data: null, error: { message: 'NOT_ALLOWED' } }),
+    })
+    fake.rows.friendships = [{ user_a: 'u1', user_b: 'u2', requester: 'u2', status: 'accepted', created_at: '2026-11-13T00:00:00Z' }]
+    fake.rows.profiles = [ali]
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.dm-hide').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('hide_dm', { tid: 't1' })
+    expect(document.querySelector('.dm-item')).toBeNull()
+    sekme('Tümü').click()
+    document.querySelector('.friend-message').click()
+    await bosalt()
+    expect(document.querySelector('.toast-hata').textContent).toBe('Bu kişiye mesaj gönderemezsin.')
+    expect(document.querySelector('textarea')).toBeNull()
+  })
+
+  it('Arkadaş ekle kutusu: send_friend_request ve sonuç yazısı', async () => {
+    rpcKur({ send_friend_request: ({ username }) => (username === 'ali' ? { data: 'sent', error: null } : { data: null, error: { message: 'NO_USER' } }) })
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.add-friend-btn').click()
+    const kutu = document.querySelector('.add-friend input')
+    kutu.value = 'ali'
+    kutu.dispatchEvent(new Event('input'))
+    document.querySelector('.add-friend button[type="submit"]').click()
+    await bosalt()
+    expect(document.querySelector('.add-friend-result').textContent).toBe('İstek gönderildi.')
+    kutu.value = 'yok'
+    kutu.dispatchEvent(new Event('input'))
+    document.querySelector('.add-friend button[type="submit"]').click()
+    await bosalt()
+    expect(document.querySelector('.add-friend-result').textContent).toBe('Böyle bir kullanıcı yok.')
+  })
+
+  it('üye listesinden açılan kartta (arkadaş değil) Mesaj gönder ve Arkadaş ekle; Mesaj gönder DM açar', async () => {
+    rpcKur({ open_dm: () => ({ data: 't5', error: null }) })
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [{ id: 'u1', username: 'berk', color: '#5b7cfa' }, ali]
+    fake.rows.friendships = []
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.member-panel [data-profile-opener="u2"]').click()
+    const yazilar = [...document.querySelectorAll('.profile-card-social button')].map((b) => b.textContent)
+    expect(yazilar).toEqual(['Mesaj gönder', 'Arkadaş ekle'])
+    document.querySelector('.profile-card-message').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('open_dm', { other: 'u2' })
+    expect(evDugmesi().classList.contains('selected')).toBe(true)
+    expect(document.querySelector('textarea').placeholder).toBe('@ali kişisine mesaj gönder')
+  })
+
+  it('kendi kartımızda arkadaşlık/mesaj düğmesi yok', async () => {
+    rpcKur()
+    fake.rows.server_members = [{ user_id: 'u1' }]
+    fake.rows.profiles = [{ id: 'u1', username: 'berk', color: '#5b7cfa' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.member-panel [data-profile-opener="u1"]').click()
+    expect(document.querySelector('.profile-card')).not.toBeNull()
+    expect(document.querySelector('.profile-card-social')).toBeNull()
+  })
+})
+
+describe('özel mesaj sohbeti ve canlı DM okunmamış (sosyal T3)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const veli = { id: 'u3', username: 'veli', color: '#5b7cfa', avatar_url: null }
+  const dmSatir = (id, o, ek = {}) => ({
+    thread_id: id, other_id: o.id, username: o.username, color: o.color, avatar_url: null,
+    created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true, ...ek,
+  })
+  const dmMesaj = (id, tid, author, ek = {}) => ({
+    id, thread_id: tid, author_id: author, content: `m${id}`, edited_at: null, deleted_at: null,
+    created_at: new Date(Date.UTC(2026, 10, 13, 10, 0) + id * 60000).toISOString(), ...ek,
+  })
+  let liste
+  function rpcKur(ozel = {}) {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ozel[ad]) return ozel[ad](arg)
+      if (ad === 'dm_list') return { data: liste, error: null }
+      if (ad === 'unread_counts') return { data: [], error: null }
+      return { data: null, error: null }
+    })
+  }
+  const cagriSayisi = (ad) => supabase.rpc.mock.calls.filter(([a]) => a === ad).length
+  const evRozeti = () => document.querySelector('.rail-home .unread-badge')
+  const dmSatiri = (ad) => [...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === ad)
+  let odak
+  beforeEach(() => {
+    odak = true
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => odak)
+    document.title = 'Voxen'
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    localStorage.setItem('voxen.yer', 'ana')
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('DM satırı sohbeti açar: başlıkta avatar + durum noktası + ad, "@ad kişisine mesaj gönder", sağda profil kartı', async () => {
+    rpcKur()
+    fake.rows.dm_messages = [dmMesaj(1, 't1', 'u2'), dmMesaj(2, 't1', 'u1')]
+    fake.rows.profiles = [ali]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    dmSatiri('ali').click()
+    await bosalt()
+    const baslik = document.querySelector('.header-host .main-header')
+    expect(baslik.querySelector('.header-name').textContent).toBe('ali')
+    expect(baslik.querySelector('.header-dm-avatar .status-dot').dataset.status).toBe('offline')
+    expect(baslik.querySelector('.header-hash')).toBeNull()
+    expect(baslik.querySelector('.members-toggle')).toBeNull() // DM'de Üyeler düğmesi yok
+    expect(document.querySelector('textarea').placeholder).toBe('@ali kişisine mesaj gönder')
+    expect([...document.querySelectorAll('.msg-text')].map((e) => e.textContent)).toEqual(['m1', 'm2'])
+    expect(fake.subs).toBe(1) // açık DM'in tek aboneliği
+    const panel = document.querySelector('.member-panel')
+    expect(panel.classList.contains('dm-profil')).toBe(true)
+    expect(panel.classList.contains('sunucusuz')).toBe(false)
+    expect(panel.hidden).toBe(false)
+    expect(panel.querySelector('.dm-profile-card .profile-card-name').textContent).toBe('ali')
+    expect(panel.querySelector('.profile-card-message')).toBeNull() // zaten bu konuşmadayız
+    // Karşı taraf çevrimiçi olunca başlıktaki nokta güncellenir
+    fake.presenceState = { u2: [{ user_id: 'u2', status: 'online', client_id: 'x' }] }
+    fake.syncCb?.()
+    await bosalt()
+    expect(document.querySelector('.header-host .header-dm-avatar .status-dot').dataset.status).toBe('online')
+    // Arkadaşlar sayfasına dönünce sohbet kapanır, panel gizlenir
+    document.querySelector('.home-friends').click()
+    await bosalt()
+    expect(fake.subs).toBe(0)
+    expect(panel.classList.contains('dm-profil')).toBe(false)
+    expect(panel.classList.contains('sunucusuz')).toBe(true)
+  })
+
+  it('varlık olayı: DM başlığı ve profil kartı yalnız karşı tarafın durumu değişince yeniden çizilir', async () => {
+    rpcKur()
+    fake.rows.dm_messages = [dmMesaj(1, 't1', 'u2')]
+    fake.rows.profiles = [ali]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    dmSatiri('ali').click()
+    await bosalt()
+    const avatar = () => document.querySelector('.header-host .header-dm-avatar')
+    const kart = () => document.querySelector('.member-panel .dm-profile-card')
+    const ilkAvatar = avatar()
+    const ilkKart = kart()
+    // Başka biri çevrimiçi oldu: ikisi de yerinde kalır
+    fake.presenceState = { u3: [{ user_id: 'u3', status: 'online', client_id: 'y' }] }
+    fake.syncCb?.()
+    await bosalt()
+    fake.syncCb?.() // aynı durum yeniden geldi
+    await bosalt()
+    expect(avatar()).toBe(ilkAvatar)
+    expect(kart()).toBe(ilkKart)
+    // ali çevrimiçi oldu: ikisi de yenilenir
+    fake.presenceState = { ...fake.presenceState, u2: [{ user_id: 'u2', status: 'online', client_id: 'x' }] }
+    fake.syncCb?.()
+    await bosalt()
+    expect(avatar()).not.toBe(ilkAvatar)
+    expect(avatar().querySelector('.status-dot').dataset.status).toBe('online')
+    expect(kart()).not.toBe(ilkKart)
+    const ikinciKart = kart()
+    fake.syncCb?.()
+    await bosalt()
+    expect(kart()).toBe(ikinciKart)
+  })
+
+  it('engelli konuşma (can_send=false): eski mesajlar görünür, kutu yerine "Bu kişiye mesaj gönderemezsin."', async () => {
+    liste = [dmSatir('t1', ali, { can_send: false })]
+    rpcKur()
+    fake.rows.dm_messages = [dmMesaj(1, 't1', 'u2')]
+    fake.rows.profiles = [ali]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    dmSatiri('ali').click()
+    await bosalt()
+    expect(document.querySelector('textarea')).toBeNull()
+    expect(document.querySelector('.composer-blocked').textContent).toBe('Bu kişiye mesaj gönderemezsin.')
+    expect(document.querySelector('.msg-text').textContent).toBe('m1')
+    expect(cagriSayisi('open_dm')).toBe(0) // satırdan açılır, open_dm çağrılmaz
+    // Engel kalkınca (liste yeniden alınınca) kutu geri gelir
+    liste = [dmSatir('t1', ali)]
+    window.dispatchEvent(new Event('focus'))
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('@ali kişisine mesaj gönder')
+  })
+
+  it('tek DM aboneliği: başkasının mesajı satır sayısını, Ana sayfa rozetini ve başlığı artırır; kendi mesajım artırmaz', async () => {
+    localStorage.setItem('voxen.yer', 'sunucu')
+    rpcKur({ unread_counts: () => ({ data: [{ channel_id: 'b', server_id: 's1', count: 0 }], error: null }) })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.dmAll).toBe(1)
+    expect(evRozeti()).toBeNull()
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3') })
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(11, 't2', 'u3') })
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(12, 't1', 'u1') }) // kendi mesajım (başka pencereden)
+    expect(evRozeti().textContent).toBe('2')
+    expect(document.title).toBe('(2) Voxen')
+    // Kanal okunmamışı da başlığa eklenir
+    fake.allHandlers.INSERT({ new: { id: 1, channel_id: 'b', author_id: 'u2' } })
+    expect(document.title).toBe('(3) Voxen')
+    document.querySelector('.rail-home').click()
+    await bosalt()
+    expect(dmSatiri('veli').querySelector('.unread-count').textContent).toBe('2')
+    expect(dmSatiri('ali').querySelector('.unread-count')).toBeNull()
+    // En son mesaj t1'de (kendi mesajım): liste son mesaja göre sıralı
+    expect([...document.querySelectorAll('.dm-name')].map((e) => e.textContent)).toEqual(['ali', 'veli'])
+    stopApp()
+    await bosalt()
+    expect(fake.dmAll).toBe(0)
+  })
+
+  it('listede olmayan konuşmadan mesaj ve yeniden bağlanma: liste dm_list ile yeniden alınır', async () => {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const once = cagriSayisi('dm_list')
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(20, 't9', 'u4') })
+    await bosalt()
+    expect(cagriSayisi('dm_list')).toBe(once + 1)
+    // Kopukken gelenler sayılmadı: sunucudaki doğru sayılar alınır
+    liste = [dmSatir('t1', ali, { unread: 4 }), dmSatir('t2', veli)]
+    fake.dmAllSub('SUBSCRIBED')
+    await bosalt()
+    expect(cagriSayisi('dm_list')).toBe(once + 2)
+    expect(evRozeti().textContent).toBe('4')
+    expect(document.title).toBe('(4) Voxen')
+  })
+
+  it('açık ve en alttaki DM okundu sayılır (mark_dm_read); pencere odakta değilken gelen mesaj artırır', async () => {
+    liste = [dmSatir('t1', ali, { unread: 2 })]
+    rpcKur()
+    fake.rows.dm_messages = [dmMesaj(1, 't1', 'u2'), dmMesaj(2, 't1', 'u2')]
+    fake.rows.profiles = [ali]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(evRozeti().textContent).toBe('2')
+    dmSatiri('ali').click()
+    await bosalt()
+    expect(evRozeti()).toBeNull() // açılınca (odakta, en altta) sayı sıfırlanır
+    expect(document.title).toBe('Voxen')
+    // Açık DM'e mesaj: okunuyor, artmaz
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(3, 't1', 'u2') })
+    expect(evRozeti()).toBeNull()
+    // Pencere odakta değil: artar; odağa gelince yeniden sıfırlanır
+    odak = false
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(4, 't1', 'u2') })
+    fake.dmChatInsert?.({ new: dmMesaj(4, 't1', 'u2') })
+    await bosalt()
+    expect(evRozeti().textContent).toBe('1')
+    odak = true
+    window.dispatchEvent(new Event('focus'))
+    await bosalt()
+    expect(evRozeti()).toBeNull()
+    // Okundu işareti birleştirilerek yazılır; çıkışta bekleyen hemen gider
+    stopApp()
+    await bosalt()
+    const isaretler = supabase.rpc.mock.calls.filter(([a]) => a === 'mark_dm_read').map(([, arg]) => arg)
+    expect(isaretler.at(-1)).toEqual({ tid: 't1', mid: 4 })
+  })
+})
+
+describe('masaüstü bildirimleri ve sessize alma (sosyal T5)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const veli = { id: 'u3', username: 'veli', color: '#5b7cfa', avatar_url: null }
+  const dmSatir = (id, o) => ({
+    thread_id: id, other_id: o.id, username: o.username, color: o.color, avatar_url: null,
+    created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true,
+  })
+  const dmMesaj = (id, tid, author, content = `m${id}`) => ({
+    id, thread_id: tid, author_id: author, content, edited_at: null, deleted_at: null,
+    created_at: new Date(Date.UTC(2026, 10, 13, 10, 0) + id * 60000).toISOString(),
+  })
+  let liste
+  let odak
+  let olusan
+  beforeEach(() => {
+    odak = false
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => odak)
+    vi.spyOn(window, 'focus').mockImplementation(() => {})
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    supabase.rpc.mockImplementation(async (ad) => {
+      if (ad === 'dm_list') return { data: liste, error: null }
+      if (ad === 'unread_counts') return { data: [{ channel_id: 'a', server_id: 's1', count: 0 }, { channel_id: 'b', server_id: 's1', count: 0 }], error: null }
+      return { data: null, error: null }
+    })
+    fake.rows.profiles = [ali, veli]
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    olusan = []
+    class SahteBildirim {
+      constructor(baslik, secenek) { this.baslik = baslik; this.secenek = secenek; this.close = () => {}; olusan.push(this) }
+    }
+    SahteBildirim.permission = 'granted'
+    SahteBildirim.requestPermission = vi.fn(async () => 'granted')
+    vi.stubGlobal('Notification', SahteBildirim)
+  })
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+  it('DM: pencere arkadayken bildirim "Ad" + metin; kendi mesajım ve odakta açık DM bildirmez; tıklayınca DM açılır', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3', 'selam berk') })
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(11, 't1', 'u1') }) // kendi mesajım
+    expect(olusan.map((n) => [n.baslik, n.secenek.body])).toEqual([['veli', 'selam berk']])
+    olusan[0].onclick()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('@veli kişisine mesaj gönder')
+    // Bu DM açık ve pencere odakta: bildirim yok; başka DM'den gelen bildirilir
+    odak = true
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(12, 't2', 'u3') })
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(13, 't1', 'u2') })
+    expect(olusan.map((n) => n.baslik)).toEqual(['veli', 'ali'])
+  })
+
+  it('Rahatsız etmeyin ya da ayar kapalıyken bildirim gelmez', async () => {
+    localStorage.setItem('voxen.presence', JSON.stringify({ dnd: true }))
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3') })
+    expect(olusan).toHaveLength(0)
+    localStorage.setItem('voxen.presence', JSON.stringify({ dnd: false }))
+    localStorage.setItem('voxen.bildirimler', JSON.stringify({ masaustu: false, ses: true }))
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(11, 't2', 'u3') })
+    expect(olusan).toHaveLength(0)
+  })
+
+  it('listede olmayan konuşmadan ilk DM: liste yenilenince bildirilir', async () => {
+    liste = [dmSatir('t1', ali)]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3') })
+    await bosalt()
+    expect(olusan.map((n) => n.baslik)).toEqual(['veli'])
+  })
+
+  it('bildirime tıklanınca DM listede yoksa liste tazelenip bir kez daha denenir', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3', 'selam') })
+    expect(olusan.map((n) => n.baslik)).toEqual(['veli'])
+    // Konuşma bu arada yerel listeden düştü (ör. gizlendi), sunucuda yine var
+    liste = [dmSatir('t1', ali)]
+    window.dispatchEvent(new Event('focus'))
+    await bosalt()
+    expect([...document.querySelectorAll('.dm-item .dm-name')].map((e) => e.textContent)).not.toContain('veli')
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    olusan[0].onclick()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('@veli kişisine mesaj gönder')
+  })
+
+  it('@bahsetme: başlık "Ad (#kanal, Sunucu)"; anmayan mesaj bildirmez; tıklayınca o kanal açılır', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#genel kanalına mesaj yaz…')
+    fake.allHandlers.INSERT({ new: { id: 1, channel_id: 'b', author_id: 'u2', content: 'selam herkese' } })
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u2', content: '@berk bakar mısın' } })
+    fake.allHandlers.INSERT({ new: { id: 3, channel_id: 'b', author_id: 'u2', content: '@berkcan değil' } })
+    await bosalt()
+    expect(olusan.map((n) => [n.baslik, n.secenek.body])).toEqual([['ali (#sohbet, S)', '@berk bakar mısın']])
+    olusan[0].onclick()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#sohbet kanalına mesaj yaz…')
+  })
+
+  it('sessize alınan sunucu: bahsetme bildirmez, simge soluk, rozet yine çıkar, menüde "Sessizden çıkar"', async () => {
+    fake.rows.server_mutes = [{ server_id: 's1' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.server-icon[data-odak="sunucu-s1"]').classList.contains('muted')).toBe(true)
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u2', content: '@berk bak' } })
+    await bosalt()
+    expect(olusan).toHaveLength(0)
+    expect(document.querySelector('.server-icon[data-odak="sunucu-s1"] .unread-badge').textContent).toContain('1')
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3') }) // DM'ler sessize alınamaz
+    expect(olusan.map((n) => n.baslik)).toEqual(['veli'])
+    document.querySelector('.server-name-btn').click()
+    expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent)).toContain('Sessizden çıkar')
+  })
+
+  it('menüden "Sunucuyu sessize al": server_mutes satırı eklenir, simge soluklaşır', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.server-icon[data-odak="sunucu-s1"]').classList.contains('muted')).toBe(false)
+    document.querySelector('.server-name-btn').click()
+    ;[...document.querySelectorAll('.popup-menu [role=menuitem]')].find((b) => b.textContent === 'Sunucuyu sessize al').click()
+    await bosalt()
+    expect(fake.inserts).toContainEqual(['server_mutes', { server_id: 's1' }])
+    expect(document.querySelector('.server-icon[data-odak="sunucu-s1"]').classList.contains('muted')).toBe(true)
+  })
+
+  it('ilk DM açılınca tarayıcıda bildirim izni bir kez istenir', async () => {
+    Notification.permission = 'default'
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(Notification.requestPermission).not.toHaveBeenCalled()
+    ;[...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === 'ali').click()
+    expect(Notification.requestPermission).toHaveBeenCalledTimes(1)
   })
 })

@@ -293,3 +293,191 @@ describe('006_temel_ozellikler.sql', () => {
     expect(f).toContain('exception when others then')
   })
 })
+
+// 007: sosyal (arkadaşlık, engel, DM, sessize alma, @bahsetme sayımı)
+const yol7 = 'supabase/migrations/007_sosyal.sql'
+const sql7 = existsSync(yol7) ? readFileSync(yol7, 'utf8').toLowerCase().replace(/\s+/g, ' ') : ''
+const fonk7 = (ad) => {
+  const i = sql7.search(new RegExp(`create (or replace )?function public\\.${ad}\\(`))
+  if (i < 0) return ''
+  const govdeBasi = sql7.indexOf('$$', i)
+  return sql7.slice(i, sql7.indexOf('$$;', govdeBasi + 2) + 3)
+}
+describe('007_sosyal.sql', () => {
+  it('dosya var', () => expect(existsSync(yol7)).toBe(true))
+  it('tablolar ve RLS', () => {
+    for (const t of ['friendships', 'blocks', 'dm_threads', 'dm_hidden', 'dm_messages', 'dm_reads', 'server_mutes']) {
+      expect(sql7).toContain(`create table if not exists public.${t} (`)
+      expect(sql7).toContain(`alter table public.${t} enable row level security`)
+    }
+  })
+  it('friendships: sıralı çift, tek satır, durum kısıtı; yalnız iki taraf okur, yazma politikası yok', () => {
+    expect(sql7).toContain('primary key (user_a, user_b)')
+    expect(sql7).toContain('check (user_a < user_b)')
+    expect(sql7).toContain("check (status in ('pending','accepted'))")
+    expect(sql7).toContain('create policy friendships_select on public.friendships for select to authenticated using (user_a = auth.uid() or user_b = auth.uid())')
+    expect(sql7).not.toMatch(/create policy \w+ on public\.friendships for (insert|update|delete)/)
+  })
+  it('blocks: yalnız engelleyen okur; engel_var istemciye kapalı', () => {
+    expect(sql7).toContain('create policy blocks_select on public.blocks for select to authenticated using (blocker = auth.uid())')
+    expect(sql7).not.toMatch(/create policy \w+ on public\.blocks for (insert|update|delete)/)
+    expect(sql7).toContain('revoke all on function public.engel_var(uuid, uuid) from public, anon, authenticated')
+    expect(sql7).not.toContain('grant execute on function public.engel_var')
+  })
+  it('dm_threads: benzersiz çift; dm_messages: içerik kuralı, indeks, yayın', () => {
+    expect(sql7).toContain('constraint dm_threads_cift unique (user_a, user_b)')
+    expect(sql7).toContain("(deleted_at is null and length(content) between 1 and 2000) or (deleted_at is not null and content = '')")
+    expect(sql7).toContain('create index if not exists dm_messages_thread_idx on public.dm_messages (thread_id, id desc)')
+    expect(sql7).toContain('alter publication supabase_realtime add table public.dm_messages')
+  })
+  it('dm_messages: iki taraf okur; ekleme yazar + engelsiz; UPDATE/DELETE politikası yok', () => {
+    expect(sql7).toContain('create policy dm_messages_select on public.dm_messages for select to authenticated using (public.is_dm_participant(thread_id))')
+    const p = sql7.slice(sql7.indexOf('create policy dm_messages_insert'))
+    expect(p).toContain('author_id = auth.uid()')
+    expect(p).toContain('deleted_at is null')
+    expect(p).toContain('edited_at is null')
+    expect(p).toContain('public.can_send_dm(thread_id)')
+    expect(sql7).not.toMatch(/create policy \w+ on public\.dm_messages for (update|delete)/)
+    expect(fonk7('can_send_dm')).toContain('not public.engel_var(t.user_a, t.user_b)')
+  })
+  it('server_mutes: yalnız kendi satırları, ekleme üyelik ister', () => {
+    expect(sql7).toContain('user_id uuid not null default auth.uid()')
+    expect(sql7).toContain('create policy server_mutes_select on public.server_mutes for select to authenticated using (user_id = auth.uid())')
+    expect(sql7).toContain('with check (user_id = auth.uid() and public.is_member(server_id))')
+    expect(sql7).toContain('create policy server_mutes_delete on public.server_mutes for delete to authenticated using (user_id = auth.uid())')
+  })
+
+  const imzalar7 = {
+    send_friend_request: '(text)', accept_friend_request: '(uuid)', decline_friend_request: '(uuid)',
+    remove_friend: '(uuid)', block_user: '(uuid)', unblock_user: '(uuid)', open_dm: '(uuid)',
+    edit_dm_message: '(bigint, text)', delete_dm_message: '(bigint)', dm_list: '()', mark_dm_read: '(uuid, bigint)',
+    hide_dm: '(uuid)', unread_counts: '()', mentions_user: '(text, text)', is_dm_participant: '(uuid)',
+    can_send_dm: '(uuid)', can_access_dm_topic: '(text, boolean)', kisi_olayi_gonder: '()', dm_son_mesaj_guncelle: '()',
+  }
+  for (const [ad, imza] of Object.entries(imzalar7)) {
+    it(`${ad}: security definer, search_path, anon kapalı, authenticated açık`, () => {
+      const f = fonk7(ad)
+      expect(f).not.toBe('')
+      expect(f).toContain('security definer')
+      expect(f).toContain('set search_path = public')
+      expect(sql7).toContain(`revoke all on function public.${ad}${imza} from public, anon`)
+      expect(sql7).toContain(`grant execute on function public.${ad}${imza} to authenticated`)
+    })
+  }
+  it('RPC parametre adları (istemci bu adlarla çağırır)', () => {
+    for (const s of ['send_friend_request(username text)', 'accept_friend_request(other uuid)',
+      'decline_friend_request(other uuid)', 'remove_friend(other uuid)', 'block_user(other uuid)',
+      'unblock_user(other uuid)', 'open_dm(other uuid)', 'edit_dm_message(id bigint, yeni text)',
+      'delete_dm_message(id bigint)', 'dm_list()', 'mark_dm_read(tid uuid, mid bigint)', 'hide_dm(tid uuid)']) {
+      expect(sql7).toContain(`function public.${s}`)
+    }
+  })
+  it('hata kodları sabit', () => {
+    for (const k of ['no_user', 'already_friends', 'already_sent', 'self', 'too_many', 'blocked_dm', 'not_allowed']) {
+      expect(sql7).toContain(`raise exception '${k}'`)
+    }
+  })
+  it('send_friend_request: engelde NO_USER, sınır 20, eşleşme, çift kilidi', () => {
+    const f = fonk7('send_friend_request')
+    expect(f).toMatch(/if public\.engel_var\(ben, diger\) then raise exception 'no_user'/)
+    expect(f).toContain("= 'pending') >= 20 then raise exception 'too_many'")
+    expect(f).toContain("set status = 'accepted', accepted_at = now()")
+    expect(f).toContain("return 'accepted'")
+    expect(f).toContain("return 'sent'")
+    expect(f).toContain('pg_advisory_xact_lock(')
+    // kilitten SONRA engel yeniden denetlenir (block_user ile yarış)
+    const kilit = f.indexOf('pg_advisory_xact_lock(')
+    expect(f.indexOf("if public.engel_var(ben, diger) then raise exception 'no_user'", kilit)).toBeGreaterThan(kilit)
+  })
+  it('block_user ve accept_friend_request aynı çift kilidini alır; kabulde engel denetlenir', () => {
+    const kilit = "pg_advisory_xact_lock(hashtextextended( 'friendship:' || least(ben, other)::text || ':' || greatest(ben, other)::text, 0))"
+    const blok = fonk7('block_user')
+    expect(blok).toContain(kilit)
+    expect(blok.indexOf(kilit)).toBeLessThan(blok.indexOf('delete from public.friendships'))
+    expect(blok).toContain('delete from public.friendships')
+    const kabul = fonk7('accept_friend_request')
+    expect(kabul).toContain(kilit)
+    expect(kabul).toMatch(/if public\.engel_var\(ben, other\) then raise exception 'not_allowed'/)
+    expect(kabul.indexOf('engel_var')).toBeLessThan(kabul.indexOf('update public.friendships'))
+    expect(fonk7('send_friend_request')).toContain("hashtextextended('friendship:' || a::text || ':' || b::text, 0)")
+  })
+  it('open_dm: arkadaşlık ya da ortak sunucu; engel; on conflict; gizlemeyi kaldırır', () => {
+    const f = fonk7('open_dm')
+    expect(f).toContain("fr.status = 'accepted'")
+    expect(f).toContain('public.server_members s1 join public.server_members s2')
+    expect(f).toContain('public.engel_var(ben, other)')
+    expect(f).toContain('on conflict (user_a, user_b) do nothing')
+    expect(f).toContain('delete from public.dm_hidden')
+    // engel iki yolda da (var olan konuşma dahil) konuşma aranmadan ve gizleme silinmeden önce
+    const aranan = f.indexOf('select t.id into tid')
+    expect(f.indexOf("raise exception 'blocked_dm'")).toBeLessThan(aranan)
+    expect(f.indexOf('public.engel_var(ben, other)')).toBeLessThan(aranan)
+    expect(f.indexOf('public.engel_var(ben, other)')).toBeLessThan(f.indexOf('delete from public.dm_hidden'))
+  })
+  it('edit/delete_dm_message: yalnız yazar, yumuşak silme', () => {
+    expect(fonk7('edit_dm_message')).toContain('m.author_id <> auth.uid()')
+    const sil = fonk7('delete_dm_message')
+    expect(sil).toContain('m.author_id <> auth.uid()')
+    expect(sil).toContain("set content = '', deleted_at = now()")
+  })
+  it('mark_dm_read yalnız ileri; dm_list gizlenenleri süzer, okunmamış en fazla 100', () => {
+    expect(fonk7('mark_dm_read')).toContain('greatest(r.last_read_id, excluded.last_read_id)')
+    const l = fonk7('dm_list')
+    expect(l).toContain('m2.id > h.hidden_after_id')
+    expect(l).toContain('limit 100')
+    expect(l).toContain('m.author_id <> auth.uid()')
+  })
+  it('unread_counts: drop + create; v0.3.0 sütunları aynı sırada, sona mentions', () => {
+    expect(sql7).toContain('drop function if exists public.unread_counts();')
+    expect(sql7).toContain('returns table (channel_id uuid, server_id uuid, count int, mentions int)')
+    const f = fonk7('unread_counts')
+    expect(f).toContain('public.mentions_user(y.content, ben.username)')
+  })
+  it('unread_counts.mentions: kanal başına en yeni 100 okunmamış taranır, "@" ön süzgeci', () => {
+    const f = fonk7('unread_counts')
+    const m = f.slice(f.indexOf('select m.content from public.messages m'))
+    expect(m).toMatch(/m\.author_id <> auth\.uid\(\)\s+order by m\.id desc\s+limit 100\s+\) y/)
+    expect(m).toMatch(/where y\.content like '%@%'\s+and public\.mentions_user\(y\.content, ben\.username\)/)
+    // count sütunu 006'daki gibi kalır (sıralama yok, en fazla 100)
+    expect(f.slice(0, f.indexOf('select m.content'))).toContain('limit 100')
+  })
+  it('mentions_user immutable (tabloya dokunmaz)', () => {
+    const f = fonk7('mentions_user')
+    expect(f).toMatch(/language sql\s+immutable/)
+    expect(f).not.toContain('from public.')
+  })
+  it('bahsetme kuralı: büyük-küçük harf duyarsız, kelime sınırı, ad kaçırılır', () => {
+    const f = fonk7('mentions_user')
+    expect(f).toContain('~*')
+    expect(f).toContain("'(^|[^[:alnum:]_])@'")
+    expect(f).toContain("'($|[^[:alnum:]_])'")
+    expect(f).toContain(String.raw`regexp_replace(ad, '([^[:alnum:]])', '\\\1', 'g')`)
+  })
+  it('realtime: user: yalnız kendisi alır (gönderme yok); dm-typing: iki taraf, yalnız broadcast', () => {
+    const u = sql7.slice(sql7.indexOf('create policy user_receive'))
+    expect(u).toContain('for select to authenticated')
+    expect(u).toContain("realtime.topic() = 'user:' || auth.uid()::text")
+    expect(sql7).not.toMatch(/create policy user_\w+ on realtime\.messages for insert/)
+    expect(sql7).toContain('create policy dm_typing_receive on realtime.messages for select to authenticated')
+    expect(sql7).toContain('create policy dm_typing_send on realtime.messages for insert to authenticated')
+    const t = sql7.slice(sql7.indexOf('create policy dm_typing_receive'))
+    expect(t).toContain("realtime.messages.extension = 'broadcast'")
+    expect(fonk7('can_access_dm_topic')).toContain("'^dm-typing:[0-9a-f]{8}-")
+  })
+  it('tetikleyiciler: friendships/dm_threads iki tarafa degisti; last_message_at; hatalar yutulur', () => {
+    expect(sql7).toContain('after insert or update or delete on public.friendships')
+    expect(sql7).toContain('after insert or delete on public.dm_threads')
+    expect(sql7).toContain('after insert on public.dm_messages')
+    const f = fonk7('kisi_olayi_gonder')
+    expect(f).toContain('perform realtime.send(')
+    expect(f).toContain("'degisti', 'user:' || kisi::text, true")
+    expect(f).toContain('exception when others then')
+    const s = fonk7('dm_son_mesaj_guncelle')
+    expect(s).toContain('set last_message_at = now()')
+    expect(s).not.toContain('new.created_at')
+    expect(s).toContain('exception when others then')
+  })
+  it('messages tablosuna dokunulmaz', () => {
+    expect(sql7).not.toMatch(/alter table public\.messages|on public\.messages /)
+  })
+})

@@ -6,6 +6,7 @@ export const BEEPS = {
   leave: [[784, 0.08], [523, 0.12]], // alçalan iki nota: ayrıldın
   'ptt-on': [[880, 0.05]], // tek kısa ince ses: konuşma açıldı
   'ptt-off': [[620, 0.05]], // tek kısa kalın ses: konuşma kapandı
+  bildirim: [[740, 0.07], [988, 0.16]], // kısa, yumuşak iki nota: yeni DM ya da @bahsetme (src/notify.js)
 }
 
 let ctx = null // tek ses bağlamı, ilk bipte açılır

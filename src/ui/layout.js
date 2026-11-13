@@ -34,7 +34,7 @@ function uyeSeciminiYaz(acik) {
   try { localStorage.setItem(UYE_ANAHTARI, acik ? '1' : '0') } catch { /* hatırlanmazsa sorun değil */ }
 }
 
-// panel: mountLayout'un döndüğü üye paneli. Dönen: { button, dispose() }.
+// panel: mountLayout'un döndüğü üye paneli. Dönen: { button, refresh(), dispose() }.
 // button sohbet başlığına konur (chatView headerActions). dispose() pencere dinleyicisini bırakır.
 export function createMemberToggle(panel) {
   const dugme = document.createElement('button')
@@ -62,7 +62,12 @@ export function createMemberToggle(panel) {
   // Seçim yapılmadıysa pencere boyutu değişince varsayılanı yeniden uygula
   const boyutDegisti = () => { if (uyeSeciminiOku() === null) uygula(genisMi()) }
   window.addEventListener('resize', boyutDegisti)
-  return { button: dugme, dispose: () => window.removeEventListener('resize', boyutDegisti) }
+  return {
+    button: dugme,
+    // Panel başka biri tarafından gösterildiyse (DM'de profil kartı) seçime göre yeniden uygula
+    refresh: () => uygula(uyeSeciminiOku() ?? genisMi()),
+    dispose: () => window.removeEventListener('resize', boyutDegisti),
+  }
 }
 
 // Sağ altta kısa süre görünen bildirim.

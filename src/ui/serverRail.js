@@ -1,4 +1,5 @@
-// Soldaki sunucu şeridi: her sunucu için ilk harfli simge ve en altta "+".
+// Soldaki sunucu şeridi: en üstte Ana sayfa (verilirse) ve ayraç, sonra her sunucu için ilk harfli
+// simge, en altta "+" ve "katıl".
 
 // Sunucu adının ilk harfi, büyük (Türkçe kurallarıyla: i -> İ)
 export function ilkHarf(ad) {
@@ -17,19 +18,26 @@ function ipucuVer(dugme, ad) {
   dugme.setAttribute('aria-label', ad)
 }
 
-// unread: { serverCount(serverId) } (isteğe bağlı): okunmamışı olan sunucuda solda nokta + sağ altta sayı.
-// handlers: { onSelect(serverId), onAdd(), onJoin() }
-export function renderRail(rail, servers, selectedId, handlers, unread = null) {
+// unread: { serverCount(serverId), serverMentions(serverId) } (isteğe bağlı): okunmamışı olan sunucuda solda nokta
+// + sağ altta sayı; seni anan mesaj varsa sayının önünde "@".
+// handlers: { onSelect(serverId), onAdd(), onJoin(), onHome() }
+// home (isteğe bağlı): { selected, unread } -> en üstte Voxen logolu Ana sayfa düğmesi ve altında ayraç.
+//   unread: okunmamış DM toplamı (sağ altta kırmızı rozet).
+// muted (isteğe bağlı): Set<serverId> sessize alınan sunucular: simge soluk görünür, rozet yine çıkar.
+export function renderRail(rail, servers, selectedId, handlers, unread = null, home = null, muted = null) {
   // Okunmamış değişince şerit baştan çizilir: odaktaki düğme silinip klavye odağı kaybolmasın diye
   // önce anahtarını (data-odak, bkz. channelList.js) hatırla, çizimden sonra aynı anahtarlıya odaklan.
   const odakli = document.activeElement
   const odakAnahtari = rail.contains(odakli) ? odakli.dataset?.odak : null
   rail.innerHTML = ''
+  if (home) anaSayfaDugmesi(rail, home, handlers)
   for (const s of servers) {
     const dugme = document.createElement('button')
     dugme.type = 'button'
-    dugme.className = 'server-icon' + (s.id === selectedId ? ' selected' : '')
+    const sessiz = !!muted?.has?.(s.id)
+    dugme.className = 'server-icon' + (s.id === selectedId ? ' selected' : '') + (sessiz ? ' muted' : '')
     ipucuVer(dugme, s.name)
+    if (sessiz) dugme.setAttribute('aria-label', `${s.name}, sessizde`)
     dugme.dataset.odak = 'sunucu-' + s.id
     dugme.textContent = ilkHarf(s.name)
     const okunmamis = unread?.serverCount?.(s.id) ?? 0
@@ -40,8 +48,17 @@ export function renderRail(rail, servers, selectedId, handlers, unread = null) {
       const rozet = document.createElement('span')
       rozet.className = 'unread-badge'
       rozet.textContent = sayiYazisi(okunmamis)
+      // Seni anan okunmamış mesaj varsa rozetin önünde küçük "@" işareti
+      const anma = unread?.serverMentions?.(s.id) ?? 0
+      if (anma > 0) {
+        const isaret = document.createElement('span')
+        isaret.className = 'mention-mark'
+        isaret.setAttribute('aria-hidden', 'true') // bilgi aria-label'da
+        isaret.textContent = '@'
+        rozet.prepend(isaret)
+      }
       dugme.append(nokta, rozet)
-      dugme.setAttribute('aria-label', `${s.name}, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
+      dugme.setAttribute('aria-label', `${s.name}, ${sayiYazisi(okunmamis)} okunmamış mesaj` + (anma > 0 ? `, ${sayiYazisi(anma)} bahsetme` : '') + (sessiz ? ', sessizde' : ''))
     }
     dugme.onclick = () => handlers.onSelect?.(s.id)
     rail.appendChild(dugme)
@@ -71,4 +88,33 @@ export function renderRail(rail, servers, selectedId, handlers, unread = null) {
   katil.onclick = () => handlers.onJoin?.()
   rail.appendChild(katil)
   if (odakAnahtari) [...rail.querySelectorAll('[data-odak]')].find((e) => e.dataset.odak === odakAnahtari)?.focus()
+}
+
+// Ana sayfa düğmesi (Voxen logosu) + altında ince ayraç. Sınıfları sunucu simgesinden ayrı
+// (.rail-home): sunucu simgelerini sayan/seçen kod onu sunucu sanmasın.
+function anaSayfaDugmesi(rail, home, handlers) {
+  const dugme = document.createElement('button')
+  dugme.type = 'button'
+  dugme.className = 'rail-home' + (home.selected ? ' selected' : '')
+  ipucuVer(dugme, 'Ana sayfa')
+  dugme.dataset.odak = 'ana-sayfa'
+  if (home.selected) dugme.setAttribute('aria-current', 'page')
+  const logo = document.createElement('img')
+  logo.src = '/favicon.svg'
+  logo.alt = ''
+  logo.className = 'rail-home-logo'
+  dugme.appendChild(logo)
+  const okunmamis = home.unread ?? 0
+  if (okunmamis > 0) {
+    const rozet = document.createElement('span')
+    rozet.className = 'unread-badge'
+    rozet.textContent = sayiYazisi(okunmamis)
+    dugme.appendChild(rozet)
+    dugme.setAttribute('aria-label', `Ana sayfa, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
+  }
+  dugme.onclick = () => handlers.onHome?.()
+  const ayrac = document.createElement('div')
+  ayrac.className = 'rail-home-separator'
+  ayrac.setAttribute('role', 'separator')
+  rail.append(dugme, ayrac)
 }

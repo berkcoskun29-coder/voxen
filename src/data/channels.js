@@ -9,6 +9,14 @@ export async function listChannels(serverId) {
   return data ?? []
 }
 
+// Tek kanalın adı ve sunucusu (bildirim başlığı için: "Ad (#kanal, Sunucu)"). Bulunamazsa null.
+export async function getChannel(channelId) {
+  const { data, error } = await supabase
+    .from('channels').select('id, name, server_id').eq('id', channelId).maybeSingle()
+  if (error) throw new Error(error.message)
+  return data ?? null
+}
+
 // Yeni kanal ekler (sadece sunucu sahibi yapabilir; kural veritabanında).
 // kind: 'text' ya da 'voice'. Yeni kanal listenin sonuna gelir.
 export async function createChannel(serverId, name, kind, position = 0) {

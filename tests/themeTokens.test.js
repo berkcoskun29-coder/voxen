@@ -30,6 +30,13 @@ describe('tema değişkenleri', () => {
     expect(yorumsuz).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{[^@]*\.key-listen\.dinliyor\s*\{\s*animation:\s*none/)
   })
 
+  it('@bahsetme: etiket ve vurgu tema değişkenleriyle; etiket geçişi hareket azaltmada kapanır', () => {
+    expect(css).toMatch(/--mention-line:/)
+    expect(yorumsuz).toMatch(/\.mention\s*\{[^}]*background:\s*var\(--mention-tag-bg\)/)
+    expect(yorumsuz).toMatch(/\.message\.mentioned\s*\{[^}]*var\(--mention-bg\)[^}]*var\(--mention-line\)/)
+    expect(yorumsuz).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.mention\s*\{\s*transition:\s*none/)
+  })
+
   it('dar pencerede ayarlar menüsü üste gelir (tek kolon)', () => {
     expect(yorumsuz).toMatch(/@media \(max-width:\s*\d+px\)\s*\{[^@]*\.settings-layout\s*\{[^}]*flex-direction:\s*column/)
   })
