@@ -1,6 +1,6 @@
 // Kısa uyarı sesleri: Web Audio osilatörleriyle üretilir (ses dosyası yok).
-import { describe, it, expect } from 'vitest'
-import { playBeep, BEEPS } from '../src/voice/sounds.js'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { playBeep, startLoop, BEEPS, LOOPS } from '../src/voice/sounds.js'
 
 // Sahte AudioContext: kaç osilatör başlatıldığını sayar
 function sahteCtx() {
@@ -39,5 +39,52 @@ describe('playBeep', () => {
     const { Ctx } = sahteCtx()
     expect(playBeep('yok', { AudioContext: Ctx })).toBe(false)
     expect(playBeep('join')).toBe(false) // Node'da AudioContext yok
+  })
+})
+
+describe('startLoop (DM aramasında bekleme tonu)', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('hemen çalar, aralıkla tekrarlar; durdurunca sayaç kalmaz ve çalan nota kesilir', () => {
+    vi.useFakeTimers()
+    const { Ctx, kayit } = sahteCtx()
+    const durdur = startLoop('bekleme', { AudioContext: Ctx })
+    const notaSayisi = BEEPS.bekleme.length
+    expect(kayit.osc).toHaveLength(notaSayisi)
+    vi.advanceTimersByTime(LOOPS.bekleme.aralikMs)
+    expect(kayit.osc).toHaveLength(notaSayisi * 2)
+    durdur()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(kayit.osc.at(-1).bitir).toBeUndefined() // stop() argümansız: hemen kesildi
+    vi.advanceTimersByTime(LOOPS.bekleme.aralikMs * 3)
+    expect(kayit.osc).toHaveLength(notaSayisi * 2)
+    durdur() // ikinci kez çağırmak sorun değil
+  })
+
+  it('bilinmeyen ad ya da Web Audio yoksa sessiz; durdurma yine güvenli', () => {
+    vi.useFakeTimers()
+    expect(() => startLoop('yok')()).not.toThrow()
+    const durdur = startLoop('bekleme') // Node'da AudioContext yok
+    durdur()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('gelen arama zili (LOOPS.zil)', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('kısa, döngülü, bekleme tonundan farklı; durdurunca sayaç kalmaz', () => {
+    vi.useFakeTimers()
+    expect(LOOPS.zil.nota).toBe('zil')
+    expect(BEEPS.zil.length).toBeGreaterThan(0)
+    expect(BEEPS.zil.reduce((t, [, sure]) => t + sure, 0)).toBeLessThan(1) // kısa
+    expect(BEEPS.zil).not.toEqual(BEEPS.bekleme)
+    const { Ctx, kayit } = sahteCtx()
+    const durdur = startLoop('zil', { AudioContext: Ctx })
+    expect(kayit.osc).toHaveLength(BEEPS.zil.length)
+    vi.advanceTimersByTime(LOOPS.zil.aralikMs)
+    expect(kayit.osc).toHaveLength(BEEPS.zil.length * 2)
+    durdur()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

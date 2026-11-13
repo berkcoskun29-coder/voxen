@@ -27,6 +27,7 @@ vi.mock('../src/lib/supabase.js', () => {
       then: async (res) => {
         if (kapi) await kapi
         if (tablo === 'servers' && fake.serversError) return res({ data: null, error: { message: 'Ağ hatası' } })
+        if (tablo === 'dm_calls') return res({ data: tek ? (satirlar[0] ?? null) : satirlar, error: null }) // getCallStatus
         if (tablo !== 'voice_states') return res({ data: satirlar, error: null })
         const uyar = (r) => Object.entries(filtre).every(([k, v]) => r[k] === v)
         if (islem === 'upsert') {
@@ -67,6 +68,7 @@ vi.mock('../src/lib/supabase.js', () => {
         if (tumuKanal) fake.allHandlers[f.event] = cb
         if (ad === 'presence:voxen') fake.syncCb = cb
         if (kisiKanal) fake.userCb = cb
+        if (kisiKanal) (fake.userHandlers ??= {})[f.event] = cb // "arama" olayları (DM araması) da bu konudan
         if (dmTumu) fake.dmAllHandlers[f.event] = cb
         if (ad.startsWith('dm-messages:') && f.event === 'INSERT') fake.dmChatInsert = cb
         if (vsKanal && f.filter) fake.vsHandlers.push({ server: f.filter.replace('server_id=eq.', ''), cb, k })
@@ -128,10 +130,25 @@ vi.mock('../src/voice/session.js', async (asil) => {
     ...m,
     createVoiceSession: (o) => {
       const s = m.createVoiceSession(o)
+      if (fake.joinHatasi) s.join = () => Promise.reject(new Error('katılamadı')) // DM araması: katılma hatası
       const asilFn = s.setRoomScreenOn
       s.setRoomScreenOn = vi.fn((b) => asilFn?.(b))
       fake.oturum = s
       return s
+    },
+  }
+})
+
+// Döngülü sesleri (bekleme tonu, gelen arama zili) yakala: hangi döngü başladı / durdu
+vi.mock('../src/voice/sounds.js', async (asil) => {
+  const m = await asil()
+  return {
+    ...m,
+    startLoop: (ad, d) => {
+      const kayit = { ad, durdu: false }
+      ;(fake.donguler ??= []).push(kayit)
+      const durdur = m.startLoop(ad, d)
+      return () => { kayit.durdu = true; durdur() }
     },
   }
 })
@@ -1627,6 +1644,17 @@ describe('özel mesaj sohbeti ve canlı DM okunmamış (sosyal T3)', () => {
     expect(fake.dmAll).toBe(0)
   })
 
+  it('arama kaydı satırı (kind call) metin satırı gibi okunmamış sayılır', async () => {
+    localStorage.setItem('voxen.yer', 'sunucu')
+    rpcKur({ unread_counts: () => ({ data: [{ channel_id: 'b', server_id: 's1', count: 0 }], error: null }) })
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(30, 't2', 'u3', { kind: 'call', content: '📞 Cevapsız arama' }) })
+    expect(evRozeti().textContent).toBe('1')
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(31, 't2', 'u3', { kind: 'text' }) })
+    expect(evRozeti().textContent).toBe('2')
+  })
+
   it('listede olmayan konuşmadan mesaj ve yeniden bağlanma: liste dm_list ile yeniden alınır', async () => {
     rpcKur()
     await startApp(document.querySelector('#app'), profil)
@@ -1815,5 +1843,627 @@ describe('masaüstü bildirimleri ve sessize alma (sosyal T5)', () => {
     expect(Notification.requestPermission).not.toHaveBeenCalled()
     ;[...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === 'ali').click()
     expect(Notification.requestPermission).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('DM araması: 📞, arama paneli ve "arama" olayları (arama T3)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const dmSatir = (id, o, ek = {}) => ({
+    thread_id: id, other_id: o.id, username: o.username, color: o.color, avatar_url: null,
+    created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true, ...ek,
+  })
+  let liste
+  let baslatma
+  function rpcKur() {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ad === 'dm_list') return { data: liste, error: null }
+      if (ad === 'unread_counts') return { data: [], error: null }
+      if (ad === 'start_dm_call') return baslatma(arg)
+      if (ad === 'ping_dm_call') return { data: true, error: null }
+      return { data: null, error: null }
+    })
+  }
+  const cagrilar = (ad) => supabase.rpc.mock.calls.filter(([a]) => a === ad).map(([, x]) => x)
+  const dmSatiri = (ad) => [...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === ad)
+  const araDugmesi = () => document.querySelector('.header-host .call-start')
+  const panel = () => document.querySelector('.call-host .call-panel')
+  const toastlar = () => [...document.querySelectorAll('.toast')].map((t) => t.textContent)
+  const aramaOlayi = (yuk) => fake.userHandlers.arama({ payload: { thread_id: 't1', caller: 'u1', reason: null, ...yuk } })
+  const dmSesKonulari = () => fake.channel.mock.calls.map(([ad]) => ad).filter((ad) => ad.startsWith('dm-voice:'))
+
+  beforeEach(() => {
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => true)
+    liste = [dmSatir('t1', ali)]
+    baslatma = () => ({ data: { id: 'c1', status: 'ringing' }, error: null })
+    fake.joinHatasi = false
+    fake.userHandlers = {}
+    fake.channel.mockClear()
+    localStorage.setItem('voxen.yer', 'ana')
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  async function uygulamayiAc() {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+  }
+  async function dmAc() {
+    await uygulamayiAc()
+    dmSatiri('ali').click()
+    await bosalt()
+  }
+
+  it('DM başlığında 📞 "Sesli arama başlat"; basınca "Aranıyor…" paneli; olaylarla konuşmaya geçer ve kapanır', async () => {
+    await dmAc()
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Sesli arama başlat')
+    expect(panel()).toBeNull()
+    araDugmesi().click()
+    await bosalt()
+    expect(cagrilar('start_dm_call')).toEqual([{ tid: 't1' }])
+    expect(panel().classList.contains('araniyor')).toBe(true)
+    expect(panel().querySelector('.call-status').textContent).toBe('Aranıyor…')
+    // Panel başlığın altında, sohbetin üstünde (görüntü bölmesinin yerinde)
+    const sira = [...document.querySelector('.call-host').parentElement.children].map((e) => e.className)
+    expect(sira.indexOf('call-host')).toBe(sira.indexOf('header-host') + 1)
+    expect(sira.indexOf('chat-host')).toBeGreaterThan(sira.indexOf('call-host'))
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Aramadasın')
+    expect(dmSesKonulari()).toEqual([]) // cevap gelmeden sese girilmez
+
+    aramaOlayi({ call_id: 'c1', status: 'active' })
+    await bosalt()
+    expect(dmSesKonulari()).toEqual(['dm-voice:c1'])
+    expect(panel().classList.contains('konusma')).toBe(true)
+    expect([...panel().querySelectorAll('.call-avatar-wrap')].map((a) => a.dataset.id)).toEqual(['u1', 'u2'])
+    expect(panel().querySelector('.call-timer').textContent).toMatch(/^00:0\d$/)
+
+    // Karşı taraf kapattı: panel kapanır, 📞 yeniden etkin
+    aramaOlayi({ call_id: 'c1', status: 'ended', reason: 'hangup' })
+    await bosalt()
+    expect(panel()).toBeNull()
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Sesli arama başlat')
+    expect(cagrilar('end_dm_call')).toEqual([]) // sunucu zaten bitirdi
+  })
+
+  it('İptal: end_dm_call cancel; konuşmada Kapat: hangup', async () => {
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    panel().querySelector('.call-cancel').click()
+    await bosalt()
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c1', reason: 'cancel' }])
+    expect(panel()).toBeNull()
+
+    baslatma = () => ({ data: { id: 'c2', status: 'active' }, error: null }) // karşılıklı arama
+    araDugmesi().click()
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    panel().querySelector('[data-ad="Kapat"]').click()
+    await bosalt()
+    expect(cagrilar('end_dm_call').at(-1)).toEqual({ id: 'c2', reason: 'hangup' })
+    expect(panel()).toBeNull()
+  })
+
+  it('reddedilince "ali aramayı reddetti."; meşgulse "ali şu an başka bir aramada."', async () => {
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    aramaOlayi({ call_id: 'c1', status: 'ended', reason: 'decline' })
+    await bosalt()
+    expect(panel()).toBeNull()
+    expect(toastlar()).toContain('ali aramayı reddetti.')
+    baslatma = () => ({ data: null, error: { message: 'BUSY' } })
+    araDugmesi().click()
+    await bosalt()
+    expect(toastlar()).toContain('ali şu an başka bir aramada.')
+    expect(panel()).toBeNull()
+  })
+
+  it('başka bir DM\'de 📞: "Sesli arama başlat" ama pasif, baloncukta "Zaten bir aramadasın."', async () => {
+    const veli = { id: 'u3', username: 'veli', color: '#5b7cfa', avatar_url: null }
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    baslatma = () => ({ data: { id: 'c6', status: 'active' }, error: null })
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Aramadasın')
+    dmSatiri('veli').click()
+    await bosalt()
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Sesli arama başlat')
+    expect(araDugmesi().dataset.tip).toBe('Zaten bir aramadasın.')
+    expect(araDugmesi().getAttribute('aria-disabled')).toBe('true')
+    araDugmesi().click()
+    await bosalt()
+    expect(cagrilar('start_dm_call')).toHaveLength(1)
+  })
+
+  it('user: kanalı yeniden bağlanınca "Aranıyor…" aramasının durumu okunur; active ise konuşmaya geçilir', async () => {
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    expect(panel().classList.contains('araniyor')).toBe(true)
+    fake.rows.dm_calls = [{ status: 'active', end_reason: null }] // "active" olayı kopuklukta kaçtı
+    fake.userHandlers.degisti({ payload: { yeniden: true } })
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    expect(dmSesKonulari()).toEqual(['dm-voice:c1'])
+    expect(cagrilar('end_dm_call')).toEqual([])
+  })
+
+  it('user: kanalı yeniden bağlanınca konuşmadaki aramanın durumu da okunur; ended ise normal bitiş ("bağlantı koptu" yok)', async () => {
+    baslatma = () => ({ data: { id: 'c1', status: 'active' }, error: null })
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    const leave = vi.spyOn(fake.oturum, 'leave')
+    // Hâlâ sürüyorsa bir şey olmaz
+    fake.rows.dm_calls = [{ status: 'active', end_reason: null }]
+    fake.userHandlers.degisti({ payload: { yeniden: true } })
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    // Kopukken karşı taraf kapattı ("ended" olayı kaçtı)
+    fake.rows.dm_calls = [{ status: 'ended', end_reason: 'hangup' }]
+    fake.userHandlers.degisti({ payload: { yeniden: true } })
+    await bosalt()
+    expect(panel()).toBeNull()
+    expect(leave).toHaveBeenCalledTimes(1) // oturum kapanır (bitiş biplemesini oturum çalar)
+    expect(toastlar()).not.toContain('Arama bağlantısı koptu.')
+    expect(cagrilar('end_dm_call')).toEqual([]) // sunucu zaten bitirdi
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Sesli arama başlat')
+  })
+
+  it('kutu kapalıyken (can_send=false) 📞 pasif', async () => {
+    liste = [dmSatir('t1', ali, { can_send: false })]
+    await dmAc()
+    expect(araDugmesi().getAttribute('aria-disabled')).toBe('true')
+    araDugmesi().click()
+    await bosalt()
+    expect(cagrilar('start_dm_call')).toEqual([])
+  })
+
+  it('sesli kanaldayken arayınca önce kanaldan çıkılır ("Sesli kanaldan ayrıldın.")', async () => {
+    localStorage.setItem('voxen.yer', 'sunucu')
+    await uygulamayiAc()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(fake.voice).toBe(1)
+    document.querySelector('.rail-home').click()
+    await bosalt()
+    dmSatiri('ali').click()
+    await bosalt()
+    araDugmesi().click()
+    await bosalt()
+    expect(fake.voice).toBe(0)
+    expect(toastlar()).toContain('Sesli kanaldan ayrıldın.')
+    expect(panel().classList.contains('araniyor')).toBe(true)
+  })
+
+  it('ses oturumuna katılma başarısızsa arama lost ile biter: "Arama bağlantısı koptu."', async () => {
+    fake.joinHatasi = true
+    baslatma = () => ({ data: { id: 'c4', status: 'active' }, error: null })
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    expect(cagrilar('end_dm_call')).toContainEqual({ id: 'c4', reason: 'lost' })
+    expect(toastlar()).toContain('Arama bağlantısı koptu.')
+    expect(panel()).toBeNull()
+  })
+
+  it('Arkadaşlar sayfasına geçince panel gizlenir, arama sürer; DM açılınca yine görünür', async () => {
+    baslatma = () => ({ data: { id: 'c5', status: 'active' }, error: null })
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    document.querySelector('.rail-home').click() // Ana sayfa: Arkadaşlar sayfası
+    await bosalt()
+    expect(panel()).toBeNull()
+    expect(dmSesKonulari()).toEqual(['dm-voice:c5'])
+    dmSatiri('ali').click()
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    expect(cagrilar('end_dm_call')).toEqual([])
+  })
+
+  it('aramadayken sesli kanala girilince arama biter (hangup) ve panel kapanır', async () => {
+    baslatma = () => ({ data: { id: 'c3', status: 'active' }, error: null })
+    await dmAc()
+    araDugmesi().click()
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    // Sunucuya geç ve sesli kanala gir
+    const sunucu = [...document.querySelectorAll('.server-icon')].find((b) => !b.classList.contains('rail-home') && b.dataset.id === 's1')
+      ?? [...document.querySelectorAll('.server-icon')].find((b) => b.getAttribute('aria-label') === 'S')
+    sunucu.click()
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(cagrilar('end_dm_call')).toContainEqual({ id: 'c3', reason: 'hangup' })
+    expect(fake.voice).toBe(1)
+  })
+})
+
+describe('gelen DM araması: kart, zil, bildirim (arama T4)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const veli = { id: 'u3', username: 'veli', color: '#5b7cfa', avatar_url: null }
+  const dmSatir = (id, o, ek = {}) => ({
+    thread_id: id, other_id: o.id, username: o.username, color: o.color, avatar_url: null,
+    created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true, ...ek,
+  })
+  let liste
+  let cevap
+  let baslatma
+  let odak
+  let olusan
+  function rpcKur() {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ad === 'dm_list') return { data: liste, error: null }
+      if (ad === 'unread_counts') return { data: [], error: null }
+      if (ad === 'answer_dm_call') return cevap(arg)
+      if (ad === 'start_dm_call') return baslatma(arg)
+      if (ad === 'ping_dm_call') return { data: true, error: null }
+      return { data: null, error: null }
+    })
+  }
+  const cagrilar = (ad) => supabase.rpc.mock.calls.filter(([a]) => a === ad).map(([, x]) => x)
+  const kart = () => document.querySelector('.toast-stack .incoming-call')
+  const kartBasligi = () => kart()?.querySelector('.incoming-call-title').textContent
+  const panel = () => document.querySelector('.call-host .call-panel')
+  const toastlar = () => [...document.querySelectorAll('.toast')].map((t) => t.textContent)
+  const dmSesKonulari = () => fake.channel.mock.calls.map(([ad]) => ad).filter((ad) => ad.startsWith('dm-voice:'))
+  const zil = () => fake.donguler.filter((d) => d.ad === 'zil')
+  const olay = (yuk) => fake.userHandlers.arama({ payload: { thread_id: 't1', caller: 'u2', reason: null, ...yuk } })
+  const dmSatiri = (ad) => [...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === ad)
+  const araDugmesi = () => document.querySelector('.header-host .call-start')
+
+  beforeEach(() => {
+    odak = true
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => odak)
+    vi.spyOn(window, 'focus').mockImplementation(() => {})
+    liste = [dmSatir('t1', ali)]
+    cevap = ({ id }) => ({ data: { id, status: 'active' }, error: null })
+    baslatma = () => ({ data: { id: 'c1', status: 'active' }, error: null })
+    fake.joinHatasi = false
+    fake.userHandlers = {}
+    fake.donguler = []
+    fake.channel.mockClear()
+    olusan = []
+    class SahteBildirim {
+      constructor(baslik, secenek) { this.baslik = baslik; this.secenek = secenek; this.close = vi.fn(); olusan.push(this) }
+    }
+    SahteBildirim.permission = 'granted'
+    SahteBildirim.requestPermission = vi.fn(async () => 'granted')
+    vi.stubGlobal('Notification', SahteBildirim)
+    localStorage.setItem('voxen.yer', 'ana')
+  })
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+  async function uygulamayiAc() {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+  }
+
+  it('kart açıkken başkasını arayınca (📞) kart decline ile kapanır, zil durur', async () => {
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    baslatma = () => ({ data: { id: 'c2', status: 'ringing' }, error: null })
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    dmSatiri('veli').click()
+    await bosalt()
+    araDugmesi().click()
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c7', reason: 'decline' }])
+    expect(panel().classList.contains('araniyor')).toBe(true)
+  })
+
+  it('kart açıkken aynı kişiyi arayınca (karşılıklı arama) kart yalnız kapanır, reddedilmez', async () => {
+    baslatma = () => ({ data: { id: 'c7', status: 'active' }, error: null }) // sunucu c7'yi kabul etti
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    dmSatiri('ali').click()
+    await bosalt()
+    araDugmesi().click()
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
+    expect(cagrilar('end_dm_call')).toEqual([])
+    expect(dmSesKonulari()).toEqual(['dm-voice:c7'])
+  })
+
+  it('kart açıkken sesli kanala girilince kart decline ile kapanır, zil durur', async () => {
+    localStorage.setItem('voxen.yer', 'sunucu')
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c7', reason: 'decline' }])
+    expect(fake.voice).toBe(1)
+  })
+
+  it('Kabul sürerken (answerCall beklenirken) 📞 pasif; ikinci ringing kart çıkmadan decline ile kapanır', async () => {
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    let coz
+    cevap = ({ id }) => new Promise((r) => { coz = () => r({ data: { id, status: 'active' }, error: null }) })
+    await uygulamayiAc()
+    dmSatiri('veli').click()
+    await bosalt()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    expect(araDugmesi().getAttribute('aria-disabled')).toBeNull()
+    kart().querySelector('.incoming-accept').click()
+    await bosalt()
+    expect(cagrilar('answer_dm_call')).toEqual([{ id: 'c7' }])
+    expect(araDugmesi().getAttribute('aria-disabled')).toBe('true')
+    expect(araDugmesi().dataset.tip).toBe('Zaten bir aramadasın.')
+    araDugmesi().click()
+    await bosalt()
+    expect(cagrilar('start_dm_call')).toEqual([])
+    olay({ call_id: 'c9', status: 'ringing', thread_id: 't2', caller: 'u3' })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()).toHaveLength(1) // yalnız c7'nin zili çalmıştı
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c9', reason: 'decline' }])
+    coz()
+    await bosalt()
+    expect(dmSesKonulari()).toEqual(['dm-voice:c7'])
+    expect(panel().classList.contains('konusma')).toBe(true)
+  })
+
+  it('📞 basılıp startCall dönmeden Kabul edilirse: giden arama cancel ile biter, kabul edilen aramaya bağlanılır', async () => {
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    let baslatCoz
+    let cevapCoz
+    baslatma = () => new Promise((r) => { baslatCoz = () => r({ data: { id: 'c2', status: 'ringing' }, error: null }) })
+    cevap = ({ id }) => new Promise((r) => { cevapCoz = () => r({ data: { id, status: 'active' }, error: null }) })
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    dmSatiri('veli').click()
+    await bosalt()
+    araDugmesi().click() // startCall sürüyor (kart hâlâ açık: ret ancak startCall dönünce)
+    await bosalt()
+    expect(kart()).not.toBeNull()
+    kart().querySelector('.incoming-accept').click() // answerCall sürüyor
+    await bosalt()
+    baslatCoz() // giden arama c2 açıldı ("Aranıyor…")
+    await bosalt()
+    expect(cagrilar('end_dm_call')).toEqual([]) // kart zaten kapalı: c7 reddedilmez
+    cevapCoz() // c7 kabul edildi
+    await bosalt()
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c2', reason: 'cancel' }])
+    expect(dmSesKonulari()).toEqual(['dm-voice:c7'])
+    expect(panel().classList.contains('konusma')).toBe(true)
+    expect(fake.donguler.find((d) => d.ad === 'bekleme').durdu).toBe(true)
+  })
+
+  it('kart kapanınca tarayıcıdaki "ali seni arıyor" bildirimi de kapanır', async () => {
+    odak = false
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    expect(olusan[0].close).not.toHaveBeenCalled()
+    olay({ call_id: 'c7', status: 'ended', reason: 'cancel' })
+    await bosalt()
+    expect(olusan[0].close).toHaveBeenCalledTimes(1)
+  })
+
+  it('başkasından ringing: "ali seni arıyor" kartı ve zil; Kabul et -> answer, DM açılır, konuşma paneli', async () => {
+    await uygulamayiAc()
+    expect(araDugmesi()).toBeNull() // Arkadaşlar sayfası açık
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    expect(kartBasligi()).toBe('ali seni arıyor')
+    expect(kart().getAttribute('role')).toBe('alertdialog')
+    expect(zil()).toHaveLength(1)
+    expect(olusan).toHaveLength(0) // pencere odakta: masaüstü bildirimi yok
+    kart().querySelector('.incoming-accept').click()
+    await bosalt()
+    expect(cagrilar('answer_dm_call')).toEqual([{ id: 'c7' }])
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
+    expect(dmSesKonulari()).toEqual(['dm-voice:c7'])
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Aramadasın') // ali'nin DM'i açık
+    expect(panel().classList.contains('konusma')).toBe(true)
+    expect(panel().querySelector('.call-status').textContent).toBe('Bağlanıyor…')
+    expect(cagrilar('end_dm_call')).toEqual([])
+    // Karşı taraf kapatınca panel kapanır
+    olay({ call_id: 'c7', status: 'ended', reason: 'hangup' })
+    await bosalt()
+    expect(panel()).toBeNull()
+  })
+
+  it('kendi aramamızın ringing olayı kart göstermez', async () => {
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing', caller: 'u1' })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()).toHaveLength(0)
+    expect(cagrilar('end_dm_call')).toEqual([])
+  })
+
+  it('Reddet: end_dm_call decline, kart kapanır, zil durur', async () => {
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    kart().querySelector('.incoming-decline').click()
+    await bosalt()
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c7', reason: 'decline' }])
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
+    expect(cagrilar('answer_dm_call')).toEqual([])
+  })
+
+  it('arayan vazgeçince (ended) ya da başka penceremizde cevaplanınca (active) kart kapanır', async () => {
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    olay({ call_id: 'c7', status: 'ended', reason: 'cancel' })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
+    olay({ call_id: 'c8', status: 'ringing' })
+    await bosalt()
+    expect(kart()).not.toBeNull()
+    olay({ call_id: 'c8', status: 'active' })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(dmSesKonulari()).toEqual([]) // bu pencere sese girmez
+  })
+
+  it('aramadayken gelen başka arama: kart çıkmaz, decline ile kapanır', async () => {
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    await uygulamayiAc()
+    dmSatiri('ali').click()
+    await bosalt()
+    araDugmesi().click() // start_dm_call bu testte hemen 'active' döner: doğrudan konuşma (c1)
+    await bosalt()
+    expect(panel().classList.contains('konusma')).toBe(true)
+    olay({ call_id: 'c9', status: 'ringing', thread_id: 't2', caller: 'u3' })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()).toHaveLength(0)
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c9', reason: 'decline' }])
+    expect(dmSesKonulari()).toEqual(['dm-voice:c1'])
+  })
+
+  it('birini ararken ("Aranıyor…") gelen başka arama da decline ile kapanır', async () => {
+    liste = [dmSatir('t1', ali), dmSatir('t2', veli)]
+    baslatma = () => ({ data: { id: 'c1', status: 'ringing' }, error: null })
+    await uygulamayiAc()
+    dmSatiri('ali').click()
+    await bosalt()
+    araDugmesi().click()
+    await bosalt()
+    expect(panel().classList.contains('araniyor')).toBe(true)
+    olay({ call_id: 'c9', status: 'ringing', thread_id: 't2', caller: 'u3' })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(cagrilar('end_dm_call')).toEqual([{ id: 'c9', reason: 'decline' }])
+    expect(panel().classList.contains('araniyor')).toBe(true) // kendi aramamız sürer
+  })
+
+  it('konuşma listede yoksa liste tazelenir, ad oradan gelir; yine yoksa "Biri seni arıyor"', async () => {
+    liste = []
+    await uygulamayiAc()
+    const once = cagrilar('dm_list').length
+    liste = [dmSatir('t5', veli)]
+    olay({ call_id: 'c5', status: 'ringing', thread_id: 't5', caller: 'u3' })
+    await bosalt()
+    expect(cagrilar('dm_list').length).toBeGreaterThan(once)
+    expect(kartBasligi()).toBe('veli seni arıyor')
+    kart().querySelector('.incoming-decline').click()
+    await bosalt()
+    olay({ call_id: 'c6', status: 'ringing', thread_id: 't6', caller: 'u4' })
+    await bosalt()
+    expect(kartBasligi()).toBe('Biri seni arıyor')
+  })
+
+  it('liste tazelenirken arama biterse kart hiç çıkmaz', async () => {
+    liste = []
+    await uygulamayiAc()
+    let birak
+    supabase.rpc.mockImplementation(async (ad) => {
+      if (ad === 'dm_list') { await new Promise((r) => { birak = r }); return { data: [dmSatir('t5', veli)], error: null } }
+      return { data: [], error: null }
+    })
+    olay({ call_id: 'c5', status: 'ringing', thread_id: 't5', caller: 'u3' })
+    await bosalt()
+    olay({ call_id: 'c5', status: 'ended', thread_id: 't5', caller: 'u3', reason: 'cancel' })
+    birak()
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(zil()).toHaveLength(0)
+  })
+
+  it('pencere arkadaysa "ali" / "ali seni arıyor" bildirimi; tıklayınca pencere öne gelir, kart görünür kalır', async () => {
+    odak = false
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    expect(olusan).toHaveLength(1)
+    expect(olusan[0].baslik).toBe('ali')
+    expect(olusan[0].secenek.body).toBe('ali seni arıyor')
+    olusan[0].onclick()
+    await bosalt()
+    expect(window.focus).toHaveBeenCalled()
+    expect(kart()).not.toBeNull()
+    expect(cagrilar('answer_dm_call')).toEqual([]) // bildirimden kabul edilmez
+    expect(zil()).toHaveLength(1)
+  })
+
+  it('Rahatsız etmeyin: kart görünür ama zil ve masaüstü bildirimi yok', async () => {
+    odak = false
+    localStorage.setItem('voxen.presence', JSON.stringify({ dnd: true }))
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    expect(kartBasligi()).toBe('ali seni arıyor')
+    expect(zil()).toHaveLength(0)
+    expect(olusan).toHaveLength(0)
+  })
+
+  it('"Bildirim sesi" kapalı: zil yok (bildirim gelir); "Masaüstü bildirimleri" kapalı: bildirim yok (zil çalar)', async () => {
+    odak = false
+    localStorage.setItem('voxen.bildirimler', JSON.stringify({ masaustu: true, ses: false }))
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    expect(kart()).not.toBeNull()
+    expect(zil()).toHaveLength(0)
+    expect(olusan).toHaveLength(1)
+    kart().querySelector('.incoming-decline').click()
+    await bosalt()
+    localStorage.setItem('voxen.bildirimler', JSON.stringify({ masaustu: false, ses: true }))
+    olay({ call_id: 'c8', status: 'ringing' })
+    await bosalt()
+    expect(kart()).not.toBeNull()
+    expect(zil()).toHaveLength(1)
+    expect(olusan).toHaveLength(1)
+  })
+
+  it('sesli kanaldayken kabul edilince kanaldan çıkılır ve DM açılır', async () => {
+    localStorage.setItem('voxen.yer', 'sunucu')
+    await uygulamayiAc()
+    kanalaTikla('Lobi')
+    await bosalt()
+    expect(fake.voice).toBe(1)
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    kart().querySelector('.incoming-accept').click()
+    await bosalt()
+    expect(fake.voice).toBe(0)
+    expect(toastlar()).toContain('Sesli kanaldan ayrıldın.')
+    expect(dmSesKonulari()).toEqual(['dm-voice:c7'])
+    expect(panel().classList.contains('konusma')).toBe(true)
+    expect(araDugmesi().getAttribute('aria-label')).toBe('Aramadasın')
+  })
+
+  it('kabul ederken arama bitmişse: "Arama sona erdi.", sese girilmez', async () => {
+    cevap = () => ({ data: null, error: { message: 'NOT_RINGING' } })
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    kart().querySelector('.incoming-accept').click()
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(toastlar()).toContain('Arama sona erdi.')
+    expect(dmSesKonulari()).toEqual([])
+    expect(panel()).toBeNull()
+  })
+
+  it('uygulama durunca (çıkış / stopApp) kart kapanır, zil durur', async () => {
+    await uygulamayiAc()
+    olay({ call_id: 'c7', status: 'ringing' })
+    await bosalt()
+    stopApp()
+    expect(kart()).toBeNull()
+    expect(zil()[0].durdu).toBe(true)
   })
 })

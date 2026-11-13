@@ -8,13 +8,20 @@ import { openPrivateChannel } from './privateChannel.js'
 // onChange(payload): olay geldi. payload veritabanından gelir:
 //   { tablo: 'friendships'|'dm_threads'|'blocks', islem: 'INSERT'|'UPDATE'|'DELETE' }
 //   Bağlantı kopup yeniden kurulunca (kaçan olay olabilir) payload { yeniden: true } olur.
+// onCall(payload): verilirse aynı konudaki "arama" yayınları da iletilir (DM araması, 008_dm_arama.sql:
+//   { call_id, thread_id, status, caller, reason }; ayrıştırma data/calls.js parseCallEvent). Yeni abonelik açılmaz.
 // Dönen: { close() -> Promise }
-export function subscribeUserEvents(userId, onChange) {
+export function subscribeUserEvents(userId, onChange, { onCall = null } = {}) {
   let kapali = false
   let baglanmaSayisi = 0
   const ozel = openPrivateChannel(
     `user:${userId}`,
     (k) => {
+      if (onCall) {
+        k.on('broadcast', { event: 'arama' }, ({ payload }) => {
+          if (!kapali) onCall(payload ?? {})
+        })
+      }
       k.on('broadcast', { event: 'degisti' }, ({ payload }) => {
         if (!kapali) onChange?.(payload ?? {})
       })

@@ -1,7 +1,7 @@
 // Eşler arası (P2P) tam örgü: kanaldaki herkes herkese DOĞRUDAN bağlanır.
 // Sunucu sadece "tanışma" mesajlarını taşır (sinyal); ses hiçbir sunucudan geçmez.
 //
-// Sinyal mesajları ("voice:<kanalId>" konusunda yayın olarak):
+// Sinyal mesajları ("voice:<kanalId>" ya da aramada "dm-voice:<arama id>" konusunda yayın olarak):
 //   hello  -> "Ben buradayım" (katılınca ve yeniden bağlanınca)
 //   offer  -> bağlantı teklifi (SDP)       [to: kime]
 //   answer -> teklife cevap (SDP)          [to: kime]
@@ -59,8 +59,10 @@ export class PeerMesh {
   // signal(topic, onMessage, onStatus) -> { send(msg), close() }  (bkz. signal.js)
   // deps sadece testler içindir: RTCPeerConnection ve createLevelMeter yerine sahteleri verilebilir.
   // caps: bu istemcinin yetenekleri (varsayılan MESH_CAPS; testler eski sürümü [] ile taklit eder)
-  constructor({ channelId, userId, localStream, iceServers, signal, caps = MESH_CAPS }, deps = {}) {
+  // topic: sinyal konusu (verilmezse "voice:<channelId>"; DM araması "dm-voice:<arama id>" verir)
+  constructor({ channelId, topic, userId, localStream, iceServers, signal, caps = MESH_CAPS }, deps = {}) {
     this.channelId = channelId
+    this.topic = topic ?? `voice:${channelId}`
     this.caps = [...caps]
     this.userId = userId
     this.localStream = localStream ?? null // mikrofon yoksa null: sadece dinleriz
@@ -96,6 +98,7 @@ export class PeerMesh {
   // 'peer-speaking' {userId, speaking}, 'connect-failed' {userId}, 'ready' (sinyal kanalına bağlandı),
   // 'failed-change' (bağlanamayan eş sayısı değişti; bkz. failedPeerCount),
   // 'peer-track' {peerId, slot, track} (karşının kamera/ekran/ekran sesi izi geldi; track null = kalktı).
+  // 'peer-state' {userId, muted, deafened} (karşı tarafın sendState ile bildirdiği durum).
   //   Not: iz bağlantı kurulurken gelir ve karşı paylaşmıyorsa sessizdir (muted). Gösterip gizleme
   //   kararı presence + izin mute/unmute olaylarıyla verilir (arayüz görevi).
   on(olay, cb) {
@@ -128,6 +131,13 @@ export class PeerMesh {
     this.jeton = null
     this._ctx?.close?.()
     this._ctx = null
+  }
+
+  // Kendi susturma/sağırlaştırma durumumuzu karşıya bildir (DM araması kullanır; kanal yolu göndermez).
+  // Karşıda 'peer-state' {userId, muted, deafened} olayı olur. Eski sürüm bu mesaj türünü yok sayar.
+  sendState({ muted, deafened }) {
+    if (!this.aktif) return
+    this._gonder({ type: 'state', muted: !!muted, deafened: !!deafened })
   }
 
   // İnternet geri gelince (window 'online') çağrılır. Kanalı yıkmayız (realtime-js kendisi
@@ -267,7 +277,7 @@ export class PeerMesh {
     try { await onceki } catch { /* kapanış hatası önemli değil */ }
     if (!gecerli()) return
     this.sinyal = this.signal(
-      `voice:${this.channelId}`,
+      this.topic,
       (msg) => { if (gecerli()) this._mesajGeldi(msg) },
       (durum) => {
         if (!gecerli()) return
@@ -320,6 +330,7 @@ export class PeerMesh {
     else if (m.type === 'offer') this._teklifGeldi(m)
     else if (m.type === 'answer') this._cevapGeldi(m)
     else if (m.type === 'ice') this._adayGeldi(m)
+    else if (m.type === 'state') this._yay('peer-state', { userId: m.from, muted: !!m.muted, deafened: !!m.deafened })
     else if (m.type === 'bye') {
       this._esiBirak(m.from)
       if (this.basarisizlar.delete(m.from)) this._yay('failed-change')

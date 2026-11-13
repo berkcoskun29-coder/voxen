@@ -494,3 +494,57 @@ describe('PeerMesh gerçek seviye ölçer', () => {
     expect(kayit.resume).toBeGreaterThan(0)
   })
 })
+
+describe('PeerMesh sinyal konusu (DM araması)', () => {
+  it('topic verilirse o konuda konuşur; verilmezse voice:<kanal>', async () => {
+    const a = new PeerMesh(
+      { channelId: 'arama1', topic: 'dm-voice:arama1', userId: 'aaa', localStream: fakeStream('a'), iceServers: [], signal: bus.signal },
+      { RTCPeerConnection: net.RTCPeerConnection, createLevelMeter: fakeLevelMeter },
+    )
+    const b = new PeerMesh(
+      { channelId: 'arama1', topic: 'dm-voice:arama1', userId: 'bbb', localStream: fakeStream('b'), iceServers: [], signal: bus.signal },
+      { RTCPeerConnection: net.RTCPeerConnection, createLevelMeter: fakeLevelMeter },
+    )
+    meshler.push(a, b)
+    const katilanlar = []
+    a.on('peer-joined', ({ userId }) => katilanlar.push(userId))
+    a.join(); b.join()
+    await akit()
+    expect(katilanlar).toEqual(['bbb'])
+    expect(bus.subs.map((s) => s.topic)).toEqual(['dm-voice:arama1', 'dm-voice:arama1'])
+    expect(bus.sent.every((s) => s.topic === 'dm-voice:arama1')).toBe(true)
+    expect(esKur('ccc').topic).toBe('voice:k1')
+  })
+
+  it('leave: konunun aboneliği kapanır, zamanlayıcı kalmaz', async () => {
+    const a = new PeerMesh(
+      { channelId: 'arama2', topic: 'dm-voice:arama2', userId: 'aaa', localStream: fakeStream('a'), iceServers: [], signal: bus.signal },
+      { RTCPeerConnection: net.RTCPeerConnection, createLevelMeter: fakeLevelMeter },
+    )
+    a.join()
+    await akit()
+    expect(bus.subs[0].open).toBe(true)
+    a.leave()
+    expect(bus.subs[0].open).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('PeerMesh durum mesajı (DM araması: karşının susturma simgesi)', () => {
+  it("sendState karşıda 'peer-state' olayı olur; kanal yolu kendiliğinden durum göndermez", async () => {
+    const a = esKur('aaa')
+    const b = esKur('bbb')
+    const gelen = []
+    b.on('peer-state', (v) => gelen.push(v))
+    a.join(); b.join()
+    await akit()
+    expect(bus.sent.some((s) => s.msg.type === 'state')).toBe(false)
+    a.sendState({ muted: true, deafened: false })
+    await akit()
+    expect(gelen).toEqual([{ userId: 'aaa', muted: true, deafened: false }])
+    a.leave()
+    a.sendState({ muted: false, deafened: true }) // ayrıldıktan sonra gönderilmez
+    await akit()
+    expect(gelen).toHaveLength(1)
+  })
+})

@@ -12,6 +12,7 @@
   --accent-strong: #1fa35a; /* koyu yeşil: üzerine gelince / seçili göstergeler */
   --on-accent: #0f1a14;     /* yeşil zemin üstündeki yazı (koyu: okunaklı, AA) */
   --speaking: #3be37a;      /* konuşan kişinin halkası */
+  --call-pulse: rgba(59, 227, 122, 0.25); /* "Aranıyor…" avatarının nabız halkası (soluk yeşil) */
   --link: #2dd4bf;          /* mesajdaki linkler (yeşil-mavi) */
   --danger: #ef5b5b;
   --warn: #e3c34a;          /* uyarı notu yazısı (soluk sarı) */
@@ -493,6 +494,9 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .msg-author { font-weight: 600; margin-right: var(--sp-2); }
 .msg-time { color: var(--muted); font-size: var(--fs-xs); }
 .msg-text { font-size: var(--fs-md); white-space: pre-wrap; overflow-wrap: anywhere; }
+.message.call-log { display: block; text-align: center; color: var(--muted); font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-4); background: none; }
+.voice-info.call-open { background: none; border: 0; padding: 0; text-align: left; font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+.voice-info.call-open:hover .voice-channel-name { text-decoration: underline; }
 .day-separator { display: flex; align-items: center; gap: var(--sp-3); margin: var(--sp-4) 0 var(--sp-1); color: var(--muted); font-size: var(--fs-xs); }
 .day-separator::before, .day-separator::after { content: ''; flex: 1; border-top: 1px solid var(--selected); }
 .composer { padding: 0 var(--sp-4) var(--sp-4); }
@@ -554,7 +558,7 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .voice-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Alttaki ses paneli (kullanıcı çubuğunun üstünde) */
-.voice-panel { padding: var(--sp-2) var(--sp-3); background: var(--server-rail); border-bottom: 1px solid var(--channel-panel); }
+.voice-panel, .call-row { padding: var(--sp-2) var(--sp-3); background: var(--server-rail); border-bottom: 1px solid var(--channel-panel); }
 .voice-top { display: flex; align-items: center; gap: var(--sp-2); }
 .voice-info { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--muted); }
 .voice-status { font-weight: 600; color: var(--muted); }
@@ -647,6 +651,73 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 /* Ana alan: üstte görüntü bölmesi, altında sohbet */
 .chat-host { flex: 1; min-height: 160px; display: flex; flex-direction: column; }
 .video-host { flex: none; }
+
+/* DM arama paneli (callPanel.js): DM başlığının altında, sohbetin üstünde (görüntü bölmesinin yeri) */
+.call-host { flex: none; }
+.call-panel {
+  display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-4) var(--sp-4);
+  background: var(--server-rail); border-bottom: 1px solid var(--server-rail);
+}
+.call-people { display: flex; gap: var(--sp-6); justify-content: center; }
+/* Avatar: konuşanın etrafında yeşil halka (sesli kanaldaki konuşan halkasıyla aynı renk) */
+.call-avatar-wrap { position: relative; display: inline-flex; border-radius: 50%; box-shadow: 0 0 0 3px transparent; transition: box-shadow 0.1s; }
+.call-avatar-wrap.speaking { box-shadow: 0 0 0 3px var(--speaking); }
+.call-avatar {
+  width: 80px; height: 80px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; font-size: var(--fs-xl); font-weight: 700;
+}
+/* "Aranıyor…": karşı tarafın avatarı nabız gibi atar */
+.call-avatar-wrap.nabiz { animation: arama-nabiz 1.4s ease-in-out infinite; }
+@keyframes arama-nabiz { 50% { transform: scale(1.06); box-shadow: 0 0 0 8px var(--call-pulse); } }
+@media (prefers-reduced-motion: reduce) { .call-avatar-wrap.nabiz { animation: none; } .call-avatar-wrap { transition: none; } }
+/* Avatarın köşesinde susturma / sağırlaştırma simgesi */
+.call-avatar-state {
+  position: absolute; right: -2px; bottom: -2px; width: 26px; height: 26px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; background: var(--bg);
+}
+.call-name { font-weight: 700; }
+.call-status { font-size: var(--fs-sm); color: var(--muted); }
+.call-panel.konusma .call-status { color: var(--warn); } /* "Bağlantı koptu, yeniden deneniyor…" */
+.call-timer { font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.call-buttons { display: flex; gap: var(--sp-3); margin-top: var(--sp-1); }
+.call-btn {
+  width: 44px; height: 44px; padding: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; background: var(--selected); color: var(--text);
+}
+.call-btn:hover { background: var(--rail-hover); }
+.call-btn.active { color: var(--danger); }
+.call-btn.active .icon { stroke: var(--danger); }
+.call-btn.call-hangup { background: var(--danger); color: #fff; }
+.call-btn.call-hangup:hover { background: var(--danger-hover); }
+.call-btn.unavailable, .call-start.unavailable { opacity: 0.5; cursor: not-allowed; }
+.call-start.unavailable:hover { color: var(--muted); background: none; }
+
+/* Gelen arama kartı (incomingCall.js): sağ altta, bildirim kutusunda bildirimlerin üstünde; bildirimle aynı genişlik */
+.incoming-call {
+  pointer-events: auto; box-sizing: border-box; width: min(320px, calc(100vw - 32px));
+  display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4); border-radius: 8px;
+  background: var(--selected); color: var(--text); border-left: 4px solid var(--accent);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: toast-gir 0.2s ease-out;
+}
+.incoming-call-avatar {
+  width: 40px; height: 40px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; font-weight: 700;
+  animation: arama-nabiz 1.4s ease-in-out infinite; /* çalıyor: avatar nabız gibi atar */
+}
+.incoming-call-title { font-weight: 700; overflow-wrap: anywhere; }
+.incoming-call-buttons { grid-column: 1 / -1; display: flex; gap: var(--sp-2); }
+.incoming-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); font-weight: 600;
+}
+.incoming-accept { background: var(--accent); color: var(--on-accent); }
+.incoming-accept:hover { background: var(--accent-strong); }
+.incoming-decline { background: var(--danger); color: #fff; }
+.incoming-decline:hover { background: var(--danger-hover); }
+@media (prefers-reduced-motion: reduce) { .incoming-call, .incoming-call-avatar { animation: none; } }
 
 /* Görüntü bölmesi (sesli kanaldayken; görüntü yoksa gizli) */
 .video-pane { border-bottom: 1px solid var(--server-rail); background: var(--bg); }

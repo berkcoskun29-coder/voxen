@@ -481,3 +481,173 @@ describe('007_sosyal.sql', () => {
     expect(sql7).not.toMatch(/alter table public\.messages|on public\.messages /)
   })
 })
+
+// 008: DM'den sesli arama (dm_calls, dm_messages.kind, arama RPC'leri, dm-voice: konusu)
+const yol8 = 'supabase/migrations/008_dm_arama.sql'
+const sql8 = existsSync(yol8) ? readFileSync(yol8, 'utf8').toLowerCase().replace(/\s+/g, ' ') : ''
+const fonk8 = (ad) => {
+  const i = sql8.search(new RegExp(`create (or replace )?function public\\.${ad}\\(`))
+  if (i < 0) return ''
+  const govdeBasi = sql8.indexOf('$$', i)
+  return sql8.slice(i, sql8.indexOf('$$;', govdeBasi + 2) + 3)
+}
+describe('008_dm_arama.sql', () => {
+  it('dosya var', () => expect(existsSync(yol8)).toBe(true))
+  it('dm_calls: sütunlar, durum kısıtı, kısmi benzersiz indeks, RLS yalnız iki taraf okur, yazma politikası yok', () => {
+    expect(sql8).toContain('create table if not exists public.dm_calls (')
+    for (const s of ['id uuid primary key', 'thread_id uuid not null references public.dm_threads(id) on delete cascade',
+      'caller uuid not null', 'callee uuid not null', "status text not null default 'ringing' check (status in ('ringing','active','ended'))",
+      'created_at timestamptz', 'answered_at timestamptz', 'ended_at timestamptz', 'last_seen_at timestamptz']) {
+      expect(sql8).toContain(s)
+    }
+    expect(sql8).toContain("create unique index if not exists dm_calls_acik_tek on public.dm_calls (thread_id) where status <> 'ended'")
+    expect(sql8).toContain('alter table public.dm_calls enable row level security')
+    expect(sql8).toContain('create policy dm_calls_select on public.dm_calls for select to authenticated using (caller = auth.uid() or callee = auth.uid())')
+    expect(sql8).not.toMatch(/create policy \w+ on public\.dm_calls for (insert|update|delete|all)/)
+  })
+  it("dm_messages.kind: varsayılan 'text', kısıt; doğrudan INSERT yalnız 'text', diğer şartlar 007 ile aynı", () => {
+    expect(sql8).toContain("add column if not exists kind text not null default 'text' check (kind in ('text','call'))")
+    expect(sql8).toContain('drop policy if exists dm_messages_insert on public.dm_messages')
+    const p = sql8.slice(sql8.indexOf('create policy dm_messages_insert'), sql8.indexOf('create or replace function public.edit_dm_message'))
+    expect(p).toContain("for insert to authenticated with check ( author_id = auth.uid() and deleted_at is null and edited_at is null and kind = 'text' and public.can_send_dm(thread_id) )")
+    expect(sql8).not.toMatch(/create policy \w+ on public\.dm_messages for (update|delete)/)
+  })
+  it("edit/delete_dm_message 'call' satırını reddeder; 007 davranışı korunur", () => {
+    for (const ad of ['edit_dm_message', 'delete_dm_message']) {
+      const f = fonk8(ad)
+      expect(f).toContain("or m.kind = 'call'")
+      expect(f).toContain('m.author_id <> auth.uid()')
+      expect(f).toContain('for update')
+    }
+    expect(fonk8('edit_dm_message')).toContain('returns public.dm_messages')
+    expect(fonk8('edit_dm_message')).toContain("raise exception 'blocked_dm'")
+    expect(fonk8('delete_dm_message')).toContain("set content = '', deleted_at = now()")
+  })
+  it('dm_list ve unread_counts değişmez; messages tablosuna dokunulmaz', () => {
+    expect(sql8).not.toContain('function public.dm_list')
+    expect(sql8).not.toContain('function public.unread_counts')
+    expect(sql8).not.toMatch(/alter table public\.messages|on public\.messages /)
+  })
+
+  const imzalar8 = {
+    start_dm_call: '(uuid)', answer_dm_call: '(uuid)', end_dm_call: '(uuid, text)', ping_dm_call: '(uuid)',
+    edit_dm_message: '(bigint, text)', delete_dm_message: '(bigint)', can_access_dm_voice_topic: '(text)',
+    arama_olayi_gonder: '()',
+  }
+  for (const [ad, imza] of Object.entries(imzalar8)) {
+    it(`${ad}: security definer, search_path, anon kapalı, authenticated açık`, () => {
+      const f = fonk8(ad)
+      expect(f).not.toBe('')
+      expect(f).toContain('security definer')
+      expect(f).toContain('set search_path = public')
+      expect(sql8).toContain(`revoke all on function public.${ad}${imza} from public, anon`)
+      expect(sql8).toContain(`grant execute on function public.${ad}${imza} to authenticated`)
+    })
+  }
+  it('arama_kapat istemciye kapalı (yalnız veritabanı içinden)', () => {
+    const f = fonk8('arama_kapat')
+    expect(f).toContain('security definer')
+    expect(f).toContain('set search_path = public')
+    expect(sql8).toContain('revoke all on function public.arama_kapat(uuid, text) from public, anon, authenticated')
+    expect(sql8).not.toContain('grant execute on function public.arama_kapat')
+  })
+  it('RPC parametre adları (istemci bu adlarla çağırır)', () => {
+    for (const s of ['start_dm_call(tid uuid)', 'answer_dm_call(id uuid)', 'end_dm_call(id uuid, reason text)', 'ping_dm_call(id uuid)']) {
+      expect(sql8).toContain(`function public.${s}`)
+    }
+  })
+  it('start_dm_call: taraf, engelde gizli kodlar, kişi kilidi, bayatlar önce, ters yönden çalan kabul, BUSY', () => {
+    const f = fonk8('start_dm_call')
+    expect(f).toContain("raise exception 'not_allowed'")
+    expect(f).toContain('bl.blocker = ben and bl.blocked = diger')
+    expect(f).toContain("raise exception 'blocked_dm'")
+    expect(f).toContain('public.can_send_dm(konusma.id)')
+    expect(f).toContain("pg_advisory_xact_lock(hashtextextended('dmcall:' || konusma.user_a::text, 0))")
+    expect(f).toContain("pg_advisory_xact_lock(hashtextextended('dmcall:' || konusma.user_b::text, 0))")
+    // sıra: engel -> kilit -> bayat temizliği -> aynı konuşma -> meşgul -> ekleme
+    const sira = ["raise exception 'blocked_dm'", 'pg_advisory_xact_lock(', "interval '60 seconds'",
+      "perform public.arama_kapat(eski, 'lost')", "arama.status = 'ringing' and arama.caller = diger",
+      "raise exception 'busy'", 'insert into public.dm_calls']
+    for (let i = 1; i < sira.length; i++) expect(f.indexOf(sira[i - 1])).toBeLessThan(f.indexOf(sira[i]))
+    expect(f).toContain("set status = 'active', answered_at = now()")
+    expect(f).toContain('returns public.dm_calls')
+  })
+  it('start_dm_call: aramızda süren arama ALREADY_IN_CALL (birleştirilmez); yalnız karşıdan çalan arama kabul edilir', () => {
+    const f = fonk8('start_dm_call')
+    expect(f).toContain("if arama.status = 'active' then raise exception 'already_in_call'")
+    // ALREADY_IN_CALL denetimi birleştirmeden önce, BUSY'den önce
+    expect(f.indexOf("raise exception 'already_in_call'")).toBeLessThan(f.indexOf("arama.status = 'ringing' and arama.caller = diger"))
+    expect(f.indexOf("raise exception 'already_in_call'")).toBeLessThan(f.indexOf("raise exception 'busy'"))
+    // Birleştirme yalnız ringing + caller = diger dalında
+    const dal = f.slice(f.indexOf("arama.status = 'ringing' and arama.caller = diger"))
+    expect(dal.indexOf("set status = 'active'")).toBeLessThan(dal.indexOf('end if'))
+  })
+  it("start_dm_call: 40 sn'den uzun çalan arama da bayat (temizlikte); aktifte 60 sn kuralı aynen", () => {
+    const f = fonk8('start_dm_call')
+    expect(f).toContain("and (dc.last_seen_at < now() - interval '60 seconds' or (dc.status = 'ringing' and dc.created_at < now() - interval '40 seconds'))")
+    // Temizlik birleştirme ve BUSY denetimlerinden önce (onlar yalnız bayat olmayanları görür)
+    expect(f.indexOf("interval '40 seconds'")).toBeLessThan(f.indexOf("perform public.arama_kapat(eski, 'lost')"))
+    expect(f.indexOf("perform public.arama_kapat(eski, 'lost')")).toBeLessThan(f.indexOf("raise exception 'already_in_call'"))
+    // Kilit sırası değişmedi: user_a önce, user_b sonra, ikisi de temizlikten önce
+    expect(f.indexOf("'dmcall:' || konusma.user_a")).toBeLessThan(f.indexOf("'dmcall:' || konusma.user_b"))
+    expect(f.indexOf("'dmcall:' || konusma.user_b")).toBeLessThan(f.indexOf("interval '40 seconds'"))
+    // Diğer fonksiyonlarda 40 sn kuralı yok (aktif aramada yalnız last_seen_at)
+    for (const ad of ['answer_dm_call', 'ping_dm_call', 'can_access_dm_voice_topic']) expect(fonk8(ad)).not.toContain("interval '40 seconds'")
+  })
+  it('answer_dm_call: yalnız aranan, ringing -> active, engel denetimi, satır kilidi', () => {
+    const f = fonk8('answer_dm_call')
+    expect(f).toContain('arama.callee <> ben')
+    expect(f).toContain('for update')
+    expect(f).toContain("raise exception 'blocked_dm'")
+    expect(f).toContain("set status = 'active', answered_at = now(), last_seen_at = now()")
+  })
+  it('end_dm_call: nedenler, iki taraf, arama_kapat ile tek kez kayıt satırı', () => {
+    const f = fonk8('end_dm_call')
+    expect(f).toContain("reason not in ('cancel','decline','timeout','hangup','lost')")
+    expect(f).toContain('arama.caller <> ben and arama.callee <> ben')
+    expect(f).toContain('perform public.arama_kapat(arama.id, reason)')
+    // Cevaplanmış arama YALNIZ timeout ile bitmez (kaçan "active" olayı yarışı); cancel onu da bitirir.
+    // Denetim kapanıştan önce, kilitli.
+    expect(f).toContain("dc.id = end_dm_call.id for update")
+    expect(f).toContain("if arama.status = 'active' and reason = 'timeout' then return")
+    expect(f).not.toContain("reason in ('timeout','cancel')")
+    expect(f.indexOf("reason = 'timeout' then return")).toBeLessThan(f.indexOf('perform public.arama_kapat'))
+    const k = fonk8('arama_kapat')
+    expect(k).toContain('for update')
+    expect(k).toContain("arama.status = 'ended' then return")
+    expect(k.indexOf("arama.status = 'ended' then return")).toBeLessThan(k.indexOf('insert into public.dm_messages'))
+    expect(k).toContain("'📞 cevapsız arama'")
+    expect(k).toContain("'📞 arama · '")
+    expect(k).toContain("values (arama.thread_id, arama.caller, metin, 'call')")
+  })
+  it('ping_dm_call: yalnız taraf, bitmemiş ve bayat olmayan aramada last_seen_at', () => {
+    const f = fonk8('ping_dm_call')
+    expect(f).toContain('set last_seen_at = now()')
+    expect(f).toContain("dc.status <> 'ended'")
+    expect(f).toContain("dc.last_seen_at >= now() - interval '60 seconds'")
+    expect(f).toContain('returns boolean')
+  })
+  it('tetikleyici: iki tarafın user: konusuna "arama"; yük alanları; ping olay üretmez; hata yutulur', () => {
+    expect(sql8).toContain('after insert or update on public.dm_calls')
+    const f = fonk8('arama_olayi_gonder')
+    for (const a of ["'call_id', new.id", "'thread_id', new.thread_id", "'status', new.status", "'caller', new.caller"]) {
+      expect(f).toContain(a)
+    }
+    expect(f).toContain("'arama', 'user:' || kisi::text, true")
+    expect(f).toContain('old.status is not distinct from new.status then return null')
+    expect(f).toContain('exception when others then')
+  })
+  it('dm-voice: konusu yalnız iki taraf, bitmemiş arama; yalnız broadcast ve presence', () => {
+    const f = fonk8('can_access_dm_voice_topic')
+    expect(f).toContain("'^dm-voice:[0-9a-f]{8}-")
+    expect(f).toContain('dc.caller = auth.uid() or dc.callee = auth.uid()')
+    expect(f).toContain("dc.status <> 'ended'")
+    expect(sql8).toContain('create policy dm_voice_receive on realtime.messages for select to authenticated')
+    expect(sql8).toContain('create policy dm_voice_send on realtime.messages for insert to authenticated')
+    for (const ad of ['dm_voice_receive', 'dm_voice_send']) {
+      const p = sql8.slice(sql8.indexOf(`create policy ${ad}`))
+      expect(p).toContain("realtime.messages.extension in ('broadcast', 'presence')")
+      expect(p).toContain('public.can_access_dm_voice_topic(realtime.topic())')
+    }
+  })
+})

@@ -52,6 +52,14 @@ export function shouldNotify({ msg, selfId, odakta, acikHedef, durum, sessizSunu
   return true
 }
 
+// Gelen arama bildirimi gelsin mi? (DM araması, spec §2): "Rahatsız etmeyin"de, "Masaüstü bildirimleri"
+// kapalıyken ve pencere odaktayken (kart zaten görünüyor) gelmez. Kart her durumda gösterilir.
+export function shouldNotifyCall({ odakta, durum, ayarlar }) {
+  if (ayarlar && ayarlar.masaustu === false) return false
+  if (durum === 'dnd') return false
+  return !odakta
+}
+
 function hedefId(msg, tur) {
   if (tur === 'dm') return msg.thread_id ?? null
   if (tur === 'mention') return msg.channel_id ?? null
@@ -74,10 +82,15 @@ export function birlesikMetin(ad, sayi) {
   return `${ad}: ${sayi} yeni mesaj`
 }
 
+// Gelen arama bildiriminin metni: "Ayla seni arıyor"
+export function aramaBildirimMetni(ad) {
+  return `${ad} seni arıyor`
+}
+
 // ---------- Gösterim ve birleştirme ----------
-// ac(hedef): bildirime tıklanınca hedefi açar; hedef { type: 'dm' | 'mention', id, serverId? }.
+// ac(hedef): bildirime tıklanınca hedefi açar; hedef { type: 'dm' | 'mention' | 'call', id, serverId? }.
 // deps (yalnız testler için): { goster(bildirim) -> gösterildi mi, sesCal(), odakla() }.
-// Dönen: { bildir({ hedef, ad, baslik, metin }), tikla(hedef), destroy() }
+// Dönen: { bildir({ hedef, ad, baslik, metin }), bildirArama({ id, ad }) -> kapat(), tikla(hedef), destroy() }
 //
 // Birleştirme: bir konuşmanın ilk mesajı hemen gösterilir (ses de o an çalar). Sonraki 5 saniye içinde
 // aynı konuşmadan gelenler sayılır; süre bitince fazladan mesaj geldiyse tek bir özet bildirim
@@ -127,8 +140,19 @@ export function createNotifier({ ac, deps = {} } = {}) {
     if (gosterildi && getNotifySettings().ses) sesCal()
   }
 
+  // Gelen arama: "Ad" / "Ad seni arıyor". Birleşmez, bildirim sesi çalmaz (zili kart çalar).
+  // Tıklayınca pencere öne gelir ve ac({ type: 'call', id }) kartı gösterir; bildirimden kabul edilmez.
+  // Dönen kapat(): kart kapanınca bildirim de kalkar (tarayıcıda; masaüstünde bildirim merkezinde kalır).
+  function bildirArama({ id, ad }) {
+    if (kapandi || !id) return () => {}
+    const hedef = { type: 'call', id }
+    const sonuc = goster({ id: yeniId(), baslik: ad, metin: aramaBildirimMetni(ad), hedef, etiket: `call:${id}`, tikla })
+    return () => { try { sonuc?.close?.() } catch { /* zaten kapandı */ } }
+  }
+
   return {
     bildir,
+    bildirArama,
     tikla,
     destroy() {
       kapandi = true
@@ -140,7 +164,8 @@ export function createNotifier({ ac, deps = {} } = {}) {
 }
 
 // Masaüstünde Tauri eklentisi, tarayıcıda Web Notification. İzin yoksa sessizce gösterilmez.
-// Dönen: gösterildi mi (true/false). Masaüstünde izin sorulmaz, gösterilmiş sayılır.
+// Dönen: gösterilmediyse false; tarayıcıda Notification nesnesi (kapatılabilir), masaüstünde true.
+// Masaüstünde izin sorulmaz, gösterilmiş sayılır.
 function varsayilanGoster({ id, baslik, metin, hedef, etiket, tikla }) {
   if (isTauri()) {
     showDesktopNotification({ id, title: baslik, body: metin, extra: { hedef } })
@@ -150,7 +175,7 @@ function varsayilanGoster({ id, baslik, metin, hedef, etiket, tikla }) {
   try {
     const n = new Notification(baslik, { body: metin, icon: SIMGE, tag: etiket })
     n.onclick = () => { n.close(); tikla(hedef) }
-    return true
+    return n
   } catch { return false } // bazı tarayıcılar sayfadan bildirime izin vermez: sessizce geç
 }
 

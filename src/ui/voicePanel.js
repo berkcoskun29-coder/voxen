@@ -55,6 +55,32 @@ export function renderMuteButtons(durum, handlers = {}) {
   return [sustur, sagir]
 }
 
+// DM aramasındayken kullanıcı çubuğunun üstündeki satır: "Aramada · Ad" (tıklayınca o DM açılır) + Kapat.
+// Ses panelinin üst satırıyla aynı görünüm (voice-panel / voice-top); kamera/ekran düğmeleri yok.
+// handlers: onOpen(), onHangup()
+export function renderCallRow({ peerName, handlers = {} }) {
+  const kutu = document.createElement('div')
+  kutu.className = 'call-row'
+  const ust = document.createElement('div')
+  ust.className = 'voice-top'
+  const ac = document.createElement('button')
+  ac.type = 'button'
+  ac.className = 'voice-info call-open'
+  ac.dataset.odak = 'arama-ac'
+  const durum = document.createElement('span')
+  durum.className = 'voice-status connected'
+  durum.textContent = 'Aramada'
+  const ad = document.createElement('span')
+  ad.className = 'voice-channel-name'
+  ad.textContent = peerName
+  ac.append(durum, ' · ', ad)
+  ac.onclick = () => handlers.onOpen?.()
+  const kapat = dugme('Kapat', false, handlers.onHangup, ' leave', hangupIcon(), 'Kapat')
+  ust.append(ac, kapat)
+  kutu.appendChild(ust)
+  return kutu
+}
+
 // state: createVoiceSession().getState()
 // handlers: onToggleCamera(), onToggleScreen(), onLeave()  pttHint: varsa kırmızı ipucu yazısı
 export function renderVoicePanel({ channelName, state, handlers, pttHint }) {

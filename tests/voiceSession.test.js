@@ -8,7 +8,8 @@ import { createVoiceSession } from '../src/voice/session.js'
 import { getSettings, updateSettings } from '../src/settings.js'
 import { renderVoicePanel, renderMuteButtons, VOICE_STATUS_TEXT } from '../src/ui/voicePanel.js'
 import { MicError, MIC_MESSAGES } from '../src/voice/pipeline.js'
-import { fakeStream } from './fakes/webrtc.js'
+import { fakeStream, createNet, createBus, fakeLevelMeter } from './fakes/webrtc.js'
+import { PeerMesh } from '../src/voice/mesh.js'
 
 // Sahte örgü: olayları test elle tetikler
 class FakeMesh {
@@ -306,6 +307,148 @@ describe('başlangıç susturma tercihi (U01)', () => {
     o.setMuted(false)
     o.setDeafened(false)
     expect(hat.gate).toBe(true) // formül aynı: konuşma izni VE susturulmamış VE sağır değil
+    o.leave()
+  })
+})
+
+describe('sinyal konusu (DM araması)', () => {
+  it('topic verilmezse örgüye voice:<kanal> gider; verilirse o konu', async () => {
+    const o = oturumKur()
+    expect(o.topic).toBe('voice:v1')
+    await o.join()
+    expect(FakeMesh.son.opts.topic).toBe('voice:v1')
+    o.leave()
+    const a = createVoiceSession({
+      channelId: 'arama1',
+      topic: 'dm-voice:arama1',
+      userId: 'ben',
+      deps: {
+        openMic: async () => fakeStream('mik'),
+        createVoicePipeline: async () => fakeHat(),
+        createMesh: (opts) => new FakeMesh(opts),
+        playBeep: () => {},
+        getNoiseSuppressionPref: () => true,
+      },
+    })
+    expect(a.topic).toBe('dm-voice:arama1')
+    await a.join()
+    expect(FakeMesh.son.opts.topic).toBe('dm-voice:arama1')
+    expect(FakeMesh.son.opts.channelId).toBe('arama1')
+    a.leave()
+  })
+
+  it('arama biterken (leave) dm-voice: kanalı bırakılır, mikrofon/hat kapanır, sayaç kalmaz', async () => {
+    vi.useFakeTimers()
+    const net = createNet()
+    const bus = createBus()
+    const h = fakeHat()
+    let mikrofon = null
+    const o = createVoiceSession({
+      channelId: 'arama1',
+      topic: 'dm-voice:arama1',
+      userId: 'ben',
+      deps: {
+        openMic: async () => { mikrofon = fakeStream('mik'); return mikrofon },
+        createVoicePipeline: async () => h,
+        createMesh: (opts) => new PeerMesh(opts, { RTCPeerConnection: net.RTCPeerConnection, createLevelMeter: fakeLevelMeter }),
+        signal: bus.signal,
+        playBeep: () => {},
+        getNoiseSuppressionPref: () => true,
+      },
+    })
+    await o.join()
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    expect(bus.subs.map((s) => s.topic)).toEqual(['dm-voice:arama1'])
+    expect(bus.subs[0].open).toBe(true)
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // konuşan halkası ve örgü sayaçları
+    o.leave()
+    expect(bus.subs[0].open).toBe(false) // realtime kanalı bırakıldı
+    expect(bus.sent.at(-1)).toEqual({ topic: 'dm-voice:arama1', msg: expect.objectContaining({ type: 'bye' }) })
+    expect(h.closed).toBe(true) // ses hattı (mikrofon izi onun içinde) kapandı
+    expect(vi.getTimerCount()).toBe(0) // sayaç/zamanlayıcı kalmadı
+  })
+
+  it('mikrofon açılırken leave gelirse mikrofon izi durur (iki kez açık kalmaz)', async () => {
+    let bitir
+    const mikrofon = fakeStream('mik')
+    const o = createVoiceSession({
+      channelId: 'arama1',
+      topic: 'dm-voice:arama1',
+      userId: 'ben',
+      deps: {
+        openMic: () => new Promise((r) => { bitir = () => r(mikrofon) }),
+        createVoicePipeline: async () => fakeHat(),
+        createMesh: (opts) => new FakeMesh(opts),
+        playBeep: () => {},
+        getNoiseSuppressionPref: () => true,
+      },
+    })
+    const katilma = o.join()
+    o.leave()
+    bitir()
+    await katilma
+    expect(mikrofon.getTracks()[0].stopped).toBe(true)
+    expect(FakeMesh.son).toBeNull()
+  })
+})
+
+describe('karşının susturma durumu (shareState, DM araması)', () => {
+  function aramaOturumu(shareState) {
+    return createVoiceSession({
+      channelId: 'arama1',
+      topic: 'dm-voice:arama1',
+      userId: 'ben',
+      shareState,
+      deps: {
+        openMic: async () => fakeStream('mik'),
+        createVoicePipeline: async () => fakeHat(),
+        createMesh: (opts) => {
+          const m = new FakeMesh(opts)
+          m.gonderilen = []
+          m.sendState = (s) => m.gonderilen.push(s)
+          return m
+        },
+        playBeep: () => {},
+        getNoiseSuppressionPref: () => true,
+      },
+    })
+  }
+
+  it('durumumuz hazır olunca, eş bağlanınca ve değişince gönderilir; karşınınki getPeerState ile okunur', async () => {
+    const o = aramaOturumu(true)
+    await o.join()
+    const m = FakeMesh.son
+    m.emit('ready')
+    m.emit('peer-joined', { userId: 'o', stream: fakeStream('o') })
+    o.setMuted(true)
+    o.setDeafened(true)
+    expect(m.gonderilen).toEqual([
+      { muted: false, deafened: false },
+      { muted: false, deafened: false },
+      { muted: true, deafened: false },
+      { muted: true, deafened: true },
+    ])
+    expect(o.connectedPeers()).toEqual(['o'])
+    const degisim = vi.fn()
+    o.on('change', degisim)
+    expect(o.getPeerState('o')).toBeNull()
+    m.emit('peer-state', { userId: 'o', muted: true, deafened: false })
+    expect(o.getPeerState('o')).toEqual({ muted: true, deafened: false })
+    expect(degisim).toHaveBeenCalled()
+    m.emit('peer-left', { userId: 'o' })
+    expect(o.getPeerState('o')).toBeNull()
+    expect(o.connectedPeers()).toEqual([])
+    o.leave()
+  })
+
+  it('shareState kapalıyken (sesli kanal) durum gönderilmez, karşınınki dinlenmez', async () => {
+    const o = aramaOturumu(false)
+    await o.join()
+    const m = FakeMesh.son
+    m.emit('ready')
+    o.setMuted(true)
+    expect(m.gonderilen).toEqual([])
+    expect(m.dinleyiciler['peer-state']).toBeUndefined()
     o.leave()
   })
 })

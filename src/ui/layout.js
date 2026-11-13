@@ -79,7 +79,8 @@ const TOAST_EN_FAZLA = 4 // aynı anda görünen en çok bildirim
 const TOAST_SURE = 4000
 const TOAST_HATA_SURE = 6000
 let toastKutusu = null
-function toastKutusunuAl() {
+// Gelen arama kartı da bu kutuya (bildirimlerin üstüne) konur: src/ui/incomingCall.js
+export function toastKutusunuAl() {
   // Sayfa yeniden kurulduysa (kutu belgeden çıktıysa) yenisini kur
   if (!toastKutusu?.isConnected) {
     toastKutusu = document.createElement('div')
@@ -107,8 +108,11 @@ export function toast(mesaj, tur = 'bilgi') {
   const kutu = toastKutusunuAl()
   kutu.appendChild(el) // en yenisi en altta
   // Fazlalık varsa en eski hata olmayan bildirim düşer; hata, okunmadan yenilerce itilmesin
-  while (kutu.children.length > TOAST_EN_FAZLA) {
-    const eski = [...kutu.children].find((c) => !c.classList.contains('toast-hata')) ?? kutu.firstElementChild
+  // Yalnız bildirimler sayılır (kutudaki gelen arama kartı sayılmaz, düşürülmez)
+  const bildirimler = () => [...kutu.children].filter((c) => c.classList.contains('toast'))
+  while (bildirimler().length > TOAST_EN_FAZLA) {
+    const hepsi = bildirimler()
+    const eski = hepsi.find((c) => !c.classList.contains('toast-hata')) ?? hepsi[0]
     eski.remove()
   }
   setTimeout(() => el.remove(), tur === 'hata' ? TOAST_HATA_SURE : TOAST_SURE)

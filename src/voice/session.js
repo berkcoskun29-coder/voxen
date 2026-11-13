@@ -17,8 +17,13 @@ import { ICE_SERVERS } from '../config.js'
 export const SELF_SPEAKING_POLL_MS = 100
 
 // muted / deafened: başlangıç durumu (kullanıcı çubuğundaki son seçim; kanalda değilken tercih olarak tutulur).
+// topic: sinyal konusu (verilmezse "voice:<channelId>"). DM araması channelId yerine arama kimliğini
+// ve topic olarak "dm-voice:<arama id>" verir (bkz. data/calls.js callTopic).
+// shareState: true ise susturma/sağırlaştırma durumumuz sinyal konusundan karşıya gider ve karşınınki
+// getPeerState ile okunur (DM araması; kanalda voice_states tablosu kullanıldığı için kapalı).
 // deps sadece testler içindir.
-export function createVoiceSession({ channelId, userId, muted = false, deafened = false, deps = {} }) {
+export function createVoiceSession({ channelId, topic, userId, muted = false, deafened = false, shareState = false, deps = {} }) {
+  const konu = topic ?? `voice:${channelId}`
   const d = {
     openMic,
     openCamera,
@@ -63,6 +68,12 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
   const ekranSesleri = new Map() // userId -> ekran sesi için <audio> (mikrofon sesinden ayrı)
   const ekranAyari = new Map() // userId -> { volume: 0..1, hidden } (izleyenin kendi tercihi)
   const dinleyiciler = { change: new Set(), speaking: new Set(), notice: new Set(), tracks: new Set() }
+  const karsiDurumlari = new Map() // shareState: userId -> { muted, deafened } (karşının bildirdiği)
+
+  // shareState açıksa kendi durumumuzu karşıya bildir (örgü yoksa ya da kanal yolunda bir şey yapmaz)
+  function durumuGonder() {
+    if (shareState) mesh?.sendState?.({ muted: state.muted, deafened: state.deafened })
+  }
 
   function yay(olay) {
     for (const cb of dinleyiciler[olay]) cb(olay === 'speaking' ? state.speaking : state)
@@ -189,9 +200,10 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
     }
     kapiyiAyarla()
 
-    // 2) Örgü: sinyal kanalı voice:<channelId>
+    // 2) Örgü: sinyal kanalı voice:<channelId> (aramada dm-voice:<arama id>)
     mesh = d.createMesh({
       channelId,
+      topic: konu,
       userId,
       localStream: hat?.outputStream ?? null,
       iceServers: ICE_SERVERS,
@@ -201,10 +213,11 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
     if (uploadMbps != null) mesh.setUploadMbps?.(uploadMbps)
     if (odadaEkran) mesh.setRoomScreenOn?.(true)
     mesh.setDeafened(state.deafened)
-    mesh.on('ready', () => { baglandik = true; durumuGuncelle() })
+    mesh.on('ready', () => { baglandik = true; durumuGuncelle(); durumuGonder() })
     mesh.on('peer-joined', ({ userId: id, stream }) => {
       sesEkle(id, stream)
       bagliEsler.add(id)
+      durumuGonder() // yeni bağlanan eş durumumuzu bilsin
       yay('tracks') // bu eşin görüntü cap'i artık belli (eski sürüm notu için)
       baglandik = true
       durumuGuncelle()
@@ -214,11 +227,18 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
       ekranSesiKaldir(id)
       uzakIzler.delete(id)
       bagliEsler.delete(id)
+      karsiDurumlari.delete(id)
       konusmaAyarla(id, false)
       yay('tracks')
     })
     mesh.on('peer-track', uzakIzGeldi)
     mesh.on('peer-speaking', ({ userId: id, speaking }) => konusmaAyarla(id, speaking))
+    if (shareState) {
+      mesh.on('peer-state', ({ userId: id, muted: m, deafened: s }) => {
+        karsiDurumlari.set(id, { muted: !!m, deafened: !!s })
+        yay('change')
+      })
+    }
     mesh.on('connect-failed', durumuGuncelle)
     mesh.on('failed-change', durumuGuncelle)
     mesh.join()
@@ -247,6 +267,7 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
     for (const id of [...ekranSesleri.keys()]) ekranSesiKaldir(id)
     uzakIzler.clear()
     bagliEsler.clear()
+    karsiDurumlari.clear()
     ekranAyari.clear()
     hat?.close()
     hat = null
@@ -436,6 +457,7 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
   function setMuted(b) {
     state.muted = state.listenOnly ? true : !!b // mikrofon yoksa hep susturulmuş
     kapiyiAyarla()
+    durumuGonder()
     yay('change')
   }
 
@@ -446,14 +468,20 @@ export function createVoiceSession({ channelId, userId, muted = false, deafened 
     for (const a of sesler.values()) a.muted = state.deafened
     for (const id of ekranSesleri.keys()) ekranSesiniAyarla(id) // ekran sesi de susar
     kapiyiAyarla()
+    durumuGonder()
     yay('change')
   }
 
   return {
     channelId,
+    topic: konu,
     join,
     leave,
     getState: () => state,
+    // Bağlantısı kurulmuş eşlerin kimlikleri (DM araması "bağlantı koptu" kuralı için)
+    connectedPeers: () => [...bagliEsler],
+    // shareState: karşının bildirdiği { muted, deafened } (henüz bildirmediyse null)
+    getPeerState: (peerId) => karsiDurumlari.get(peerId) ?? null,
     // olay: 'change' (durum/susturma/hata), 'speaking' (konuşanlar kümesi)
     // ya da 'tracks' (karşının kamera/ekran izleri ya da bir eşin bağlantısı değişti)
     on(olay, cb) {

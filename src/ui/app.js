@@ -9,11 +9,14 @@ import {
   renameChannelDialog, serverSettingsDialog,
 } from './serverMenu.js'
 import { inviteFromHash, parseInviteInput, takePendingInvite } from './invite.js'
-import { mountLayout, openModal, toast, createMemberToggle } from './layout.js'
+import { mountLayout, openModal, toast, createMemberToggle, toastKutusunuAl } from './layout.js'
 import { renderRail } from './serverRail.js'
 import { renderChannelList, updateSpeakingRings, voiceMembersByChannel, renderKindPicker, kanalTuruSimgesi } from './channelList.js'
 import { formAlani } from './modal.js'
 import { createVoiceSession } from '../voice/session.js'
+import { callTopic, endCall, startCall, answerCall, pingCall, getCallStatus, parseCallEvent } from '../data/calls.js'
+import { createIncomingCall, zilCalsinMi, GELEN_ARAMA_METINLERI } from './incomingCall.js'
+import { createCallFlow, mountCallPanel, createCallButton, aramaGorunumu, ARAMA_METINLERI } from './callPanel.js'
 import { openSettings, askPttKeyIfNeeded } from './settings.js'
 import { PttController, pttBeepName, connectDesktopPtt, pttHintText, PTT_HOOK_ERROR_TEXT } from '../voice/ptt.js'
 import { isTauri, loadTauriApi, setWindowTitle } from '../desktop.js'
@@ -21,7 +24,7 @@ import { createUnreadTracker, baslikYazisi } from './unread.js'
 import { flushReads, resetReads } from '../data/reads.js'
 import { createUpdateBanner } from './updateBanner.js'
 import { getSettings, updateSettings, onSettingsChange } from '../settings.js'
-import { playBeep } from '../voice/sounds.js'
+import { playBeep, startLoop } from '../voice/sounds.js'
 import { mountChat, renderWelcome, renderLoadError } from './chatView.js'
 import { listMembers } from '../data/members.js'
 import { onPresenceChange, isClientOnline, onlineClientIds, startPresence, CLIENT_ID } from '../presence/presence.js'
@@ -39,7 +42,7 @@ import { subscribeUserEvents } from '../data/userEvents.js'
 import { fetchMutedServers, muteServer, unmuteServer } from '../data/mutes.js'
 import { fetchProfiles } from '../data/messages.js'
 import { mentionsUser } from '../mentions.js'
-import { shouldNotify, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni } from '../notify.js'
+import { shouldNotify, shouldNotifyCall, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni } from '../notify.js'
 import { renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, kisiDurumu } from './home.js'
 
 // Son seçilen sunucu/kanal tarayıcıda hatırlanır (sadece kolaylık için).
@@ -74,6 +77,25 @@ export function stopApp() {
   aktifDurdur?.()
 }
 
+// Açık uygulamanın "aktif ses" işlemleri (aynı anda en fazla bir uygulama; bkz. startApp).
+let aktifUygulama = null
+
+// Tek aktif ses: sesli kanal YA DA DM araması (ikisi aynı anda olmaz, mikrofon bir kez açılır).
+// Arama arayüzü (gelen arama kartı, arama paneli) bu işlemleri kullanır; testler de buradan sürer.
+//   appVoice.aramayaGir(call, thread) -> aramanın sesli oturumu (uygulama kapalıysa null)
+//     call: { id, ... } (data/calls.js startCall/answerCall dönüşü), thread: DM konuşması ({ id, other })
+//     Sesli kanaldaysak önce oradan çıkılır ("Sesli kanaldan ayrıldın."); başka arama açıksa 'hangup' ile biter.
+//   appVoice.aramadanCik(reason) -> aramanın oturumu kapanır (dm-voice: kanalı bırakılır, izler durur).
+//     reason verilirse endCall(id, reason) da çağrılır; arama karşı tarafça zaten bittiyse null ver.
+//     Dönen Promise endCall bitince çözülür (hata yutulur).
+//   appVoice.aktifSes() -> null | { tur: 'kanal', oturum, channelId, serverId, channelName }
+//                              | { tur: 'arama', oturum, call, thread }
+export const appVoice = {
+  aramayaGir: (call, thread) => aktifUygulama?.aramayaGir(call, thread) ?? null,
+  aramadanCik: (reason) => aktifUygulama?.aramadanCik(reason) ?? Promise.resolve(),
+  aktifSes: () => aktifUygulama?.aktifSes() ?? null,
+}
+
 // Kendi pencerelerimizden biri varlıktan düşünce, satırını silmeden önce bu kadar bekleriz
 // (kısa bir bağlantı kopukluğunda canlı pencerenin satırı silinmesin). Testler değiştirebilir.
 export const appTiming = { staleWindowGraceMs: 10000 }
@@ -85,14 +107,17 @@ const UYE_YENILEME_MS = 2000
 
 export async function startApp(root, profile, { email = '' } = {}) {
   const { rail, channels: panel, main, members: uyePaneli } = mountLayout(root)
-  // Ana alan: üstte kanal başlığı, altında görüntü bölmesi (sesli kanaldayken), en altta sohbet
+  // Ana alan: üstte kanal başlığı, altında DM arama paneli (o DM açıkken) ve görüntü bölmesi
+  // (sesli kanaldayken), en altta sohbet
   const baslikAlani = document.createElement('div')
   baslikAlani.className = 'header-host'
+  const aramaAlani = document.createElement('div')
+  aramaAlani.className = 'call-host'
   const goruntuAlani = document.createElement('div')
   goruntuAlani.className = 'video-host'
   const sohbetAlani = document.createElement('div')
   sohbetAlani.className = 'chat-host'
-  main.append(baslikAlani, goruntuAlani, sohbetAlani)
+  main.append(baslikAlani, aramaAlani, goruntuAlani, sohbetAlani)
   // Sohbet başlığının sağındaki "Üyeler" düğmesi: tek düğme, her kanal açılışında başlığa taşınır
   const uyeDugmesi = createMemberToggle(uyePaneli)
   let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
@@ -120,6 +145,127 @@ export async function startApp(root, profile, { email = '' } = {}) {
   let konusuyor = false
   const varlik = startPresence(profile.id, getLocalPresencePrefs, { isActive: () => konusuyor })
   let ses = null // açık sesli oturum (aynı anda en fazla bir sesli kanal)
+  let arama = null // açık DM araması: { oturum, call, thread } (ses ile aynı anda olmaz; bkz. aktifSes)
+  // ---- DM araması arayüzü (callPanel.js): 📞 düğmesi, DM'in üstündeki panel ve akış ----
+  // Akış sesi app.js'in tek aktif ses işlemleriyle açar/kapatır (aramayaGir / aramadanCik).
+  const aramaDugmesi = createCallButton({
+    onClick: () => { if (anaSayfa && anaGorunum.tur === 'dm') aramaAkisi.baslat(anaGorunum.thread) },
+  })
+  const aramaPaneli = mountCallPanel(aramaAlani, {
+    onCancel: () => aramaAkisi.iptal(),
+    onHangup: () => aramaAkisi.kapat(),
+    onToggleMute: () => susturmayiDegistir(),
+    onToggleDeafen: () => sagirlastirmayiDegistir(),
+  })
+  const aramaAkisi = createCallFlow({
+    startCall,
+    endCall,
+    pingCall,
+    getCallStatus,
+    enter: (call, thread) => aramayaGir(call, thread),
+    exit: (reason) => aramadanCik(reason),
+    // Arama başlarken sesli kanaldaysak önce oradan çıkılır; açık gelen arama kartı reddedilir
+    // (karşılıklı aramada startCall o aramayı kabul etti: kart yalnız kapanır, reddedilmez)
+    beforeStart: (call) => {
+      if (gelenArama.acik() === call?.id) gelenArama.kapat(call.id)
+      else gelenArama.reddet()
+      if (!ses) return
+      sesliAyril()
+      toast('Sesli kanaldan ayrıldın.')
+    },
+    toast: (metin, tur) => toast(metin, tur),
+    beep: (ad) => playBeep(ad),
+    startTone: () => startLoop('bekleme'),
+    onChange: () => aramaArayuzunuCiz(),
+  })
+  // 📞 düğmesinin durumu ve panel: panel yalnız aramanın DM'i açıkken görünür (başka yerde arama sürer)
+  function aramaArayuzunuCiz() {
+    if (durduruldu) return
+    const bilgi = aramaAkisi.bilgi()
+    const dm = anaSayfa && anaGorunum.tur === 'dm' ? anaGorunum.thread : null
+    // "Aramadasın" yalnız aramadaki kişinin DM'inde; başka DM'de "Zaten bir aramadasın."
+    const kabul = gelenArama.kabulEdiliyor() // gelen arama kabul ediliyor (answerCall sürüyor)
+    const aramaKonusu = bilgi?.thread?.id ?? arama?.thread?.id ?? kabul?.thread?.id ?? null
+    aramaDugmesi.update({
+      canSend: dm?.canSend !== false,
+      inCall: !!bilgi || !!arama || !!kabul,
+      withPeer: !!dm && aramaKonusu === dm.id,
+    })
+    aramaPaneli.ciz(bilgi && dm && bilgi.thread?.id === dm.id ? aramaGorunumu(bilgi, profile) : null)
+  }
+  // ---- Gelen arama (incomingCall.js): sağ altta kart, zil ve masaüstü bildirimi ----
+  const gelenArama = createIncomingCall({
+    host: () => toastKutusunuAl(), // bildirim kutusunda, bildirimlerin üstünde
+    answerCall,
+    endCall,
+    // Kabul edildi: sesli kanaldaysak oradan çıkılır (aramayaGir), konuşmaya geçilir ve DM açılır
+    onAccept: (call, thread) => {
+      if (durduruldu) { endCall(call.id, 'hangup').catch(() => {}); return }
+      // Kabul sürerken başlamış bir giden arama varsa (📞 önce basıldı, startCall sonra döndü) iptal olur:
+      // baglan endCall göndermez, iptal edilmezse o arama sunucuda sahipsiz kalırdı
+      aramaAkisi.iptal()
+      aramaAkisi.baglan(call, thread)
+      openDmView(thread)
+    },
+    toast: (metin, tur) => toast(metin, tur),
+    startRing: () => startLoop('zil'),
+    onChange: () => aramaArayuzunuCiz(), // kabul sürerken 📞 pasif
+  })
+  const gelenBekleyen = new Set() // konuşması aranırken (liste tazelenirken) bekleyen gelen aramalar
+  // Meşgul miyiz: aramadayız ya da birini arıyoruz (ya da başka bir gelen arama kartı açık)
+  // Kabul et'e basılıp answerCall beklenirken de meşgulüz (kart kapandı ama arama henüz açılmadı).
+  function aramadaMesgul(ev) {
+    return !!arama || !!aramaAkisi.bilgi() || !!gelenArama.kabulEdiliyor() ||
+      (gelenArama.acik() != null && gelenArama.acik() !== ev.callId)
+  }
+  // 'ringing': başkasından gelen arama. Meşgulsek kart çıkmadan reddedilir.
+  async function gelenAramaGeldi(ev) {
+    if (ev.caller === profile.id) return // kendi aramamız (tetikleyici iki tarafa da gönderir)
+    if (gelenArama.acik() === ev.callId || gelenBekleyen.has(ev.callId)) return // aynı olay iki kez
+    // Aynı kişiyi biz de arıyoruz (karşılıklı arama): sunucu iki aramayı birleştirir, kart gösterilmez
+    if (aramaAkisi.bilgi()?.thread?.id === ev.threadId) return
+    if (aramadaMesgul(ev)) { endCall(ev.callId, 'decline').catch(() => {}); return }
+    gelenBekleyen.add(ev.callId)
+    // Konuşma listede yoksa (yeni ya da gizlenmiş) önce liste tazelenir: arayanın adı ve avatarı için
+    let thread = dmListesi.find((t) => t.id === ev.threadId)
+    if (!thread) {
+      try { await sosyalTazele() } catch { /* liste alınamadı: yedek ad */ }
+      thread = dmListesi.find((t) => t.id === ev.threadId)
+    }
+    if (!gelenBekleyen.delete(ev.callId) || durduruldu) return // beklerken arama bitti
+    if (aramadaMesgul(ev)) { endCall(ev.callId, 'decline').catch(() => {}); return }
+    thread ??= {
+      id: ev.threadId,
+      other: { id: ev.caller, username: GELEN_ARAMA_METINLERI.bilinmeyen, color: null, avatar_url: null },
+      createdAt: null,
+      lastMessageAt: null,
+      unread: 0,
+      canSend: true,
+    }
+    const durum = bildirimDurumu()
+    const ayarlar = getNotifySettings()
+    if (!gelenArama.goster({ callId: ev.callId, thread, zil: zilCalsinMi({ durum, ayarlar }) })) return
+    if (shouldNotifyCall({ odakta: pencereOdakta(), durum, ayarlar })) {
+      const kapat = bildirimci.bildirArama({ id: ev.callId, ad: thread.other?.username ?? GELEN_ARAMA_METINLERI.bilinmeyen })
+      gelenArama.bildirimEkle(ev.callId, kapat) // kart kapanınca bildirim de kalkar
+    }
+  }
+
+  // "user:<uid>" konusundaki "arama" olayları: TEK giriş noktası.
+  //  - 'ringing': gelen arama kartı (gelenAramaGeldi; yük caller === profile.id ise kendi aramamızdır)
+  //  - 'active' / 'ended': arayanın "Aranıyor…" ve konuşma akışı (callPanel.js createCallFlow.olay);
+  //    aranan tarafta kart kapanır (arama bitti ya da başka penceremizde cevaplandı)
+  function aramaOlayi(payload) {
+    if (durduruldu) return
+    const ev = parseCallEvent(payload)
+    if (!ev) return
+    if (ev.status === 'ringing') { gelenAramaGeldi(ev); return }
+    gelenBekleyen.delete(ev.callId)
+    gelenArama.kapat(ev.callId)
+    aramaAkisi.olay(ev)
+    // Akışın bilmediği açık arama (ör. doğrudan appVoice ile girildi) karşı tarafça bittiyse yerelde kapat
+    if (ev.status === 'ended' && arama?.call.id === ev.callId) aramadanCik(null)
+  }
   let sesKanalAdi = ''
   let sesSunucuId = null // sesli kanalımızın sunucusu (başka sunucuya bakarken de bilinsin)
   // Sesli kanalımızın sunucusunun üyeleri: katılırken alınır, yalnız o sunucunun üyeleri yeniden
@@ -162,14 +308,15 @@ export async function startApp(root, profile, { email = '' } = {}) {
     mode: ayar0.mode,
     key: ayar0.pttKey,
     threshold: ayar0.vadThreshold,
-    getLevel: () => ses?.getLevel() ?? 0,
+    getLevel: () => aktifOturum()?.getLevel() ?? 0,
     onGate: (acik) => {
-      ses?.setTransmitting(acik)
+      const o = aktifOturum()
+      o?.setTransmitting(acik)
       konusuyor = acik
       if (acik) varlik.activity() // konuşmaya başladı: boştaysa hemen çevrimiçi ol
       // Bip sadece bas-konuş modunda, susturulmamış/sağır değilken çalar
-      if (ses) {
-        const bip = pttBeepName(acik, { mode: getSettings().mode, ...ses.getState() })
+      if (o) {
+        const bip = pttBeepName(acik, { mode: getSettings().mode, ...o.getState() })
         if (bip) playBeep(bip)
       }
     },
@@ -186,12 +333,13 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (s.mode !== ptt.mode) ptt.setMode(s.mode)
     if (s.pttKey !== ptt.key) ptt.setKey(s.pttKey)
     ptt.setThreshold(s.vadThreshold)
-    ses?.setNoiseSuppression(s.noiseSuppression)
-    ses?.setBitrate(s.bitrateKbps)
-    ses?.setUploadMbps(s.uploadMbps)
-    ses?.setOutputDevice(s.outputDeviceId)
+    const o = aktifOturum() // sesli kanal ya da arama: ayarlar ikisinde de aynen geçerli
+    o?.setNoiseSuppression(s.noiseSuppression)
+    o?.setBitrate(s.bitrateKbps)
+    o?.setUploadMbps(s.uploadMbps)
+    o?.setOutputDevice(s.outputDeviceId)
     // Kamera seçimi değişti ve kamera açıksa canlı geçir (mikrofondan farklı olarak)
-    if (s.cameraDeviceId !== sonKameraCihazi) { sonKameraCihazi = s.cameraDeviceId; ses?.switchCamera() }
+    if (s.cameraDeviceId !== sonKameraCihazi) { sonKameraCihazi = s.cameraDeviceId; o?.switchCamera() }
     if (ses) cizKanalPaneli() // "tuş seçilmedi" ipucu değişmiş olabilir
   })
   // Masaüstü: Rust tuş dinleyicisine bağlan; tepsi menüsündeki "Sustur" sesli kanaldaysak susturur
@@ -202,7 +350,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   if (masaustu) {
     loadTauriApi().then(async (api) => {
       guncellemeBandi = createUpdateBanner({
-        isInVoice: () => !!ses,
+        isInVoice: () => !!aktifOturum(),
         onInstall: () => api.invoke('install_update'),
         onError: (e) => toast(`Güncellenemedi: ${e?.message ?? e}`, 'hata'),
       })
@@ -241,16 +389,17 @@ export async function startApp(root, profile, { email = '' } = {}) {
   }
 
   // ---- Sustur / Sağırlaştır (kullanıcı çubuğu ve tepsi menüsü) ----
-  // Tek durum: sesli kanaldaysak oturumun durumu (ses.getState()); değilsek kayıtlı tercih
+  // Tek durum: sesli kanalda ya da aramadaysak aktif oturumun durumu; değilsek kayıtlı tercih
   // (getSettings().muted/deafened) ve bir sonraki katılışta oturum bu tercihle başlar.
-  // Kanaldayken de son seçim tercihe yazılır ki sonraki katılışta aynı kalsın.
+  // Kanaldayken/aramadayken de son seçim tercihe yazılır ki sonraki katılışta aynı kalsın.
   function susturmayiDegistir() {
+    const o = aktifOturum()
     // Sağırken Sustur'a basmak sağırlığı da kaldırır (Discord gibi): simge boşuna çizili kalmasın
-    const simdi = ses ? ses.getState() : getSettings()
+    const simdi = o ? o.getState() : getSettings()
     if (simdi.deafened && !simdi.listenOnly) {
-      if (ses) {
-        ses.setMuted(false)
-        ses.setDeafened(false)
+      if (o) {
+        o.setMuted(false)
+        o.setDeafened(false)
         updateSettings({ muted: false, deafened: false })
       } else {
         updateSettings({ muted: false, deafened: false })
@@ -258,19 +407,20 @@ export async function startApp(root, profile, { email = '' } = {}) {
       }
       return
     }
-    if (ses) {
-      if (ses.getState().listenOnly) return // mikrofon yok: hep susturulmuş, tercih bozulmasın
-      ses.toggleMute() // 'change' olayı: voice_states'e yazılır, panel yeniden çizilir
-      updateSettings({ muted: ses.getState().muted })
+    if (o) {
+      if (o.getState().listenOnly) return // mikrofon yok: hep susturulmuş, tercih bozulmasın
+      o.toggleMute() // 'change' olayı: panel yeniden çizilir (kanaldaysak voice_states'e de yazılır)
+      updateSettings({ muted: o.getState().muted })
     } else {
       updateSettings({ muted: !getSettings().muted })
       cizKanalPaneli()
     }
   }
   function sagirlastirmayiDegistir() {
-    if (ses) {
-      ses.toggleDeafen()
-      updateSettings({ deafened: ses.getState().deafened })
+    const o = aktifOturum()
+    if (o) {
+      o.toggleDeafen()
+      updateSettings({ deafened: o.getState().deafened })
     } else {
       updateSettings({ deafened: !getSettings().deafened })
       cizKanalPaneli()
@@ -373,11 +523,20 @@ export async function startApp(root, profile, { email = '' } = {}) {
       })
       .catch(() => { /* olmazsa önemli değil: çevrimdışı kişinin satırı zaten gösterilmez */ })
   }
-  // Sayfa kapanırken sesli kanaldan ayrıl (karşıdakilere bye gider)
-  const sayfaKapaniyor = () => sesliAyril(false, { hemen: true })
+  // Sayfa kapanırken sesli kanaldan ya da aramadan ayrıl (karşıdakilere bye gider)
+  const sayfaKapaniyor = () => {
+    sesliAyril(false, { hemen: true })
+    aramaAkisi.iptal() // "Aranıyor…" iken: arama iptal
+    aramadanCik('hangup', { ciz: false })
+  }
   window.addEventListener('pagehide', sayfaKapaniyor)
   function varligiDurdur() {
     sesliAyril(false, { hemen: true })
+    aramaAkisi.iptal() // "Aranıyor…" iken: arama iptal (sayaç ve bekleme tonu durur)
+    aramadanCik('hangup', { ciz: false })
+    aramaPaneli.ciz(null)
+    gelenArama.destroy() // kart kapanır, zil ve 30 sn sayacı durur
+    gelenBekleyen.clear()
     sesAbonelikleriniKapat()
     for (const z of dusenZamanlayicilar.values()) clearTimeout(z)
     dusenZamanlayicilar.clear()
@@ -417,8 +576,11 @@ export async function startApp(root, profile, { email = '' } = {}) {
     clearTimeout(uyeZamanlayici)
     uyeDugmesi.dispose()
     if (aktifDurdur === varligiDurdur) aktifDurdur = null
+    if (aktifUygulama === buUygulama) aktifUygulama = null
   }
   aktifDurdur = varligiDurdur
+  const buUygulama = { aramayaGir, aramadanCik, aktifSes }
+  aktifUygulama = buUygulama
 
   // Çıkış yap (Ayarlar > Hesap'taki kırmızı düğme). Sıra önemli:
   // önce varlık ve ses durdurulur, sesli durum satırı silinir, EN SON oturum kapanır.
@@ -682,6 +844,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Bildirime tıklandı (pencere öne getirildi): DM'i ya da bahsedilen kanalı aç
   function bildirimHedefiniAc(hedef) {
     if (durduruldu || !hedef?.id) return
+    // Gelen arama: pencere öne geldi; kart (hâlâ çalıyorsa) zaten sağ altta görünür, kabul karttan yapılır
+    if (hedef.type === 'call') return
     if (hedef.type === 'dm') {
       const thread = dmListesi.find((t) => t.id === hedef.id)
       if (thread) { openDmView(thread); return }
@@ -783,6 +947,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     cizSerit()
     cizKanalPaneli()
     cizMain()
+    aramaArayuzunuCiz() // DM'e girilince/çıkılınca panel görünür/gizlenir
   }
 
   // Sağ panel: sunucudayken üye listesi; DM'de karşı tarafın profil kartı; başka yerde gizli.
@@ -919,6 +1084,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
         headerHost: baslikAlani,
         peerStatus: kisiDurumu(varlikHaritasi, thread.other?.id),
         onBottom: () => okunduIsaretle(),
+        headerActions: [aramaDugmesi.button], // 📞 Sesli arama başlat
       })
     } else {
       const sayfa = arkadasSayfasiniAl()
@@ -984,6 +1150,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       cizKanalPaneli()
       arkadasSayfasiniGuncelle()
       if (dmYenidenKur) { acikSohbetId = null; cizAnaSayfaMain() }
+      aramaArayuzunuCiz() // kutu açıldı/kapandı: 📞 düğmesi de değişir
       if (anaGorunum.tur === 'dm') cizUyeler() // profil kartındaki arkadaşlık düğmesi değişmiş olabilir
     }
   }
@@ -1000,7 +1167,9 @@ export async function startApp(root, profile, { email = '' } = {}) {
       myStatusText: varlikHaritasi.get(profile.id)?.statusText ?? '',
       selectedChannelId: kanalId,
       unread: okunmamis,
-      audio: getSettings(), // sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi
+      // Çubuktaki Sustur/Sağırlaştır: aramadaysak aramanın durumu, değilsek kayıtlı tercih
+      // (sesli kanaldaysak çubuk zaten voice.state'i gösterir)
+      audio: arama ? arama.oturum.getState() : getSettings(),
       voiceMembers: voiceMembersByChannel(uyeler, sesHaritasi(sunucuId), cevrimiciler()),
       speaking: ses?.getState().speaking ?? new Set(),
       voiceStates: sesHaritasi(sunucuId),
@@ -1014,6 +1183,16 @@ export async function startApp(root, profile, { email = '' } = {}) {
               onToggleCamera: () => ses.toggleCamera(),
               onToggleScreen: () => ses.toggleScreenShare(),
               onLeave: () => sesliAyril(),
+            },
+          }
+        : null,
+      // DM aramasındaysak "Aramada · Ad" satırı: tıklayınca o DM, Kapat aramayı bitirir
+      call: arama
+        ? {
+            peerName: arama.thread.other?.username ?? '',
+            handlers: {
+              onOpen: () => openDmView(arama.thread),
+              onHangup: () => { aramadanCik('hangup') },
             },
           }
         : null,
@@ -1092,6 +1271,11 @@ export async function startApp(root, profile, { email = '' } = {}) {
       }
       if (ses?.channelId === kanal.id) return
     }
+    // Aramadaysak (ya da biri aranıyorsa) arama biter (onay sorulmaz), sonra kanala girilir.
+    // Çalan gelen arama kartı da reddedilir (aynı anda tek ses).
+    gelenArama.reddet()
+    aramaAkisi.iptal()
+    if (arama) aramadanCik('hangup', { ciz: false })
     sesliAyril(false)
     // Çubukta kanal dışındayken seçilen Sustur/Sağırlaştır tercihiyle başla
     const tercih = getSettings()
@@ -1157,6 +1341,78 @@ export async function startApp(root, profile, { email = '' } = {}) {
     clearVoiceState(profile.id, { now: hemen }) // satırımız silinir (olmazsa yeniden denenir)
     if (!durduruldu) sesAbonelikleriniAyarla() // başka sunucunun sesli durumlarına artık gerek yok
     if (ciz) cizKanalPaneli()
+  }
+
+  // ---- Tek aktif ses: sesli kanal ya da DM araması ----
+  // ses (kanal) ve arama aynı anda dolu olmaz: biri açılırken öteki kapanır (leave), mikrofon bir kez açılır.
+  function aktifOturum() {
+    return ses ?? arama?.oturum ?? null
+  }
+  function aktifSes() {
+    if (ses) return { tur: 'kanal', oturum: ses, channelId: ses.channelId, serverId: sesSunucuId, channelName: sesKanalAdi }
+    if (arama) return { tur: 'arama', oturum: arama.oturum, call: arama.call, thread: arama.thread }
+    return null
+  }
+
+  // Aramanın sesine gir (arayan: arama başlarken; aranan: kabul edince). Arama arayüzü sonraki görevlerde.
+  // Aramada voice_states'e yazılmaz (o tablo kanala bağlı); sinyal konusu dm-voice:<arama id>.
+  function aramayaGir(call, thread) {
+    if (durduruldu || !call?.id) return null
+    if (arama?.call.id === call.id) return arama.oturum // zaten bu aramadayız
+    katilmaNo++ // beklemedeki sesli kanal katılımı (başka pencere denetimi) artık katılmasın
+    if (arama) aramadanCik('hangup', { ciz: false }) // başka bir arama açıksa biter
+    if (ses) {
+      sesliAyril(false)
+      toast('Sesli kanaldan ayrıldın.')
+    }
+    // Çubukta seçilen Sustur/Sağırlaştır tercihiyle başla
+    const tercih = getSettings()
+    const oturum = createVoiceSession({
+      channelId: call.id,
+      topic: callTopic(call.id),
+      userId: profile.id,
+      muted: tercih.muted,
+      deafened: tercih.deafened,
+      shareState: true, // susturma/sağırlaştırma durumu sinyal konusundan karşıya gider
+    })
+    arama = { oturum, call, thread }
+    guncellemeBandi?.refresh() // aramadayken güncelleme bandı gizlenir
+    oturum.on('change', () => { if (arama?.oturum === oturum) cizKanalPaneli() }) // çubuktaki Sustur/Sağırlaştır
+    oturum.on('notice', (metin) => { if (arama?.oturum === oturum) toast(metin) })
+    // Kayıtlı ayarları oturuma uygula; kapı bas-konuşta kapalı başlar (tuşa basılana kadar)
+    const s = getSettings()
+    oturum.setBitrate(s.bitrateKbps)
+    oturum.setUploadMbps(s.uploadMbps)
+    oturum.setOutputDevice(s.outputDeviceId)
+    oturum.setTransmitting(ptt.isOpen())
+    askPttKeyIfNeeded(ptt) // tuş hiç seçilmediyse ilk katılışta sor
+    // Katılma başarısızsa arama biter: karşı taraf boşuna beklemesin
+    oturum.join().catch(() => {
+      if (arama?.oturum !== oturum) return
+      aramadanCik('lost')
+      toast(ARAMA_METINLERI.baglantiKoptu, 'hata')
+    })
+    cizKanalPaneli()
+    return oturum
+  }
+
+  // Aramadan çık: oturum kapanır (bye gider, dm-voice: kanalı bırakılır, mikrofon/izler/sayaçlar durur).
+  // reason verilirse aramayı sunucuda da bitirir (endCall); karşı taraf zaten bitirdiyse null verilir.
+  // Önce leave: bye, arama bitip konu kapanmadan gitsin.
+  // Dönen Promise endCall bitince çözülür (hata yutulur; beklemek isteyen bekler).
+  function aramadanCik(reason, { ciz = true } = {}) {
+    if (!arama) return Promise.resolve()
+    const { oturum, call } = arama
+    arama = null
+    oturum.leave()
+    guncellemeBandi?.refresh()
+    aramaAkisi.sesKapandi(call.id) // panel ve arama sayaçları (kopma, canlılık, süre) kapanır
+    const is = reason
+      ? endCall(call.id, reason).catch(() => { /* olmazsa sunucudaki bayatlık kuralı bitirir */ })
+      : Promise.resolve()
+    if (ciz && !durduruldu) cizKanalPaneli()
+    aramaArayuzunuCiz()
+    return is
   }
 
   // Sunucuyu seçer, kanallarını yükler; hatırlanan (yoksa ilk yazılı) kanalı açar.
@@ -1510,7 +1766,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Başlangıç
   const kod = inviteFromHash() ?? takePendingInvite()
   // Kişiye özel olaylar (arkadaşlık, yeni DM): gelince listeler yeniden alınır. Tek abonelik.
-  kullaniciOlaylari = subscribeUserEvents(profile.id, () => { if (!durduruldu) sosyalTazele() })
+  // "arama" olayları da aynı konudan gelir (yeni abonelik yok)
+  kullaniciOlaylari = subscribeUserEvents(profile.id, (p) => {
+    if (durduruldu) return
+    sosyalTazele()
+    if (p?.yeniden) aramaAkisi.yenidenDenetle() // kopukken "arama" olayı kaçmış olabilir
+  }, { onCall: aramaOlayi })
   // Bütün DM'lerin mesajları (okunmamış sayıları): tek abonelik; yeniden bağlanınca sayılar düzeltilir
   dmAboneligi = subscribeAllDmMessages({
     onInsert: dmMesajiGeldi,

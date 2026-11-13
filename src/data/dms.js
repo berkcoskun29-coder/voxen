@@ -2,6 +2,8 @@
 // chatView'in kullandığı "kaynak" nesnesi (dmSource).
 // Kurallar veritabanında (supabase/migrations/007_sosyal.sql): dm_messages yalnız iki tarafa açık;
 // gönderme doğrudan INSERT (taraf + engel yok), düzenleme/silme RPC ile.
+// 008_dm_arama.sql: dm_messages.kind ('text' | 'call'). Arama kaydı satırlarını yalnız sunucu yazar;
+// düzenlenemez ve silinemez (dmSource.canEdit/canDelete false, RPC'ler de reddeder).
 import { supabase } from '../lib/supabase.js'
 import { MAX_UZUNLUK, SAYFA } from './messages.js'
 import { createReadMarker } from './reads.js'
@@ -51,7 +53,8 @@ export async function hideDm(threadId) {
 // ---------- Mesajlar (messages.js'teki kanal karşılıklarıyla aynı davranış) ----------
 
 // Konuşmanın mesajları, ESKİDEN YENİYE. before: o id'den eskiler; after: o id'den sonraki ilkler.
-// Silinmiş mesajlar (deleted_at dolu) hiç gelmez.
+// Silinmiş mesajlar (deleted_at dolu) hiç gelmez. '*' 008'deki kind sütununu da getirir
+// ('text' | 'call'; eski şemada yoksa undefined, düz mesaj sayılır).
 export async function fetchDmMessages(threadId, { before, after, limit = SAYFA } = {}) {
   let sorgu = supabase.from('dm_messages').select('*').eq('thread_id', threadId).is('deleted_at', null)
   if (after != null) {
@@ -165,13 +168,16 @@ export function flushDmReads() { return dmOkuma.flush() }
 // (test için) durumu sıfırlar
 export function resetDmReads() { dmOkuma.reset() }
 
+// Arama kaydı satırı mı ("📞 Cevapsız arama" / "📞 Arama · 12:34"; yalnız sunucu yazar)?
+export const aramaSatiri = (msg) => msg?.kind === 'call'
+
 // ---------- chatView kaynağı ----------
 // thread: fetchDmList()'ten gelen konuşma (id + other.username) ya da en az { id, other: { username } }.
 // selfProfile: giriş yapan kişinin profili ({ id, username }).
 // Dönen nesne kanal kaynağıyla aynı arayüzü sağlar (Task 3: mountChat({ source })):
 //  { kind:'dm', id, title, placeholder, other, canSend, fetch(beforeId, { after, limit }), send(content), edit(id, content),
 //    remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
-//    joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg) }
+//    joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg) }
 export function dmSource(thread, selfProfile) {
   const id = thread.id
   const ad = thread.other?.username ?? ''
@@ -191,7 +197,9 @@ export function dmSource(thread, selfProfile) {
       subscribeDmMessages(id, (m) => onInsert?.(m), { onUpdate, getLastId, onReconnect }),
     joinTyping: (opts = {}) => joinTyping(id, { ...opts, topic: `dm-typing:${id}` }),
     markRead: (mesajId) => markDmRead(id, mesajId),
-    // DM'de sahip kavramı yok: yalnız kendi mesajın silinir
-    canDelete: (msg) => msg?.author_id === selfProfile.id,
+    // DM'de sahip kavramı yok: yalnız kendi mesajın silinir. Arama kaydı satırı (kind 'call')
+    // düzenlenemez ve silinemez (yazarı arayan olsa da).
+    canDelete: (msg) => msg?.author_id === selfProfile.id && !aramaSatiri(msg),
+    canEdit: (msg) => msg?.author_id === selfProfile.id && !aramaSatiri(msg),
   }
 }

@@ -261,3 +261,18 @@ describe('engel (can_send=false)', () => {
     expect(document.querySelector('.msg-edit')).toBeNull()
   })
 })
+
+describe("arama kaydı satırı (kind 'call')", () => {
+  const aramaSatir = (id) => ({ ...dmMesaj(id, 'u1', '📞 Cevapsız arama'), kind: 'call' })
+  it('kendi arama satırımda ✏️ ve 🗑️ yok; ↑ onu atlayıp son düz mesajı açar', async () => {
+    await dmKur([dmMesaj(1, 'u1', 'düz'), aramaSatir(2)])
+    expect(mesaj(2).querySelector('.msg-actions')).toBeNull()
+    tus(document.querySelector('textarea'), 'ArrowUp')
+    expect(document.querySelector('.msg-edit-input').value).toBe('düz')
+  })
+  it('kanal kaynağında da canEdit var: yalnız kendi mesajı (sahip başkasınınkini düzenleyemez)', () => {
+    const sahip = channelSource({ id: 'c1', name: 'genel' }, { isOwner: true, selfId: 'u1' })
+    expect(sahip.canEdit({ author_id: 'u1' })).toBe(true)
+    expect(sahip.canEdit({ author_id: 'u2' })).toBe(false)
+  })
+})

@@ -39,7 +39,7 @@ vi.mock('../src/lib/supabase.js', () => {
 
 import {
   fetchDmList, openDm, hideDm, fetchDmMessages, sendDmMessage, editDmMessage, deleteDmMessage,
-  subscribeAllDmMessages, subscribeDmMessages, markDmRead, flushDmReads, resetDmReads, dmSource,
+  subscribeAllDmMessages, subscribeDmMessages, markDmRead, flushDmReads, resetDmReads, dmSource, aramaSatiri,
 } from '../src/data/dms.js'
 import { markRead, resetReads } from '../src/data/reads.js'
 
@@ -108,6 +108,13 @@ describe('mesajlar', () => {
     expect(q.cagrilar).toEqual(expect.arrayContaining([
       ['eq', 'thread_id', 't1'], ['is', 'deleted_at', null], ['lt', 'id', 10], ['order', 'id', { ascending: false }],
     ]))
+  })
+
+  it('fetchDmMessages: bütün sütunlar (008 kind dahil) seçilir, kind olduğu gibi gelir', async () => {
+    fake.sonuc = { data: [{ id: 2, kind: 'call', content: '📞 Cevapsız arama' }], error: null }
+    const m = await fetchDmMessages('t1')
+    expect(fake.sorgular[0].cagrilar[0]).toEqual(['select', '*'])
+    expect(m[0].kind).toBe('call')
   })
 
   it('sendDmMessage: kırpılmış içerikle INSERT; boş/uzun gönderilmez', async () => {
@@ -249,7 +256,7 @@ describe('dmSource', () => {
   it('arayüz alanları: kind, id, title, placeholder', () => {
     const s = dmSource(thread, ben)
     expect(s).toMatchObject({ kind: 'dm', id: 't1', title: 'ayla', placeholder: '@ayla kişisine mesaj gönder' })
-    for (const f of ['fetch', 'send', 'edit', 'remove', 'subscribe', 'joinTyping', 'markRead', 'canDelete']) {
+    for (const f of ['fetch', 'send', 'edit', 'remove', 'subscribe', 'joinTyping', 'markRead', 'canDelete', 'canEdit']) {
       expect(typeof s[f]).toBe('function')
     }
   })
@@ -258,6 +265,18 @@ describe('dmSource', () => {
     const s = dmSource(thread, ben)
     expect(s.canDelete({ author_id: 'ben' })).toBe(true)
     expect(s.canDelete({ author_id: 'u2' })).toBe(false)
+  })
+
+  it("arama kaydı satırı (kind 'call'): yazarı ben olsam da silinemez ve düzenlenemez", () => {
+    const s = dmSource(thread, ben)
+    const arama = { author_id: 'ben', kind: 'call', content: '📞 Arama · 12:34' }
+    expect(s.canDelete(arama)).toBe(false)
+    expect(s.canEdit(arama)).toBe(false)
+    expect(s.canEdit({ author_id: 'ben', kind: 'text' })).toBe(true)
+    expect(s.canEdit({ author_id: 'ben' })).toBe(true) // eski şema: kind yok, düz mesaj
+    expect(s.canEdit({ author_id: 'u2', kind: 'text' })).toBe(false)
+    expect(aramaSatiri(arama)).toBe(true)
+    expect(aramaSatiri({ kind: 'text' })).toBe(false)
   })
 
   it('fetch/send/edit/remove doğru tabloya ve RPC\'ye gider', async () => {

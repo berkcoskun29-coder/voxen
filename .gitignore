@@ -12,3 +12,6 @@ src-tauri/gen/
 
 # tasarım masası test hesapları
 tasarim/_araclar/*.local.json
+
+# Tasarım ve doğrulama araçları yerel kalır (herkese açık depoya girmez)
+tasarim/

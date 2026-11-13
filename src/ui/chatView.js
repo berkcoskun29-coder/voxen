@@ -24,6 +24,14 @@ const tarihBicimi = new Intl.DateTimeFormat('tr-TR', { day: 'numeric', month: 'l
 // uyeler: verilirse (kanalda sunucu üyeleri) metindeki @ad üye ise etiket olur (src/ui/mentions.js).
 // anar: true ise mesaj seni anıyor: solda çizgi, hafif renkli zemin (.mentioned).
 export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null, uyeler = null, anar = false } = {}) {
+  // Arama kaydı (DM, kind 'call'): ortalanmış soluk sistem satırı; avatar, ad başlığı ve eylem simgeleri yok
+  if (msg.kind === 'call') {
+    const satir = document.createElement('div')
+    satir.className = 'message call-log'
+    satir.dataset.id = String(msg.id)
+    satir.textContent = msg.content
+    return satir
+  }
   const p = profile ?? { username: 'Bilinmeyen', color: '#8d93a1', avatar_url: null }
   const el = document.createElement('div')
   el.className = 'message' + (grouped ? ' grouped' : '') + (anar ? ' mentioned' : '')
@@ -291,12 +299,14 @@ export function mountChat(container, { source = null, channel = null, profile, i
       }
       const gruplu =
         onceki !== null &&
+        onceki.kind !== 'call' && // arama satırı kimseyle gruplanmaz; sonraki mesaj başlığını yeniden çizer
+        m.kind !== 'call' &&
         onceki.author_id === m.author_id &&
         new Date(m.created_at) - new Date(onceki.created_at) <= BES_DAKIKA
       liste.appendChild(renderMessage(m, profiller.get(m.author_id), {
         grouped: gruplu,
         // Yazılamayan (engelli) DM'de düzenleme yok; silme kalır
-        izin: { duzenle: m.author_id === profile.id && yazabilir, sil: !!kaynak.canDelete(m) },
+        izin: { duzenle: duzenlenebilir(m), sil: !!kaynak.canDelete(m) },
         tik: { onEdit: () => duzenleBaslat(m.id), onDelete: (shift) => silIste(m.id, shift) },
         editor: duzenle?.id === m.id ? duzenle.ed.el : null,
         uyeler: dm ? null : uyeler,
@@ -324,10 +334,14 @@ export function mountChat(container, { source = null, channel = null, profile, i
 
   // --- Düzenleme ve silme ---
   const bul = (id) => mesajlar.find((m) => m.id === id)
+  // Kendi mesajı, yazılabilir konuşma ve kaynak izin veriyor (DM'de arama kaydı satırı düzenlenemez)
+  function duzenlenebilir(m) {
+    return m.author_id === profile.id && yazabilir && (kaynak.canEdit?.(m) ?? true)
+  }
 
   function duzenleBaslat(id) {
     const m = bul(id)
-    if (!m || m.author_id !== profile.id || kapandi || !yazabilir) return
+    if (!m || !duzenlenebilir(m) || kapandi) return
     if (duzenle?.id === id) { duzenle.ed.kutu.focus(); return }
     const ed = duzenlemeKutusu(m.content, {
       kaydet: (metin) => duzenleKaydet(id, ed, metin),
@@ -557,7 +571,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); gonder() }
     // Kutu boşken ↑: son kendi mesajını düzenlemeye aç (Discord alışkanlığı)
     else if (yazabilir && e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && kutu.value === '') {
-      const son = mesajlar.findLast((m) => m.author_id === profile.id)
+      const son = mesajlar.findLast((m) => duzenlenebilir(m))
       if (son) { e.preventDefault(); duzenleBaslat(son.id) }
     }
   })

@@ -30,6 +30,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 import {
   shouldNotify, createNotifier, notifyTiming, bildirimBasligi, bildirimMetni, birlesikMetin,
   getNotifySettings, setNotifySettings, requestNotifyPermission, METIN_MAX,
+  shouldNotifyCall, aramaBildirimMetni,
 } from '../src/notify.js'
 import { BEEPS } from '../src/voice/sounds.js'
 import { getChannel } from '../src/data/channels.js'
@@ -81,6 +82,89 @@ describe('shouldNotify (Review Focus 3)', () => {
   ]
   it.each(tablo)('%s', (_ad, degisiklik, beklenen) => {
     expect(shouldNotify({ ...temel, ...degisiklik })).toBe(beklenen)
+  })
+})
+
+describe('shouldNotifyCall (gelen arama, DM araması §2)', () => {
+  const temel = { odakta: false, durum: 'online', ayarlar: { masaustu: true, ses: true } }
+  const tablo = [
+    ['pencere arkada', {}, true],
+    ['pencere odakta (kart zaten görünüyor)', { odakta: true }, false],
+    ['Rahatsız etmeyin', { durum: 'dnd' }, false],
+    ['boşta (idle)', { durum: 'idle' }, true],
+    ['masaüstü bildirimleri kapalı', { ayarlar: { masaustu: false, ses: true } }, false],
+    ['bildirim sesi kapalı (bildirim yine gelir)', { ayarlar: { masaustu: true, ses: false } }, true],
+  ]
+  it.each(tablo)('%s', (_ad, degisiklik, beklenen) => {
+    expect(shouldNotifyCall({ ...temel, ...degisiklik })).toBe(beklenen)
+  })
+})
+
+describe('gelen arama bildirimi (bildirArama)', () => {
+  function kur() {
+    const gosterilen = []
+    const sesCal = vi.fn()
+    const odakla = vi.fn()
+    const ac = vi.fn()
+    const n = createNotifier({ ac, deps: { goster: (b) => { gosterilen.push(b); return true }, sesCal, odakla } })
+    return { n, gosterilen, sesCal, odakla, ac }
+  }
+
+  it('"Ad" / "Ad seni arıyor", hedef { type: call, id }; bildirim sesi çalmaz (zil kartta)', () => {
+    const { n, gosterilen, sesCal } = kur()
+    n.bildirArama({ id: 'c1', ad: 'ali' })
+    expect(gosterilen).toHaveLength(1)
+    expect(gosterilen[0]).toMatchObject({ baslik: 'ali', metin: 'ali seni arıyor', hedef: { type: 'call', id: 'c1' }, etiket: 'call:c1' })
+    expect(aramaBildirimMetni('ali')).toBe('ali seni arıyor')
+    expect(sesCal).not.toHaveBeenCalled()
+    n.destroy()
+  })
+
+  it('birleşmez, sayaç kurmaz; tıklayınca pencere öne gelir ve ac({ type: call, id }) çağrılır', () => {
+    vi.useFakeTimers()
+    const { n, gosterilen, odakla, ac } = kur()
+    n.bildirArama({ id: 'c1', ad: 'ali' })
+    n.bildirArama({ id: 'c2', ad: 'veli' })
+    expect(gosterilen).toHaveLength(2)
+    expect(vi.getTimerCount()).toBe(0)
+    gosterilen[0].tikla(gosterilen[0].hedef)
+    expect(odakla).toHaveBeenCalledTimes(1)
+    expect(ac).toHaveBeenCalledWith({ type: 'call', id: 'c1' })
+    n.destroy()
+    n.bildirArama({ id: 'c3', ad: 'can' })
+    expect(gosterilen).toHaveLength(2) // kapandıktan sonra gösterilmez
+  })
+
+  it('tarayıcıda Web Notification ile gösterilir (etiket call:<id>)', () => {
+    const olusan = []
+    class SahteBildirim { constructor(baslik, secenek) { this.baslik = baslik; this.secenek = secenek; this.close = vi.fn(); olusan.push(this) } }
+    SahteBildirim.permission = 'granted'
+    vi.stubGlobal('Notification', SahteBildirim)
+    const ac = vi.fn()
+    const n = createNotifier({ ac, deps: { sesCal: () => {}, odakla: () => {} } })
+    n.bildirArama({ id: 'c1', ad: 'ali' })
+    expect(olusan).toHaveLength(1)
+    expect(olusan[0].baslik).toBe('ali')
+    expect(olusan[0].secenek).toMatchObject({ body: 'ali seni arıyor', tag: 'call:c1' })
+    olusan[0].onclick()
+    expect(ac).toHaveBeenCalledWith({ type: 'call', id: 'c1' })
+    n.destroy()
+  })
+
+  it('dönen kapat() Web Notification bildirimini kapatır; gösterilmediyse güvenle boş geçer', () => {
+    const olusan = []
+    class SahteBildirim { constructor(baslik, secenek) { this.baslik = baslik; this.secenek = secenek; this.close = vi.fn(); olusan.push(this) } }
+    SahteBildirim.permission = 'granted'
+    vi.stubGlobal('Notification', SahteBildirim)
+    const n = createNotifier({ ac: vi.fn(), deps: { sesCal: () => {}, odakla: () => {} } })
+    const kapat = n.bildirArama({ id: 'c1', ad: 'ali' })
+    expect(olusan[0].close).not.toHaveBeenCalled()
+    kapat()
+    expect(olusan[0].close).toHaveBeenCalledTimes(1)
+    SahteBildirim.permission = 'denied'
+    expect(() => n.bildirArama({ id: 'c2', ad: 'ali' })()).not.toThrow()
+    n.destroy()
+    expect(() => n.bildirArama({ id: 'c3', ad: 'ali' })()).not.toThrow()
   })
 })
 

@@ -5,7 +5,7 @@ import { sayiYazisi } from './unread.js'
 import { avatarTextColor } from './avatarColor.js'
 import { makeProfileOpener } from './profileOpener.js'
 import { STATUS_LABELS } from './profileCard.js'
-import { renderVoicePanel, renderMuteButtons } from './voicePanel.js'
+import { renderVoicePanel, renderMuteButtons, renderCallRow } from './voicePanel.js'
 import { voiceStateIcon, cameraIcon, screenIcon, gearIcon, speakerIcon } from './icons.js'
 
 // "Kanal ekle" penceresinde tür seçimi: açılır liste yerine iki seçim kartı (Yazılı / Sesli).
@@ -322,6 +322,7 @@ export function renderChannelList(panel, ctx) {
   }
   panel.appendChild(liste)
   if (ctx.voice) panel.appendChild(renderVoicePanel(ctx.voice))
+  else if (ctx.call) panel.appendChild(renderCallRow(ctx.call)) // DM aramasındayız: "Aramada · Ad"
   // Çubuktaki Sustur/Sağırlaştır: sesli kanaldaysak oturumun durumu (tek durum), değilsek tercih
   const sesDurumu = ctx.voice?.state ?? ctx.audio ?? { muted: false, deafened: false }
   panel.appendChild(kullaniciCubugu(profile, handlers, ctx.myStatus ?? 'online', sesDurumu, ctx.myStatusText ?? ''))

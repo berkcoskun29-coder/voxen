@@ -115,6 +115,40 @@ describe('ses paneli', () => {
   })
 })
 
+describe('Aramada satırı', () => {
+  const profil = { id: 'u1', username: 'berk', color: '#5b7cfa' }
+  const cizim = (call) => {
+    const el = document.createElement('aside')
+    renderChannelList(el, { server: { id: 's', name: 'S', owner_id: 'u1' }, channels: [], profile: profil, selectedChannelId: null, handlers: {}, call })
+    return el
+  }
+  it('"Aramada · Ad" yazar; tıklayınca onOpen, Kapat düğmesi onHangup çağrılır', () => {
+    let ac = 0, kapat = 0
+    const el = cizim({ peerName: 'ayla', handlers: { onOpen: () => ac++, onHangup: () => kapat++ } })
+    const satir = el.querySelector('.call-row')
+    expect(satir.querySelector('.voice-info').textContent).toBe('Aramada · ayla')
+    satir.querySelector('.voice-info').click()
+    expect(ac).toBe(1)
+    const k = satir.querySelector('button.leave')
+    expect(k.getAttribute('aria-label')).toBe('Kapat')
+    k.click()
+    expect(kapat).toBe(1)
+    // Kullanıcı çubuğunun hemen üstünde durur
+    expect(satir.nextElementSibling.classList.contains('user-bar')).toBe(true)
+  })
+  it('ad textContent ile yazılır; arama yoksa satır da yok', () => {
+    expect(cizim({ peerName: '<i>x</i>', handlers: {} }).querySelector('.call-row i')).toBeNull()
+    expect(cizim(null).querySelector('.call-row')).toBeNull()
+  })
+  it('sesli kanal paneli varsa o gösterilir, arama satırı çıkmaz', () => {
+    const el = document.createElement('aside')
+    renderChannelList(el, { server: { id: 's', name: 'S', owner_id: 'u1' }, channels: [], profile: profil, selectedChannelId: null, handlers: {},
+      voice: { channelName: 'Lobi', state: durum(), handlers: {} }, call: { peerName: 'ayla', handlers: {} } })
+    expect(el.querySelector('.call-row')).toBeNull()
+    expect(el.querySelector('.voice-panel')).not.toBeNull()
+  })
+})
+
 describe('baloncuk', () => {
   beforeAll(() => installTooltips())
   const balon = () => document.querySelector('.tooltip')

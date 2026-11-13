@@ -118,7 +118,7 @@ export async function fetchProfiles(ids) {
 // channel: { id, name }. isOwner: sunucunun sahibi mi (başkasının mesajını da silebilir). selfId: kendi id'miz.
 // Dönen: { kind:'channel', id, title, placeholder, other:null, canSend, fetch(beforeId, { after, limit }),
 //   send(content), edit(id, content), remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
-//   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg) }
+//   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg) }
 export function channelSource(channel, { isOwner = false, selfId } = {}) {
   const id = channel.id
   return {
@@ -138,5 +138,7 @@ export function channelSource(channel, { isOwner = false, selfId } = {}) {
     markRead: (mesajId) => markRead(id, mesajId),
     // Sunucu sahibi başkasının mesajını da silebilir
     canDelete: (msg) => msg?.author_id === selfId || isOwner,
+    // Düzenleme yalnız kendi mesajında (sahip de başkasınınkini düzenleyemez)
+    canEdit: (msg) => msg?.author_id === selfId,
   }
 }

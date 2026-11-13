@@ -61,3 +61,22 @@ describe('subscribeUserEvents', () => {
     expect(h.rt.channels).toEqual([])
   })
 })
+
+describe('subscribeUserEvents: arama olayları (DM araması)', () => {
+  it('onCall verilince aynı kanalda "arama" da dinlenir; yeni kanal açılmaz', async () => {
+    const degisiklik = []
+    const aramalar = []
+    const s = subscribeUserEvents('u1', (p) => degisiklik.push(p), { onCall: (p) => aramalar.push(p) })
+    await akit()
+    expect(h.rt.created).toHaveLength(1)
+    const k = h.rt.channels[0]
+    expect(k.handlers.map((x) => x.event).sort()).toEqual(['arama', 'degisti'])
+    const yuk = { call_id: 'c1', thread_id: 't1', status: 'ringing', caller: 'u2', reason: null }
+    k.deliver('arama', yuk)
+    expect(aramalar).toEqual([yuk])
+    expect(degisiklik).toEqual([])
+    await s.close()
+    k.deliver('arama', yuk)
+    expect(aramalar).toHaveLength(1)
+  })
+})
