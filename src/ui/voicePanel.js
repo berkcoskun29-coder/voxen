@@ -56,9 +56,11 @@ export function renderMuteButtons(durum, handlers = {}) {
 }
 
 // DM aramasındayken kullanıcı çubuğunun üstündeki satır: "Aramada · Ad" (tıklayınca o DM açılır) + Kapat.
-// Ses panelinin üst satırıyla aynı görünüm (voice-panel / voice-top); kamera/ekran düğmeleri yok.
-// handlers: onOpen(), onHangup()
-export function renderCallRow({ peerName, handlers = {} }) {
+// Ses panelinin üst satırıyla aynı görünüm (voice-panel / voice-top).
+// video: { camera, screen } -> açıksa satırda yeşil "Kamerayı kapat" / "Paylaşımı durdur" düğmesi çıkar:
+// DM'den ayrılınca da görüntümüzün açık olduğu görünür ve buradan kapatılabilir.
+// handlers: onOpen(), onHangup(), onToggleCamera(), onToggleScreen()
+export function renderCallRow({ peerName, video = {}, handlers = {} }) {
   const kutu = document.createElement('div')
   kutu.className = 'call-row'
   const ust = document.createElement('div')
@@ -75,8 +77,11 @@ export function renderCallRow({ peerName, handlers = {} }) {
   ad.textContent = peerName
   ac.append(durum, ' · ', ad)
   ac.onclick = () => handlers.onOpen?.()
+  ust.appendChild(ac)
+  if (video.camera) ust.appendChild(dugme('Kamera', true, handlers.onToggleCamera, ' camera-btn', cameraIcon(false, 18), 'Kamerayı kapat'))
+  if (video.screen) ust.appendChild(dugme('Ekran', true, handlers.onToggleScreen, ' camera-btn screen-btn', screenIcon(18), 'Paylaşımı durdur'))
   const kapat = dugme('Kapat', false, handlers.onHangup, ' leave', hangupIcon(), 'Kapat')
-  ust.append(ac, kapat)
+  ust.appendChild(kapat)
   kutu.appendChild(ust)
   return kutu
 }

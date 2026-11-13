@@ -136,6 +136,18 @@ describe('Aramada satırı', () => {
     // Kullanıcı çubuğunun hemen üstünde durur
     expect(satir.nextElementSibling.classList.contains('user-bar')).toBe(true)
   })
+  it('kamera/ekran açıkken satırda yeşil kapatma düğmeleri çıkar; kapalıyken yok', () => {
+    expect(cizim({ peerName: 'ayla', handlers: {} }).querySelector('.call-row .camera-btn')).toBeNull()
+    let kam = 0, ekr = 0
+    const el = cizim({ peerName: 'ayla', video: { camera: true, screen: true }, handlers: { onToggleCamera: () => kam++, onToggleScreen: () => ekr++ } })
+    const kamera = el.querySelector('.call-row [data-ad="Kamera"]')
+    const ekran = el.querySelector('.call-row [data-ad="Ekran"]')
+    expect(kamera.getAttribute('aria-label')).toBe('Kamerayı kapat')
+    expect(ekran.getAttribute('aria-label')).toBe('Paylaşımı durdur')
+    expect(kamera.classList.contains('active')).toBe(true)
+    kamera.click(); ekran.click()
+    expect([kam, ekr]).toEqual([1, 1])
+  })
   it('ad textContent ile yazılır; arama yoksa satır da yok', () => {
     expect(cizim({ peerName: '<i>x</i>', handlers: {} }).querySelector('.call-row i')).toBeNull()
     expect(cizim(null).querySelector('.call-row')).toBeNull()

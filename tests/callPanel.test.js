@@ -121,6 +121,63 @@ describe('📞 düğmesi', () => {
 })
 
 describe('arama paneli', () => {
+  it('Kamera: tıklayınca onToggleCamera; açıkken basılı ve "Kamerayı kapat"; bağlanırken pasif; hata durum satırında', () => {
+    const host = document.createElement('div')
+    const h = { onToggleCamera: vi.fn(), onToggleScreen: vi.fn() }
+    const p = mountCallPanel(host, h)
+    const g = {
+      faz: 'konusma', self: ben, other: ayla, sure: '00:01', baglanti: null, konusanlar: new Set(),
+      ben: { muted: false, deafened: false, camera: false, screen: false, status: 'connecting' }, karsi: null,
+    }
+    p.ciz(g)
+    const kamera = host.querySelector('[data-ad="Kamera"]')
+    expect(kamera.getAttribute('aria-disabled')).toBe('true')
+    expect(kamera.title).toBe('Bağlanırken kullanılamaz')
+    kamera.click()
+    expect(h.onToggleCamera).not.toHaveBeenCalled()
+    // Bağlanınca etkinleşir (aynı düğüm yerinde kalır)
+    p.ciz({ ...g, ben: { ...g.ben, status: 'connected' } })
+    expect(host.querySelector('[data-ad="Kamera"]')).toBe(kamera)
+    expect(kamera.hasAttribute('aria-disabled')).toBe(false)
+    expect(kamera.classList.contains('unavailable')).toBe(false)
+    kamera.click()
+    expect(h.onToggleCamera).toHaveBeenCalledTimes(1)
+    p.ciz({ ...g, ben: { ...g.ben, status: 'connected', camera: true }, hata: 'Kamera açılamadı' })
+    expect(kamera.getAttribute('aria-pressed')).toBe('true')
+    expect(kamera.getAttribute('aria-label')).toBe('Kamerayı kapat')
+    expect(kamera.classList.contains('active')).toBe(true)
+    const durum = host.querySelector('.call-status')
+    expect(durum.hidden).toBe(false)
+    expect(durum.textContent).toBe('Kamera açılamadı')
+    // Bağlantı yazısı hatadan önce gelir
+    p.ciz({ ...g, ben: { ...g.ben, status: 'connected' }, hata: 'Kamera açılamadı', baglanti: ARAMA_METINLERI.koptu })
+    expect(durum.textContent).toBe(ARAMA_METINLERI.koptu)
+  })
+
+  it('Ekran: destekleniyorsa düğme var, tıklayınca onToggleScreen; açıkken "Paylaşımı durdur"', () => {
+    const eski = navigator.mediaDevices
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getDisplayMedia: () => {} } })
+    try {
+      const host = document.createElement('div')
+      const h = { onToggleScreen: vi.fn() }
+      const p = mountCallPanel(host, h)
+      const g = {
+        faz: 'konusma', self: ben, other: ayla, sure: '00:01', baglanti: null, konusanlar: new Set(),
+        ben: { muted: false, deafened: false, camera: false, screen: false, status: 'connected' }, karsi: null,
+      }
+      p.ciz(g)
+      const ekran = host.querySelector('[data-ad="Ekran"]')
+      expect(ekran.getAttribute('aria-label')).toBe('Ekranı paylaş')
+      ekran.click()
+      expect(h.onToggleScreen).toHaveBeenCalledTimes(1)
+      p.ciz({ ...g, ben: { ...g.ben, screen: true } })
+      expect(ekran.getAttribute('aria-label')).toBe('Paylaşımı durdur')
+      expect(ekran.getAttribute('aria-pressed')).toBe('true')
+    } finally {
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: eski })
+    }
+  })
+
   it('"Aranıyor…": karşının avatarı nabız sınıfıyla, adı, tek düğme İptal (kırmızı)', () => {
     const host = document.createElement('div')
     const onCancel = vi.fn()
@@ -160,7 +217,7 @@ describe('arama paneli', () => {
     expect(host.querySelector('.call-timer').textContent).toBe('00:42')
     expect(host.querySelector('.call-status').hidden).toBe(true)
     const ad = (x) => host.querySelector(`[data-ad="${x}"]`)
-    expect([...host.querySelectorAll('.call-buttons button')].map((b) => b.getAttribute('aria-label'))).toEqual(['Sustur', 'Sağırlaştır', 'Kapat'])
+    expect([...host.querySelectorAll('.call-buttons button')].map((b) => b.getAttribute('aria-label'))).toEqual(['Sustur', 'Sağırlaştır', 'Kamerayı aç', 'Kapat'])
     expect(ad('Sustur').getAttribute('aria-pressed')).toBe('false')
     ad('Sustur').click()
     ad('Sağırlaştır').click()
@@ -513,6 +570,16 @@ describe('konuşma', () => {
     expect(g).toMatchObject({ faz: 'konusma', sure: '00:42', baglanti: null, self: ben, other: ayla })
     k.oturum.karsiDurumu({ muted: true, deafened: false })
     expect(aramaGorunumu(k.akis.bilgi(), ben).karsi).toEqual({ muted: true, deafened: false })
+  })
+
+  it('panel görünümü kamera/ekran durumunu ve hatasını oturumdan alır', async () => {
+    const k = await konusmada()
+    k.oturum.esler(['u2'])
+    const st = k.oturum.getState()
+    Object.assign(st, { camera: true, screen: false, cameraError: 'Kamera bulunamadı', screenError: null })
+    const g = aramaGorunumu(k.akis.bilgi(), ben)
+    expect(g.ben).toMatchObject({ camera: true, screen: false, status: 'connected' })
+    expect(g.hata).toBe('Kamera bulunamadı')
   })
 
   it('aktifken 20 sn\'de bir pingCall; sunucu "bitti" derse yerelde kapanır', async () => {

@@ -98,7 +98,7 @@ export class PeerMesh {
   // 'peer-speaking' {userId, speaking}, 'connect-failed' {userId}, 'ready' (sinyal kanalına bağlandı),
   // 'failed-change' (bağlanamayan eş sayısı değişti; bkz. failedPeerCount),
   // 'peer-track' {peerId, slot, track} (karşının kamera/ekran/ekran sesi izi geldi; track null = kalktı).
-  // 'peer-state' {userId, muted, deafened} (karşı tarafın sendState ile bildirdiği durum).
+  // 'peer-state' {userId, muted, deafened, camera, screen} (karşı tarafın sendState ile bildirdiği durum).
   //   Not: iz bağlantı kurulurken gelir ve karşı paylaşmıyorsa sessizdir (muted). Gösterip gizleme
   //   kararı presence + izin mute/unmute olaylarıyla verilir (arayüz görevi).
   on(olay, cb) {
@@ -133,11 +133,12 @@ export class PeerMesh {
     this._ctx = null
   }
 
-  // Kendi susturma/sağırlaştırma durumumuzu karşıya bildir (DM araması kullanır; kanal yolu göndermez).
-  // Karşıda 'peer-state' {userId, muted, deafened} olayı olur. Eski sürüm bu mesaj türünü yok sayar.
-  sendState({ muted, deafened }) {
+  // Kendi susturma/sağırlaştırma ve kamera/ekran durumumuzu karşıya bildir (DM araması kullanır; kanal yolu göndermez).
+  // Karşıda 'peer-state' {userId, muted, deafened, camera, screen} olayı olur.
+  // Eski sürüm bu mesaj türünü ya da yeni alanları yok sayar.
+  sendState({ muted, deafened, camera = false, screen = false }) {
     if (!this.aktif) return
-    this._gonder({ type: 'state', muted: !!muted, deafened: !!deafened })
+    this._gonder({ type: 'state', muted: !!muted, deafened: !!deafened, camera: !!camera, screen: !!screen })
   }
 
   // İnternet geri gelince (window 'online') çağrılır. Kanalı yıkmayız (realtime-js kendisi
@@ -330,7 +331,7 @@ export class PeerMesh {
     else if (m.type === 'offer') this._teklifGeldi(m)
     else if (m.type === 'answer') this._cevapGeldi(m)
     else if (m.type === 'ice') this._adayGeldi(m)
-    else if (m.type === 'state') this._yay('peer-state', { userId: m.from, muted: !!m.muted, deafened: !!m.deafened })
+    else if (m.type === 'state') this._yay('peer-state', { userId: m.from, muted: !!m.muted, deafened: !!m.deafened, camera: !!m.camera, screen: !!m.screen })
     else if (m.type === 'bye') {
       this._esiBirak(m.from)
       if (this.basarisizlar.delete(m.from)) this._yay('failed-change')

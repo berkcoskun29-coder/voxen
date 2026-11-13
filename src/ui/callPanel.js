@@ -4,7 +4,9 @@
 //   mountCallPanel    -> panel çizimi ("Aranıyor…" ya da konuşma)
 //   createCallFlow    -> akış: başlat, iptal, kapat, user: "arama" olayları, sayaçlar
 // Ses oturumunu app.js açar/kapatır (enter = aramayaGir, exit = aramadanCik); burası yalnız akışı yönetir.
-import { micIcon, headphonesIcon, hangupIcon, phoneIcon, voiceStateIcon } from './icons.js'
+import { micIcon, headphonesIcon, hangupIcon, phoneIcon, voiceStateIcon, cameraIcon, screenIcon } from './icons.js'
+import { screenShareSupported, desktopScreenNotice } from '../voice/screenShare.js'
+import { isTauri } from '../desktop.js'
 import { avatarTextColor } from './avatarColor.js'
 import { mesgulMetni } from '../data/calls.js'
 
@@ -28,6 +30,7 @@ export const ARAMA_METINLERI = {
   baglantiKoptu: 'Arama bağlantısı koptu.',
   cevapYok: 'Cevap yok.',
   baslatilamadi: 'Arama başlatılamadı. Tekrar dene.',
+  baglanirkenOlmaz: 'Bağlanırken kullanılamaz',
 }
 export const reddettiMetni = (ad) => `${ad} aramayı reddetti.`
 
@@ -141,8 +144,24 @@ function yuvarlakDugme(ad, sinif, simge, onClick) {
   return b
 }
 
+// Düğmenin adını ve pasifliğini yerinde ayarlar (bağlanırken pasif, bağlanınca yeniden etkin)
+function dugmeDurumu(b, { ad, pasif = false, neden = '' }) {
+  b.setAttribute('aria-label', ad)
+  const ipucu = pasif && neden ? neden : ad
+  b.dataset.tip = ipucu
+  b.title = ipucu
+  if (pasif) {
+    b.dataset.pasif = '1'
+    b.setAttribute('aria-disabled', 'true')
+  } else {
+    delete b.dataset.pasif
+    b.removeAttribute('aria-disabled')
+  }
+  b.classList.toggle('unavailable', !!pasif)
+}
+
 // host: panelin konacağı kutu (DM görünümünde başlığın altı, sohbetin üstü).
-// handlers: onCancel (İptal), onHangup (Kapat), onToggleMute, onToggleDeafen.
+// handlers: onCancel (İptal), onHangup (Kapat), onToggleMute, onToggleDeafen, onToggleCamera, onToggleScreen.
 // Dönen ciz(gorunum): null -> panel gizlenir. Aynı aşamada (faz) yeniden çizim yalnız değişen parçaları
 // günceller; düğmeler yerinde kalır (klavye odağı her saniye kaybolmasın).
 // gorunum: { faz: 'araniyor'|'konusma', self, other, sure, baglanti, konusanlar:Set, ben:{muted,deafened,listenOnly}, karsi }
@@ -180,8 +199,19 @@ export function mountCallPanel(host, handlers = {}) {
       parca.sure = sure
       parca.sustur = yuvarlakDugme('Sustur', 'call-mute', micIcon(false, 20), handlers.onToggleMute)
       parca.sagir = yuvarlakDugme('Sağırlaştır', 'call-deafen', headphonesIcon(false, 20), handlers.onToggleDeafen)
+      parca.kamera = yuvarlakDugme('Kamera', 'call-video call-camera', cameraIcon(false, 20), handlers.onToggleCamera)
+      dugmeler.append(parca.sustur, parca.sagir, parca.kamera)
+      // Ekran: tarayıcı desteklemiyorsa düğme yok; masaüstü desteklemiyorsa soluk düğme + ipucu
+      if (screenShareSupported()) {
+        parca.ekran = yuvarlakDugme('Ekran', 'call-video call-screen', screenIcon(20), handlers.onToggleScreen)
+        dugmeler.append(parca.ekran)
+      } else if (isTauri()) {
+        const b = yuvarlakDugme('Ekran', 'call-video call-screen', screenIcon(20), null)
+        dugmeDurumu(b, { ad: 'Ekranı paylaş', pasif: true, neden: desktopScreenNotice() })
+        dugmeler.append(b)
+      }
       const kapat = yuvarlakDugme('Kapat', 'call-hangup', hangupIcon(20), handlers.onHangup)
-      dugmeler.append(parca.sustur, parca.sagir, kapat)
+      dugmeler.append(kapat)
       el.append(kisiler, sure, durum, dugmeler)
     }
     host.replaceChildren(el)
@@ -223,9 +253,19 @@ export function mountCallPanel(host, handlers = {}) {
     avatariGuncelle(parca.benAv, { konusuyor: konusan.has(g.self?.id), durum: g.ben })
     avatariGuncelle(parca.karsiAv, { konusuyor: konusan.has(g.other?.id), durum: g.karsi })
     parca.sure.textContent = g.sure
-    parca.durum.textContent = g.baglanti ?? ''
-    parca.durum.hidden = !g.baglanti
+    // Durum satırı: önce bağlantı yazısı, yoksa kamera/ekran hatası
+    const durumYazisi = g.baglanti ?? g.hata ?? null
+    parca.durum.textContent = durumYazisi ?? ''
+    parca.durum.hidden = !durumYazisi
     const ben = g.ben ?? {}
+    // Kamera / Ekran: açıkken basılı (yeşil); örgü kurulana kadar (bağlanırken) pasif
+    const baglaniyor = ben.status === 'connecting'
+    basiliYap(parca.kamera, ben.camera, cameraIcon(false, 20))
+    dugmeDurumu(parca.kamera, { ad: ben.camera ? 'Kamerayı kapat' : 'Kamerayı aç', pasif: baglaniyor, neden: ARAMA_METINLERI.baglanirkenOlmaz })
+    if (parca.ekran) {
+      basiliYap(parca.ekran, ben.screen, screenIcon(20))
+      dugmeDurumu(parca.ekran, { ad: ben.screen ? 'Paylaşımı durdur' : 'Ekranı paylaş', pasif: baglaniyor, neden: ARAMA_METINLERI.baglanirkenOlmaz })
+    }
     // Sağırlaştırma susturmayı da getirir: mikrofon simgesi sağırken de çizili görünür
     basiliYap(parca.sustur, ben.muted, micIcon(ben.muted || ben.deafened, 20))
     basiliYap(parca.sagir, ben.deafened, headphonesIcon(ben.deafened, 20))
@@ -253,7 +293,8 @@ export function aramaGorunumu(bilgi, self) {
     sure: sureYazisi(bilgi.sureMs),
     baglanti: bilgi.baglanti === 'koptu' ? ARAMA_METINLERI.koptu : bilgi.baglanti === 'baglaniyor' ? ARAMA_METINLERI.baglaniyor : null,
     konusanlar: st.speaking,
-    ben: { muted: st.muted, deafened: st.deafened, listenOnly: st.listenOnly },
+    ben: { muted: st.muted, deafened: st.deafened, listenOnly: st.listenOnly, camera: !!st.camera, screen: !!st.screen, status: st.status },
+    hata: st.cameraError ?? st.screenError ?? null,
     karsi: other ? (bilgi.oturum.getPeerState?.(other.id) ?? null) : null,
   }
 }

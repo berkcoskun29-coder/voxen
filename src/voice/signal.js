@@ -9,7 +9,9 @@
 //     Yetki kuralları: supabase/migrations/003_realtime_voice_auth.sql
 import { supabase } from '../lib/supabase.js'
 
-export const SIGNAL_EVENTS = ['hello', 'offer', 'answer', 'ice', 'bye']
+// PeerMesh'in gönderdiği her ileti türü burada olmalı: realtime-js yayınları olay adına göre süzer,
+// listede olmayan tür karşıya hiç ulaşmaz ('state': DM aramasında susturma ve kamera/ekran durumu).
+export const SIGNAL_EVENTS = ['hello', 'offer', 'answer', 'ice', 'bye', 'state']
 
 const kapanislar = new Map() // konu -> o konudaki son kapanışın Promise'i
 

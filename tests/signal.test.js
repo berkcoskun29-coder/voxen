@@ -11,7 +11,9 @@ vi.mock('../src/lib/supabase.js', () => ({
   },
 }))
 
-import { supabaseSignal } from '../src/voice/signal.js'
+import { supabaseSignal, SIGNAL_EVENTS } from '../src/voice/signal.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { PeerMesh } from '../src/voice/mesh.js'
 
 async function akit() { for (let i = 0; i < 60; i++) await Promise.resolve() }
@@ -19,6 +21,13 @@ async function akit() { for (let i = 0; i < 60; i++) await Promise.resolve() }
 beforeEach(() => { h.rt = createFakeRealtime() })
 
 describe('supabaseSignal', () => {
+  it("PeerMesh'in gönderdiği her ileti türüne abone olunur (yoksa realtime-js o yayını süzer, karşıya ulaşmaz)", async () => {
+    const kaynak = readFileSync(join(__dirname, '../src/voice/mesh.js'), 'utf8')
+    const turler = new Set([...kaynak.matchAll(/_gonder\(\{\s*type:\s*'(\w+)'/g)].map((m) => m[1]))
+    expect([...turler].sort()).toEqual(['answer', 'bye', 'hello', 'ice', 'offer', 'state'])
+    for (const t of turler) expect(SIGNAL_EVENTS).toContain(t)
+  })
+
   it('özel (private) kanal açar ve abone olmadan önce oturum anahtarını (JWT) yeniler', async () => {
     const durumlar = []
     supabaseSignal('voice:k1', () => {}, (d) => durumlar.push(d))

@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 vi.mock('../src/lib/supabase.js', () => ({ supabase: { channel: vi.fn(), removeChannel: vi.fn() } }))
 
-import { createVoiceSession } from '../src/voice/session.js'
+import { createVoiceSession, STATE_RESEND_MS } from '../src/voice/session.js'
 import { getSettings, updateSettings } from '../src/settings.js'
 import { renderVoicePanel, renderMuteButtons, VOICE_STATUS_TEXT } from '../src/ui/voicePanel.js'
 import { MicError, MIC_MESSAGES } from '../src/voice/pipeline.js'
@@ -406,8 +406,10 @@ describe('karşının susturma durumu (shareState, DM araması)', () => {
           const m = new FakeMesh(opts)
           m.gonderilen = []
           m.sendState = (s) => m.gonderilen.push(s)
+          m.setLocalTrack = async () => {}
           return m
         },
+        openCamera: async () => ({ kind: 'video', stop: () => {}, addEventListener: () => {} }),
         playBeep: () => {},
         getNoiseSuppressionPref: () => true,
       },
@@ -422,22 +424,73 @@ describe('karşının susturma durumu (shareState, DM araması)', () => {
     m.emit('peer-joined', { userId: 'o', stream: fakeStream('o') })
     o.setMuted(true)
     o.setDeafened(true)
-    expect(m.gonderilen).toEqual([
-      { muted: false, deafened: false },
-      { muted: false, deafened: false },
-      { muted: true, deafened: false },
-      { muted: true, deafened: true },
-    ])
+    const d = (muted, deafened) => ({ muted, deafened, camera: false, screen: false })
+    // Katılırken ilk durum (fark olduğu için) + hazır olunca + eş bağlanınca (zorla); sonra her değişiklikte bir kez
+    expect(m.gonderilen).toEqual([d(false, false), d(false, false), d(false, false), d(true, false), d(true, true)])
     expect(o.connectedPeers()).toEqual(['o'])
     const degisim = vi.fn()
     o.on('change', degisim)
     expect(o.getPeerState('o')).toBeNull()
     m.emit('peer-state', { userId: 'o', muted: true, deafened: false })
-    expect(o.getPeerState('o')).toEqual({ muted: true, deafened: false })
+    expect(o.getPeerState('o')).toEqual({ muted: true, deafened: false, camera: false, screen: false })
     expect(degisim).toHaveBeenCalled()
     m.emit('peer-left', { userId: 'o' })
     expect(o.getPeerState('o')).toBeNull()
     expect(o.connectedPeers()).toEqual([])
+    o.leave()
+  })
+
+  it('kamera açılıp kapanınca durum yeniden gönderilir; karşının durumu geri gönderim yaptırmaz', async () => {
+    const o = aramaOturumu(true)
+    await o.join()
+    const m = FakeMesh.son
+    m.emit('ready')
+    m.emit('peer-joined', { userId: 'o', stream: fakeStream('o') })
+    const once = m.gonderilen.length
+    o.setCamera(true)
+    await vi.waitFor(() => expect(o.getState().camera).toBe(true))
+    expect(m.gonderilen.slice(once)).toEqual([{ muted: false, deafened: false, camera: true, screen: false }])
+    // Karşının durum iletisi değişiklik olayı doğurur ama biz yeniden göndermeyiz (yankı döngüsü yok)
+    const sonra = m.gonderilen.length
+    const izler = vi.fn()
+    o.on('tracks', izler)
+    m.emit('peer-state', { userId: 'o', muted: false, deafened: false, camera: true, screen: true })
+    expect(o.getPeerState('o')).toEqual({ muted: false, deafened: false, camera: true, screen: true })
+    expect(izler).toHaveBeenCalled() // görüntü bölmesi yeniden okusun
+    expect(m.gonderilen.length).toBe(sonra)
+    o.setCamera(false)
+    await vi.waitFor(() => expect(o.getState().camera).toBe(false))
+    expect(m.gonderilen.at(-1)).toEqual({ muted: false, deafened: false, camera: false, screen: false })
+    o.leave()
+  })
+
+  it('durum düzenli aralıkla yeniden gönderilir (kaybolan yayın telafi edilir); ayrılınca durur', async () => {
+    vi.useFakeTimers() // sayaç join içinde kurulur: sahte saat ondan önce açılmalı
+    try {
+      const o = aramaOturumu(true)
+      await o.join()
+      const m = FakeMesh.son
+      const once = m.gonderilen.length
+      vi.advanceTimersByTime(STATE_RESEND_MS)
+      expect(m.gonderilen.length).toBe(once + 1)
+      o.leave()
+      vi.advanceTimersByTime(STATE_RESEND_MS * 3)
+      expect(m.gonderilen.length).toBe(once + 1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('karşı ayrılınca durumu silinir ve değişiklik olayı yayılır (susturma simgesi bayat kalmaz)', async () => {
+    const o = aramaOturumu(true)
+    await o.join()
+    const m = FakeMesh.son
+    m.emit('peer-state', { userId: 'o', muted: true, deafened: false })
+    const degisim = vi.fn()
+    o.on('change', degisim)
+    m.emit('peer-left', { userId: 'o' })
+    expect(o.getPeerState('o')).toBeNull()
+    expect(degisim).toHaveBeenCalled()
     o.leave()
   })
 

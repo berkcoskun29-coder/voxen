@@ -156,6 +156,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     onHangup: () => aramaAkisi.kapat(),
     onToggleMute: () => susturmayiDegistir(),
     onToggleDeafen: () => sagirlastirmayiDegistir(),
+    onToggleCamera: () => arama?.oturum.toggleCamera(),
+    onToggleScreen: () => arama?.oturum.toggleScreenShare(),
   })
   const aramaAkisi = createCallFlow({
     startCall,
@@ -192,6 +194,9 @@ export async function startApp(root, profile, { email = '' } = {}) {
       withPeer: !!dm && aramaKonusu === dm.id,
     })
     aramaPaneli.ciz(bilgi && dm && bilgi.thread?.id === dm.id ? aramaGorunumu(bilgi, profile) : null)
+    // Aramanın görüntü bölmesi de yalnız aramanın DM'i açıkken görünür (arama ve görüntü arkada sürer).
+    // Sesli kanalın bölmesi her zaman görünür (aynı anda ikisi olmaz: tek aktif ses).
+    goruntuAlani.hidden = !!arama && !(dm && dm.id === arama.thread?.id)
   }
   // ---- Gelen arama (incomingCall.js): sağ altta kart, zil ve masaüstü bildirimi ----
   const gelenArama = createIncomingCall({
@@ -1190,7 +1195,10 @@ export async function startApp(root, profile, { email = '' } = {}) {
       call: arama
         ? {
             peerName: arama.thread.other?.username ?? '',
+            video: { camera: !!arama.oturum.getState().camera, screen: !!arama.oturum.getState().screen },
             handlers: {
+              onToggleCamera: () => arama?.oturum.toggleCamera(),
+              onToggleScreen: () => arama?.oturum.toggleScreenShare(),
               onOpen: () => openDmView(arama.thread),
               onHangup: () => { aramadanCik('hangup') },
             },
@@ -1377,7 +1385,28 @@ export async function startApp(root, profile, { email = '' } = {}) {
     })
     arama = { oturum, call, thread }
     guncellemeBandi?.refresh() // aramadayken güncelleme bandı gizlenir
-    oturum.on('change', () => { if (arama?.oturum === oturum) cizKanalPaneli() }) // çubuktaki Sustur/Sağırlaştır
+    oturum.on('change', () => {
+      if (arama?.oturum !== oturum) return
+      cizKanalPaneli() // çubuktaki Sustur/Sağırlaştır
+      aramaArayuzunuCiz() // paneldeki Kamera/Ekran düğmeleri ve hata satırı
+      goruntu?.update() // kendi kamera/ekran önizlememiz
+    })
+    oturum.on('speaking', () => { if (arama?.oturum === oturum) goruntu?.update() }) // kutucuklardaki yeşil çerçeve
+    oturum.on('tracks', () => { if (arama?.oturum === oturum) goruntu?.update() })
+    // Görüntü bölmesi: kişiler biz ve karşı taraf; kim kamera/ekran açtı karşının gönderdiği durumdan
+    // (aramada voice_states yok), izler oturumdan
+    goruntu?.dispose()
+    goruntu = mountVideoPane(goruntuAlani, {
+      getPeers: () => {
+        const karsi = thread?.other
+        const durumlar = new Map()
+        if (karsi) durumlar.set(karsi.id, oturum.getPeerState(karsi.id) ?? {})
+        return buildVideoPeers({ self: profile, members: karsi ? [karsi] : [], voiceStates: durumlar, session: oturum })
+      },
+      onHide: (id, gizli) => { oturum.setScreenHidden(id, gizli); goruntu?.update() },
+      onVolume: (id, v) => oturum.setScreenVolume(id, v),
+    })
+    goruntu.update()
     oturum.on('notice', (metin) => { if (arama?.oturum === oturum) toast(metin) })
     // Kayıtlı ayarları oturuma uygula; kapı bas-konuşta kapalı başlar (tuşa basılana kadar)
     const s = getSettings()
@@ -1405,6 +1434,9 @@ export async function startApp(root, profile, { email = '' } = {}) {
     const { oturum, call } = arama
     arama = null
     oturum.leave()
+    goruntu?.dispose() // aramanın görüntü bölmesi kapanır (videolar boşalır)
+    goruntu = null
+    goruntuAlani.hidden = false
     guncellemeBandi?.refresh()
     aramaAkisi.sesKapandi(call.id) // panel ve arama sayaçları (kopma, canlılık, süre) kapanır
     const is = reason

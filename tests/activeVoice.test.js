@@ -319,6 +319,22 @@ describe('appVoice: DM aramasına girmek', () => {
     expect(bitirmeler()).toEqual([{ id: 'c1', reason: 'hangup' }])
   })
 
+  it("aramada görüntü bölmesi kurulur; yalnız aramanın DM'i açıkken görünür; arama bitince kalkar", async () => {
+    await uygulamayiAc()
+    appVoice.aramayaGir({ id: 'c1' }, thread)
+    await bosalt()
+    const alan = document.querySelector('.video-host')
+    expect(alan.querySelector('.video-pane')).not.toBeNull()
+    expect(alan.hidden).toBe(true) // sunucu görünümündeyiz: aramanın DM'i açık değil
+    document.querySelector('.call-row .call-open').click() // DM açılır
+    await bosalt()
+    expect(alan.hidden).toBe(false)
+    document.querySelector('.call-row button.leave').click()
+    await bosalt()
+    expect(alan.querySelector('.video-pane')).toBeNull()
+    expect(alan.hidden).toBe(false) // sesli kanalın bölmesi için yeniden açık
+  })
+
   it('sayfa kapanırken ve uygulama dururken arama biter', async () => {
     await uygulamayiAc()
     appVoice.aramayaGir({ id: 'c1' }, thread)
