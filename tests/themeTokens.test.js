@@ -40,4 +40,8 @@ describe('tema değişkenleri', () => {
   it('dar pencerede ayarlar menüsü üste gelir (tek kolon)', () => {
     expect(yorumsuz).toMatch(/@media \(max-width:\s*\d+px\)\s*\{[^@]*\.settings-layout\s*\{[^}]*flex-direction:\s*column/)
   })
+
+  it('v0.13.0 tur 1 (K3): sessiz sunucunun rozeti ve noktası soluk', () => {
+    expect(yorumsuz).toMatch(/\.server-icon\.muted \.unread-badge, \.server-icon\.muted \.server-unread-dot\s*\{\s*opacity:\s*0\.5/)
+  })
 })

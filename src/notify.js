@@ -4,7 +4,9 @@
 import { isTauri, showDesktopNotification, onDesktopNotificationClick, focusWindow } from './desktop.js'
 import { playBeep } from './voice/sounds.js'
 
-export const notifyTiming = { birlesmeMs: 5000 } // aynı konuşmadan bu süre içinde gelenler birleşir
+// aynı konuşmadan bu süre içinde gelenler birleşir. Kanal mesajlarında ("Tüm mesajlar", tür 'channel') pencere
+// kayar: her yeni mesaj süreyi uzatır (en fazla kayanEnFazlaMs), ses pencere başına bir kez (v0.13.0 tur 1, K1).
+export const notifyTiming = { birlesmeMs: 5000, kayanEnFazlaMs: 30000 }
 export const METIN_MAX = 100 // bildirim metni: mesajın ilk 100 karakteri
 const SIMGE = '/favicon.svg' // tarayıcı bildiriminin simgesi: Voxen logosu (masaüstünde programın simgesi)
 
@@ -31,13 +33,31 @@ export function setNotifySettings(degisiklik) {
   return yeni
 }
 
+// ---------- Tepsi ayarları (masaüstü, cihazda; v0.13.0) ----------
+// tepsiyeKucult: pencereyi kapatmak tepsiye küçültür (varsayılan açık; kapalıysa programdan çıkar).
+// tepsiBilgisi: "Voxen arka planda çalışıyor." bilgisi bir kez gösterildi mi.
+const TEPSI_ANAHTARI = 'voxen.tepsi'
+let tepsiBellek = null
+export function getTraySettings() {
+  let ham
+  try { ham = JSON.parse(localStorage.getItem(TEPSI_ANAHTARI)) } catch { ham = tepsiBellek }
+  return { tepsiyeKucult: ham?.tepsiyeKucult !== false, tepsiBilgisi: ham?.tepsiBilgisi === true }
+}
+export function setTraySettings(degisiklik) {
+  const yeni = { ...getTraySettings(), ...degisiklik }
+  tepsiBellek = yeni
+  try { localStorage.setItem(TEPSI_ANAHTARI, JSON.stringify(yeni)) } catch { /* bellekte kalır */ }
+  return yeni
+}
+
 // ---------- Karar ----------
 // Bildirim gelsin mi? Saf fonksiyon (spec §4, Review Focus 3):
 //  msg: gelen mesaj satırı. DM'de thread_id, bahsetmede channel_id ve server_id (çağıran ekler) dolu.
 //  selfId: kendi id'm. odakta: Voxen penceresi odakta mı. acikHedef: şu an açık konuşmanın id'si
 //  (kanal id'si ya da DM konuşma id'si; yoksa null). durum: kendi durumum ('dnd' = Rahatsız etmeyin).
-//  sessizSunucular: Set<serverId>. ayarlar: { masaustu }. tur: 'dm' | 'mention'
-//  (bahsetmede mesajın beni andığını çağıran denetler: src/mentions.js mentionsUser).
+//  sessizSunucular: Set<serverId>. ayarlar: { masaustu }. tur: 'dm' | 'mention' | 'channel'
+//  (bahsetmede mesajın beni andığını çağıran denetler: src/mentions.js mentionsUser; 'channel' (v0.13.0):
+//  "Tüm mesajlar" düzeyindeki kanalın sıradan mesajı — düzey kararı src/bildirimDuzeyi.js'te).
 // Gelmez: kendi mesajımsa, silinmişse, pencere odakta VE o konuşma açıksa, durum "Rahatsız etmeyin"se,
 // sunucu sessizdeyse (yalnız bahsetmelerde; DM'ler sessize alınamaz), ayar kapalıysa.
 export function shouldNotify({ msg, selfId, odakta, acikHedef, durum, sessizSunucular, ayarlar, tur }) {
@@ -48,7 +68,7 @@ export function shouldNotify({ msg, selfId, odakta, acikHedef, durum, sessizSunu
   const hedef = hedefId(msg, tur)
   if (!hedef) return false
   if (odakta && acikHedef === hedef) return false
-  if (tur === 'mention' && sessizSunucular?.has?.(msg.server_id)) return false
+  if ((tur === 'mention' || tur === 'channel') && sessizSunucular?.has?.(msg.server_id)) return false
   return true
 }
 
@@ -62,14 +82,14 @@ export function shouldNotifyCall({ odakta, durum, ayarlar }) {
 
 function hedefId(msg, tur) {
   if (tur === 'dm') return msg.thread_id ?? null
-  if (tur === 'mention') return msg.channel_id ?? null
+  if (tur === 'mention' || tur === 'channel') return msg.channel_id ?? null
   return null
 }
 
 // ---------- Metinler ----------
-// Başlık: DM için "Ad", bahsetme için "Ad (#kanal, Sunucu)"
+// Başlık: DM için "Ad", bahsetme ve kanal mesajı için "Ad (#kanal, Sunucu)"
 export function bildirimBasligi({ tur, ad, kanal, sunucu }) {
-  return tur === 'mention' ? `${ad} (#${kanal}, ${sunucu})` : ad
+  return tur === 'mention' || tur === 'channel' ? `${ad} (#${kanal}, ${sunucu})` : ad
 }
 
 // Metin: mesajın ilk 100 karakteri (Türkçe/emoji karakterleri bölünmesin diye Array.from)
@@ -123,17 +143,32 @@ export function createNotifier({ ac, deps = {} } = {}) {
     return siradakiId
   }
 
-  function bildir({ hedef, ad, baslik, metin }) {
+  // ozet (isteğe bağlı): birleşmiş özetin başlığı ve adı { baslik, ad }; verilmezse ilk bildirimin başlığı/adı.
+  // Kanal bildirimlerinde özet kanalı anlatır ("#genel: 7 yeni mesaj"), ilk yazarı değil.
+  // Anahtar hedefin türüyle ayrılır: aynı kanalda 'mention' (beni anan) ile 'channel' (sıradan) ayrı birleşir,
+  // böylece kanal penceresi açıkken gelen anma hemen ve kendi metniyle gösterilir.
+  function bildir({ hedef, ad, baslik, metin, ozet = null }) {
     if (kapandi || !hedef?.id) return
     const anahtar = `${hedef.type}:${hedef.id}`
+    const kayan = hedef.type === 'channel'
     const acik = pencereler.get(anahtar)
-    if (acik) { acik.sayi++; return } // süre içinde: sayılır, süre bitince özet gider
-    const pencere = { sayi: 1, ad, baslik, hedef, zamanlayici: null }
-    pencere.zamanlayici = setTimeout(() => {
+    if (acik) {
+      acik.sayi++ // süre içinde: sayılır, süre bitince özet gider
+      if (kayan && Date.now() - acik.baslangic < notifyTiming.kayanEnFazlaMs) {
+        clearTimeout(acik.zamanlayici)
+        acik.zamanlayici = setTimeout(acik.bitir, notifyTiming.birlesmeMs)
+      }
+      return
+    }
+    const pencere = {
+      sayi: 1, ad: ozet?.ad ?? ad, baslik: ozet?.baslik ?? baslik, hedef, zamanlayici: null, baslangic: Date.now(), bitir: null,
+    }
+    pencere.bitir = () => {
       pencereler.delete(anahtar)
       if (kapandi || pencere.sayi < 2) return
       goster({ id: yeniId(), baslik: pencere.baslik, metin: birlesikMetin(pencere.ad, pencere.sayi), hedef, etiket: anahtar, tikla })
-    }, notifyTiming.birlesmeMs)
+    }
+    pencere.zamanlayici = setTimeout(pencere.bitir, notifyTiming.birlesmeMs)
     pencereler.set(anahtar, pencere)
     const gosterildi = goster({ id: yeniId(), baslik, metin, hedef, etiket: anahtar, tikla })
     // Ses yalnız bildirim gerçekten gösterildiyse (ör. tarayıcıda izin yoksa ses de yok)
@@ -187,8 +222,17 @@ function varsayilanGoster({ id, baslik, metin, hedef, etiket, tikla }) {
 let izinSoruldu = false
 export async function requestNotifyPermission({ acik = false } = {}) {
   if (isTauri() || typeof Notification === 'undefined') return
-  if (Notification.permission !== 'default' || !getNotifySettings().masaustu) return
+  if (Notification.permission !== 'default') return
+  // Açık istek (Ayarlar'daki "Bildirimlere izin ver") "Masaüstü bildirimleri" kapalı olsa da sorar (tur 1, K8)
+  if (!acik && !getNotifySettings().masaustu) return
   if (izinSoruldu && !acik) return
   izinSoruldu = true
   try { await Notification.requestPermission() } catch { /* sessizce geç */ }
+}
+
+// Tarayıcının bildirim izni: 'granted' | 'denied' | 'default'; masaüstünde ya da API yoksa 'yok'
+// (Ayarlar > Bildirimler'deki "Bildirimlere izin ver" düğmesi bunu okur; v0.13.0).
+export function bildirimIzni() {
+  if (isTauri() || typeof Notification === 'undefined' || !Notification) return 'yok'
+  return Notification.permission ?? 'yok'
 }

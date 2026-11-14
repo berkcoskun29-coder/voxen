@@ -154,7 +154,8 @@ export function updateSpeakingRings(panel, konusanlar) {
 
 // Bir kanal grubunu (başlık + kanallar) panele ekler.
 // sesli: { members: Map<kanalId, profil[]>, speaking: Set<userId> } (sadece sesli grupta)
-function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli, unread = null) { // sesli.voiceStates: Map<userId, durum>
+// kanalSessiz(kanalId) (isteğe bağlı, v0.13.0): sessiz kanal soluk, kalın/sayı yok; beni anan varsa yalnız "@N".
+function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli, unread = null, kanalSessiz = null) { // sesli.voiceStates: Map<userId, durum>
   const baslikSatiri = document.createElement('div')
   baslikSatiri.className = 'section-head'
   const b = document.createElement('span')
@@ -179,11 +180,26 @@ function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli, 
     const satir = document.createElement('button')
     satir.type = 'button'
     // Okunmamış yalnız yazılı kanalda (sesli kanalda sayaç yok)
+    const sessiz = tur === 'text' && !!kanalSessiz?.(k.id)
     const okunmamis = tur === 'text' ? (unread?.count?.(k.id) ?? 0) : 0
-    satir.className = 'channel-item' + (k.id === secili ? ' selected' : '') + (okunmamis > 0 ? ' unread' : '')
+    satir.className = 'channel-item' + (k.id === secili ? ' selected' : '') + (okunmamis > 0 && !sessiz ? ' unread' : '') + (sessiz ? ' channel-muted' : '')
     // Yazılı kanallar # ile başlar; sesli kanalın adında zaten simge olabilir
     satir.textContent = tur === 'text' ? `# ${k.name}` : k.name
-    if (okunmamis > 0) {
+    if (sessiz) {
+      // Sessiz kanal: sayı yok; beni anan okunmamış varsa yalnız "@N"
+      const anma = unread?.mentions?.(k.id) ?? 0
+      if (anma > 0) {
+        const say = document.createElement('span')
+        say.className = 'unread-count'
+        const isaret = document.createElement('span')
+        isaret.className = 'mention-mark'
+        isaret.setAttribute('aria-hidden', 'true')
+        isaret.textContent = '@'
+        say.append(isaret, sayiYazisi(anma))
+        satir.appendChild(say)
+      }
+      satir.setAttribute('aria-label', `${k.name}, sessizde` + (anma > 0 ? `, ${sayiYazisi(anma)} bahsetme` : ''))
+    } else if (okunmamis > 0) {
       const say = document.createElement('span')
       say.className = 'unread-count'
       say.textContent = sayiYazisi(okunmamis)
@@ -201,6 +217,13 @@ function grupEkle(panel, baslik, kanallar, secili, tur, handlers, sahip, sesli, 
     }
     satir.dataset.odak = `kanal-${k.id}`
     satir.onclick = () => handlers.onSelectChannel?.(k.id)
+    // Sağ tık: kanalın bildirim menüsü (yalnız yazılı kanallarda; v0.13.0)
+    if (tur === 'text' && handlers.onChannelNotify) {
+      satir.addEventListener('contextmenu', (e) => {
+        e.preventDefault()
+        handlers.onChannelNotify(k, satir)
+      })
+    }
     sarma.appendChild(satir)
     if (sahip) {
       const disli = document.createElement('button')
@@ -266,10 +289,12 @@ function odakAnahtariylaBul(kok, anahtar) {
 // ctx: { server, channels, profile, selectedChannelId, handlers, canManageChannels (isteğe bağlı; yoksa sahip),
 //        voiceMembers (Map<kanalId, profil[]>), speaking (Set<userId>), voiceStates (Map<userId, durum>),
 //        unread ({ count(kanalId), mentions(kanalId) }, isteğe bağlı: okunmamış ve bahsetme sayaçları),
+//        channelMuted (kanalId -> bool, isteğe bağlı: sessiz kanal soluk görünür; v0.13.0),
 //        voice (sesli kanaldaysak: { channelName, state, handlers } -> ses paneli) }
 //        audio (sesli kanalda değilken çubuktaki Sustur/Sağırlaştır tercihi: { muted, deafened }),
 //        home (Ana sayfadayken, server yokken: kanal listesinin yerine konan öğe; bkz. home.js) }
-// handlers: onSelectChannel(id), onAddChannel(kind), onServerMenu(düğme), onChannelMenu(kanal, düğme), onCopyInvite(), onSettings(), onToggleMute(), onToggleDeafen()
+// handlers: onSelectChannel(id), onAddChannel(kind), onServerMenu(düğme), onChannelMenu(kanal, düğme), onCopyInvite(), onSettings(), onToggleMute(), onToggleDeafen(),
+//   onChannelNotify(kanal, satır) (yazılı kanala sağ tık: bildirim menüsü)
 export function renderChannelList(panel, ctx) {
   const { server, channels, profile, selectedChannelId, handlers } = ctx
   panel.className = 'channel-panel'
@@ -311,7 +336,7 @@ export function renderChannelList(panel, ctx) {
   if (server) {
     const yazili = channels.filter((k) => k.kind === 'text')
     const sesli = channels.filter((k) => k.kind === 'voice')
-    grupEkle(liste, 'Yazılı kanallar', yazili, selectedChannelId, 'text', handlers, sahip, undefined, ctx.unread)
+    grupEkle(liste, 'Yazılı kanallar', yazili, selectedChannelId, 'text', handlers, sahip, undefined, ctx.unread, ctx.channelMuted)
     grupEkle(liste, 'Sesli kanallar', sesli, selectedChannelId, 'voice', handlers, sahip, {
       members: ctx.voiceMembers ?? new Map(),
       speaking: ctx.speaking ?? new Set(),

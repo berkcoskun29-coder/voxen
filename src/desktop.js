@@ -71,3 +71,55 @@ export async function focusWindow() {
     await w.setFocus()
   } catch { /* öne gelmezse hedef yine açılır */ }
 }
+
+// ---- Arka planda çalışma (v0.13.0): tepsi, kapatma davranışı, Windows açılışında başlatma ----
+
+// Pencereyi kapatınca tepsiye mi küçülsün (true) yoksa programdan mı çıkılsın (false)? Rust'ta saklanır
+// (src-tauri/src/main.rs set_close_to_tray); web açılışta ve ayar değişince bildirir.
+export async function setCloseToTray(acik) {
+  if (!isTauri()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_close_to_tray', { acik: !!acik })
+  } catch { /* eski masaüstü sürümünde komut yok: Rust varsayılanı (tepsiye küçült) kalır */ }
+}
+
+// Tepsi menüsündeki "Rahatsız etmeyin" işaretini durumla eşitler
+export async function setTrayDnd(acik) {
+  if (!isTauri()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_tray_dnd', { acik: !!acik })
+  } catch { /* işaret güncellenemezse menü yine çalışır */ }
+}
+
+// Windows açılışında başlat (tauri-plugin-autostart; izin: capabilities/default.json). Varsayılan kapalı.
+let autostartModulu = null
+const autostartApi = () => (autostartModulu ??= import('@tauri-apps/plugin-autostart'))
+
+// Açık mı? Masaüstü değilse ya da sorulamazsa false
+export async function getAutostart() {
+  if (!isTauri()) return false
+  try {
+    const { isEnabled } = await autostartApi()
+    return !!(await isEnabled())
+  } catch { return false }
+}
+
+// Açar/kapatır. Dönen: başarılı mı
+export async function setAutostart(acik) {
+  if (!isTauri()) return false
+  try {
+    const { enable, disable } = await autostartApi()
+    if (acik) await enable()
+    else await disable()
+    return true
+  } catch { return false }
+}
+
+// Düzgün çıkış (Ö2): web temizliği bitirdi, Rust hemen çıksın (src/cikis.js)
+export async function quitNow() {
+  if (!isTauri()) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('quit_now')
+}

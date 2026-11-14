@@ -41,15 +41,17 @@ export function renderRail(rail, servers, selectedId, handlers, unread = null, h
     dugme.dataset.odak = 'sunucu-' + s.id
     dugme.textContent = ilkHarf(s.name)
     const okunmamis = unread?.serverCount?.(s.id) ?? 0
-    if (okunmamis > 0) {
+    // Yalnız sessiz kanaldan bahsetme varsa (sayı 0) rozet "@N" olur (v0.13.0)
+    const anmaSayisi = unread?.serverMentions?.(s.id) ?? 0
+    if (okunmamis > 0 || anmaSayisi > 0) {
       // Seçili sunucuda da görünür (başka kanallarında okunmamış olabilir)
       const nokta = document.createElement('span')
       nokta.className = 'server-unread-dot'
       const rozet = document.createElement('span')
       rozet.className = 'unread-badge'
-      rozet.textContent = sayiYazisi(okunmamis)
+      rozet.textContent = sayiYazisi(okunmamis > 0 ? okunmamis : anmaSayisi)
       // Seni anan okunmamış mesaj varsa rozetin önünde küçük "@" işareti
-      const anma = unread?.serverMentions?.(s.id) ?? 0
+      const anma = anmaSayisi
       if (anma > 0) {
         const isaret = document.createElement('span')
         isaret.className = 'mention-mark'
@@ -58,7 +60,8 @@ export function renderRail(rail, servers, selectedId, handlers, unread = null, h
         rozet.prepend(isaret)
       }
       dugme.append(nokta, rozet)
-      dugme.setAttribute('aria-label', `${s.name}, ${sayiYazisi(okunmamis)} okunmamış mesaj` + (anma > 0 ? `, ${sayiYazisi(anma)} bahsetme` : '') + (sessiz ? ', sessizde' : ''))
+      const sayiMetni = okunmamis > 0 ? `, ${sayiYazisi(okunmamis)} okunmamış mesaj` : ''
+      dugme.setAttribute('aria-label', `${s.name}${sayiMetni}` + (anma > 0 ? `, ${sayiYazisi(anma)} bahsetme` : '') + (sessiz ? ', sessizde' : ''))
     }
     dugme.onclick = () => handlers.onSelect?.(s.id)
     rail.appendChild(dugme)

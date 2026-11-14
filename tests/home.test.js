@@ -2,7 +2,7 @@
 // Ana sayfa (spec §1): sol sütun (Arkadaşlar + ÖZEL MESAJLAR) ve Arkadaşlar sayfası.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
-  renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, durumYazisi, HOME_TEXTS,
+  renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, dmRozetToplami, durumYazisi, HOME_TEXTS,
 } from '../src/ui/home.js'
 import { closeMenu } from '../src/ui/serverMenu.js'
 
@@ -298,5 +298,21 @@ describe('arkadaş listesi: açık menü varken varlık olayı', () => {
     closeMenu()
     await bosalt()
     expect(s.body.querySelector('.friend-row .status-dot').dataset.status).toBe('online') // sonunda çizildi
+  })
+})
+
+describe('sessiz konuşmalar (v0.13.0)', () => {
+  it('dmRozetToplami sessizleri saymaz; bire bir sessiz satır soluk', () => {
+    const a = { id: 'u1', username: 'ali', color: '#fff', avatar_url: null }
+    const b = { id: 'u2', username: 'veli', color: '#fff', avatar_url: null }
+    const liste = [
+      { id: 't1', other: a, unread: 2, muted: true, lastMessageAt: null, createdAt: null },
+      { id: 't2', other: b, unread: 3, lastMessageAt: null, createdAt: null },
+    ]
+    expect(dmRozetToplami(liste)).toBe(3)
+    const el = renderHomeSidebar({ dms: liste, selfId: 'me' })
+    const satir = [...el.querySelectorAll('.dm-item')].find((x) => x.textContent.includes('ali'))
+    expect(satir.classList.contains('dm-muted')).toBe(true)
+    expect(satir.getAttribute('aria-label')).toBe('ali, 2 okunmamış mesaj, sessizde')
   })
 })

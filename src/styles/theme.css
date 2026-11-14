@@ -798,8 +798,16 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 /* Okunmamış kanal: ismi beyaz ve kalın */
 .channel-item.unread { display: flex; align-items: center; color: #fff; font-weight: 600; }
 .server-icon.selected .server-unread-dot { display: none; } /* seçili sunucuda uzun yeşil çubuk var */
+/* Sessize alınan kanal (v0.13.0): adı soluk, kalın değil; beni anan varsa sağda yalnız "@N" */
+.channel-item.channel-muted { display: flex; align-items: center; color: var(--muted); opacity: 0.6; }
+.channel-item.channel-muted:hover, .channel-item.channel-muted.selected { opacity: 1; }
+.channel-item.channel-muted .unread-count { color: var(--text); }
+/* Sessize alınan bire bir DM de grup gibi soluk (v0.13.0) */
+.dm-item.dm-muted { opacity: 0.6; }
 /* Sessize alınan sunucu: harfi soluk (rozet ve nokta olduğu gibi kalır) */
 .server-icon.muted:not(.selected) { color: var(--muted); }
+/* Sessiz sunucunun rozeti ve noktası da soluk (v0.13.0 tur 1, K3) */
+.server-icon.muted .unread-badge, .server-icon.muted .server-unread-dot { opacity: 0.5; }
 /* Kanal satırının sağında küçük gri sayı */
 .unread-count { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--muted); } /* istisna: 11px */
 /* Sunucu şeridinde solda kısa beyaz nokta (seçili sunucunun uzun yeşil çubuğundan ayrı) */
@@ -867,6 +875,19 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .popup-item:hover, .popup-item:focus-visible { background: var(--selected); }
 .popup-item.danger { background: none; color: var(--danger); } /* button.danger'ın kırmızı zeminini ezer */
 .popup-item.danger:hover, .popup-item.danger:focus-visible { background: var(--selected); }
+/* Seçimli menü öğesi (v0.13.0, bildirim düzeyi): seçili olanın solunda ✓ */
+.popup-item[role="menuitemradio"], .popup-item[role="menuitemcheckbox"] { padding-left: calc(var(--sp-3) + 18px); position: relative; }
+.popup-item[aria-checked="true"]::before { content: "✓"; position: absolute; left: var(--sp-3); color: var(--accent); }
+.popup-heading {
+  padding: var(--sp-2) var(--sp-3) var(--sp-1); font-size: var(--fs-xs); font-weight: 700;
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em;
+}
+.popup-sep { height: 1px; margin: var(--sp-1) var(--sp-2); background: var(--selected); }
+/* Başlıktaki 🔔 düğmesi sessizken üstü çizili görünür */
+.notify-btn.sessiz { color: var(--muted); }
+/* Ayarlar > Bildirimler: tarayıcı izni kutusu */
+.notify-permission { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); margin: 0 0 var(--sp-3); }
+
 .confirm-text { margin: 0 0 var(--sp-3); color: var(--text); overflow-wrap: anywhere; }
 .invite-code {
   display: block; margin: var(--sp-1) 0 var(--sp-3); padding: var(--sp-2) var(--sp-3);

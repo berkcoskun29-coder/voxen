@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Voxen logosu + sağ üstte kırmızı okunmamış noktası (src/badge.js; v0.13.0). Favicon tema değişkeni okuyamaz: renk sabit. -->
+  <rect width="512" height="512" rx="112" fill="#0f1a14"/>
+  <path d="M96 116 H210 L256 236 L256 404 Z" fill="#3be37a"/>
+  <path d="M416 116 H302 L256 236 L256 404 Z" fill="#1fa35a"/>
+  <path d="M210 116 L256 236 L302 116 Z" fill="#14532d"/>
+  <circle cx="400" cy="112" r="104" fill="#ef5b5b" stroke="#0f1a14" stroke-width="24"/>
+</svg>

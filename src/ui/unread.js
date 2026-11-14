@@ -26,7 +26,9 @@ export function baslikYazisi(toplam) {
 // sonra beni anan her yeni mesajda +1 (src/mentions.js), okundu işaretlenince 0.
 // onMessage(mesaj, serverId) (isteğe bağlı): başkasının yeni mesajı geldi (bildirimler bunu kullanır; aynı
 // tek abonelik). serverId sayaçta bilinmeyen kanalda null.
-export function createUnreadTracker({ profileId, getReading, isFocused, onChange, getUsername = null, onMessage = null }) {
+// isMuted(kanalId) (isteğe bağlı, v0.13.0): kanal sessizde mi. Sessiz kanalın sayısı sunucu sayısına ve toplama
+// katılmaz; bahsetmeleri katılır (sessiz kanalda da beni anan mesajın @ rozeti görünür).
+export function createUnreadTracker({ profileId, getReading, isFocused, onChange, getUsername = null, onMessage = null, isMuted = null }) {
   let sayilar = new Map() // kanalId -> { serverId, count, mentions }
   let kapandi = false
   let zamanlayici = null
@@ -34,6 +36,7 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
   let tekrarIstendi = false
 
   const degisti = () => { if (!kapandi) onChange?.() }
+  const sessiz = (channelId) => { try { return !!isMuted?.(channelId) } catch { return false } }
 
   // Açık kanal şu an "okunuyor" mu (odakta ve en altta)?
   function okunuyor(channelId) {
@@ -97,9 +100,10 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
   return {
     // Kanal başına sayı (sesli kanallar listede yoktur: 0)
     count(channelId) { return sayilar.get(channelId)?.count ?? 0 },
+    // Sunucunun okunmamış toplamı (sessiz kanallar hariç)
     serverCount(serverId) {
       let t = 0
-      for (const s of sayilar.values()) if (s.serverId === serverId) t += s.count
+      for (const [k, s] of sayilar) if (s.serverId === serverId && !sessiz(k)) t += s.count
       return t
     },
     // Kanalda / sunucuda beni anan okunmamış mesaj sayısı
@@ -109,10 +113,23 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
       for (const s of sayilar.values()) if (s.serverId === serverId) t += s.mentions ?? 0
       return t
     },
+    // Bütün okunmamışlar (sessiz kanallar hariç)
     total() {
       let t = 0
-      for (const s of sayilar.values()) t += s.count
+      for (const [k, s] of sayilar) if (!sessiz(k)) t += s.count
       return t
+    },
+    // Bütün bahsetmeler; haric: Set<serverId> sayılmayacak sunucular (sessize alınanlar). Rozet ve başlık bunu sayar.
+    mentionTotal(haric = null) {
+      let t = 0
+      for (const s of sayilar.values()) if (!haric?.has?.(s.serverId)) t += s.mentions ?? 0
+      return t
+    },
+    // "Tümünü okundu say" (mark_server_read yazıldıktan sonra): sunucunun bütün kanalları yerelde sıfırlanır
+    markServerRead(serverId) {
+      let degistiMi = false
+      for (const [k, s] of sayilar) if (s.serverId === serverId && sifirla(k)) degistiMi = true
+      if (degistiMi) degisti()
     },
     // Açık kanal okundu: yerel sayı sıfırlanır, işaret yazılır (id yoksa yalnız sayı sıfırlanır)
     markChannelRead(channelId, messageId) {

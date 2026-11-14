@@ -1048,7 +1048,7 @@ describe('sunucu menüsü, silme/ayrılma ve canlı sunucu olayları (Görev 3)'
     await bosalt()
     sunucuMenusunuAc()
     expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent))
-      .toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
+      .toEqual(['Davet et', 'Tümünü okundu say', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucuyu sil'])
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     expect(document.querySelector('.popup-menu')).toBeNull()
 
@@ -1059,7 +1059,7 @@ describe('sunucu menüsü, silme/ayrılma ve canlı sunucu olayları (Görev 3)'
     await bosalt()
     sunucuMenusunuAc()
     expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent))
-      .toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucudan ayrıl'])
+      .toEqual(['Davet et', 'Tümünü okundu say', 'Sunucuyu sessize al', 'Sunucudan ayrıl'])
     // üyede kanal ⚙ düğmesi yok
     expect(document.querySelector('.channel-gear')).toBeNull()
   })
@@ -1286,15 +1286,15 @@ describe('okunmamış sayacı (T5)', () => {
   beforeEach(() => { odak = true; vi.spyOn(document, 'hasFocus').mockImplementation(() => odak); document.title = 'Voxen' })
   afterEach(() => { vi.restoreAllMocks() })
 
-  it('açılışta sayılar gelir: kanal satırı, sunucu şeridi rozeti ve pencere başlığı', async () => {
-    sayaclar([{ channel_id: 'b', server_id: 's1', count: 3 }, { channel_id: 'a', server_id: 's1', count: 0 }])
+  it('açılışta sayılar gelir: kanal satırı, sunucu şeridi rozeti ve pencere başlığı (v0.13.0: başlık bahsetmeleri sayar)', async () => {
+    sayaclar([{ channel_id: 'b', server_id: 's1', count: 3, mentions: 2 }, { channel_id: 'a', server_id: 's1', count: 0 }])
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
     expect(satir('sohbet').classList.contains('unread')).toBe(true)
-    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('3')
+    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('@3')
     expect(satir('genel').classList.contains('unread')).toBe(false)
-    expect(document.querySelector('.server-icon .unread-badge').textContent).toBe('3')
-    expect(document.title).toBe('(3) Voxen')
+    expect(document.querySelector('.server-icon .unread-badge').textContent).toBe('@3')
+    expect(document.title).toBe('(2) Voxen')
   })
 
   it('başkasının mesajı artırır; kendi mesajım ve sesli kanal artırmaz', async () => {
@@ -1305,6 +1305,8 @@ describe('okunmamış sayacı (T5)', () => {
     fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u1' } })
     expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('1')
     expect(satir('Lobi').querySelector('.unread-count')).toBeNull()
+    expect(document.title).toBe('Voxen') // v0.13.0: başlık yalnız bahsetme ve DM sayar
+    fake.allHandlers.INSERT({ new: { id: 3, channel_id: 'b', author_id: 'u2', content: '@berk bak' } })
     expect(document.title).toBe('(1) Voxen')
   })
 
@@ -1324,10 +1326,10 @@ describe('okunmamış sayacı (T5)', () => {
   })
 
   it('99 üstü "99+" görünür', async () => {
-    sayaclar([{ channel_id: 'b', server_id: 's1', count: 100 }])
+    sayaclar([{ channel_id: 'b', server_id: 's1', count: 100, mentions: 100 }])
     await startApp(document.querySelector('#app'), profil)
     await bosalt()
-    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('99+')
+    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('@99+')
     expect(document.title).toBe('(99+) Voxen')
   })
 
@@ -1777,8 +1779,10 @@ describe('özel mesaj sohbeti ve canlı DM okunmamış (sosyal T3)', () => {
     fake.dmAllHandlers.INSERT({ new: dmMesaj(12, 't1', 'u1') }) // kendi mesajım (başka pencereden)
     expect(evRozeti().textContent).toBe('2')
     expect(document.title).toBe('(2) Voxen')
-    // Kanal okunmamışı da başlığa eklenir
+    // Kanal okunmamışı başlığa eklenmez; beni anan kanal mesajı eklenir (v0.13.0)
     fake.allHandlers.INSERT({ new: { id: 1, channel_id: 'b', author_id: 'u2' } })
+    expect(document.title).toBe('(2) Voxen')
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u2', content: '@berk' } })
     expect(document.title).toBe('(3) Voxen')
     document.querySelector('.rail-home').click()
     await bosalt()
@@ -1990,6 +1994,173 @@ describe('masaüstü bildirimleri ve sessize alma (sosyal T5)', () => {
     expect(Notification.requestPermission).not.toHaveBeenCalled()
     ;[...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === 'ali').click()
     expect(Notification.requestPermission).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('bildirim düzeyi, kanal sessizliği, rozet (v0.13.0)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const veli = { id: 'u3', username: 'veli', color: '#5b7cfa', avatar_url: null }
+  const dmSatir = (id, o, ek = {}) => ({
+    thread_id: id, other_id: o.id, username: o.username, color: o.color, avatar_url: null,
+    created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true, ...ek,
+  })
+  const dmMesaj = (id, tid, author, content = `m${id}`) => ({
+    id, thread_id: tid, author_id: author, content, edited_at: null, deleted_at: null,
+    created_at: new Date(Date.UTC(2026, 10, 13, 10, 0) + id * 60000).toISOString(),
+  })
+  const satir = (ad) => [...document.querySelectorAll('.channel-item')].find((b) => b.textContent.includes(ad))
+  const menuDugmesi = (yazi) => [...document.querySelectorAll('.popup-menu button')].find((b) => b.textContent === yazi)
+  const tablolar = () => fake.from.mock.calls.map((c) => c[0])
+  let olusan
+  let sayilar
+  beforeEach(() => {
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => false)
+    vi.spyOn(window, 'focus').mockImplementation(() => {})
+    sayilar = [{ channel_id: 'a', server_id: 's1', count: 0 }, { channel_id: 'b', server_id: 's1', count: 0 }]
+    supabase.rpc.mockImplementation(async (ad) => {
+      if (ad === 'dm_list') return { data: [dmSatir('t1', ali), dmSatir('t2', veli, { unread: 2 })], error: null }
+      if (ad === 'unread_counts') return { data: sayilar, error: null }
+      return { data: null, error: null }
+    })
+    fake.rows.profiles = [ali, veli]
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    olusan = []
+    class SahteBildirim {
+      constructor(baslik, secenek) { this.baslik = baslik; this.secenek = secenek; this.close = () => {}; olusan.push(this) }
+    }
+    SahteBildirim.permission = 'granted'
+    SahteBildirim.requestPermission = vi.fn(async () => 'granted')
+    vi.stubGlobal('Notification', SahteBildirim)
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    fake.from.mockClear()
+    delete fake.rows.server_notify_levels
+    delete fake.rows.channel_notify_prefs
+    delete fake.rows.dm_mutes
+  })
+
+  it('sunucu "Tüm mesajlar": sıradan mesaj da bildirir (aynı tek abonelik, yeni konu yok)', async () => {
+    fake.rows.server_notify_levels = [{ server_id: 's1', level: 'all' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const konular = fake.channel.mock.calls.length
+    fake.allHandlers.INSERT({ new: { id: 1, channel_id: 'b', author_id: 'u2', content: 'selam herkese' } })
+    await bosalt()
+    expect(olusan.map((n) => [n.baslik, n.secenek.body])).toEqual([['ali (#sohbet, S)', 'selam herkese']])
+    expect(fake.channel.mock.calls.length).toBe(konular)
+    // Tur 1 (K1): aynı kanalda hemen gelen anma ayrı birleşir ve kendi metniyle görünür; tıklanınca kanal açılır
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u2', content: '@berk bak' } })
+    await bosalt()
+    expect(olusan.map((n) => n.secenek.body)).toEqual(['selam herkese', '@berk bak'])
+    olusan[0].onclick()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#sohbet kanalına mesaj yaz…')
+  })
+
+  it('tur 1 (K6, K7): 🔔 aria-pressed taşımaz, sessizlik sınıf ve etikette; yazma sürerken odak okuması ayarı geri almaz', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const zil = document.querySelector('.notify-btn')
+    expect(zil.hasAttribute('aria-pressed')).toBe(false)
+    zil.click()
+    menuDugmesi('Ben açana kadar').click()
+    window.dispatchEvent(new Event('focus')) // yazma yolda: sunucudan gelecek eski (boş) ayar uygulanmamalı
+    await bosalt()
+    expect(satir('genel').classList.contains('channel-muted')).toBe(true)
+    expect(zil.classList.contains('sessiz')).toBe(true)
+    expect(zil.getAttribute('aria-label')).toBe('Bildirim ayarları (sessizde)')
+    expect(zil.hasAttribute('aria-pressed')).toBe(false)
+  })
+
+  it('sunucu menüsü: "Hiçbiri" seçilince yazılır; bahsetme de bildirmez', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.server-name-btn').click()
+    expect(menuDugmesi('Yalnız @bahsetmeler').getAttribute('aria-checked')).toBe('true')
+    menuDugmesi('Hiçbiri').click()
+    await bosalt()
+    expect(tablolar()).toContain('server_notify_levels')
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u2', content: '@berk bak' } })
+    await bosalt()
+    expect(olusan).toHaveLength(0)
+    document.querySelector('.server-name-btn').click()
+    expect(menuDugmesi('Hiçbiri').getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('sessiz kanal: soluk, sayı yok, sunucu rozetine katılmaz; beni anan mesaj bildirir ve @ rozeti çıkar', async () => {
+    fake.rows.channel_notify_prefs = [{ channel_id: 'b', level: 'all', muted: true, muted_until: null }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(satir('sohbet').classList.contains('channel-muted')).toBe(true)
+    fake.allHandlers.INSERT({ new: { id: 1, channel_id: 'b', author_id: 'u2', content: 'selam' } })
+    await bosalt()
+    expect(olusan).toHaveLength(0)
+    expect(satir('sohbet').querySelector('.unread-count')).toBeNull()
+    expect(document.querySelector('.server-icon[data-odak="sunucu-s1"] .unread-badge')).toBeNull()
+    fake.allHandlers.INSERT({ new: { id: 2, channel_id: 'b', author_id: 'u2', content: '@berk bak' } })
+    await bosalt()
+    expect(olusan.map((n) => n.baslik)).toEqual(['ali (#sohbet, S)'])
+    expect(satir('sohbet').querySelector('.unread-count').textContent).toBe('@1')
+    expect(document.querySelector('.server-icon[data-odak="sunucu-s1"] .unread-badge').textContent).toBe('@1')
+  })
+
+  it('kanala sağ tık: menüden "1 saat" sessize alır (yazılır, satır soluklaşır); süre dolunca kendiliğinden kalkar', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      satir('sohbet').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+      expect(document.querySelector('.popup-menu').getAttribute('aria-label')).toBe('sohbet bildirim ayarları')
+      menuDugmesi('1 saat').click()
+      await Promise.resolve()
+      expect(tablolar()).toContain('channel_notify_prefs')
+      expect(satir('sohbet').classList.contains('channel-muted')).toBe(true)
+      vi.advanceTimersByTime(3600 * 1000 + 1000)
+      expect(satir('sohbet').classList.contains('channel-muted')).toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('başlıktaki 🔔: açık kanalın bildirim menüsünü açar', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    const zil = document.querySelector('.notify-btn')
+    expect(zil.getAttribute('aria-haspopup')).toBe('menu')
+    zil.click()
+    expect(document.querySelector('.popup-menu').getAttribute('aria-label')).toBe('genel bildirim ayarları')
+  })
+
+  it('"Tümünü okundu say": mark_server_read çağrılır, sunucunun sayıları sıfırlanır', async () => {
+    sayilar = [{ channel_id: 'a', server_id: 's1', count: 0 }, { channel_id: 'b', server_id: 's1', count: 4, mentions: 1 }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(satir('sohbet').querySelector('.unread-count')).not.toBeNull()
+    expect(document.title).toBe('(3) Voxen') // 1 bahsetme + 2 DM
+    document.querySelector('.server-name-btn').click()
+    menuDugmesi('Tümünü okundu say').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('mark_server_read', { sid: 's1' })
+    expect(satir('sohbet').querySelector('.unread-count')).toBeNull()
+    expect(document.title).toBe('(2) Voxen') // geriye yalnız DM okunmamışları
+  })
+
+  it('bire bir DM sessizde: bildirim yok, satır soluk, başlık saymaz; 🔔 "Sessizden çıkar"', async () => {
+    fake.rows.dm_mutes = [{ thread_id: 't2' }]
+    localStorage.setItem('voxen.yer', 'ana')
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.title).toBe('Voxen')
+    const veliSatiri = () => [...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === 'veli')
+    expect(veliSatiri().classList.contains('dm-muted')).toBe(true)
+    fake.dmAllHandlers.INSERT({ new: dmMesaj(10, 't2', 'u3', 'selam') })
+    expect(olusan).toHaveLength(0)
+    veliSatiri().click()
+    await bosalt()
+    document.querySelector('.notify-btn').click()
+    menuDugmesi('Sessizden çıkar').click()
+    await bosalt()
+    expect(tablolar()).toContain('dm_mutes')
   })
 })
 
@@ -3014,7 +3185,7 @@ describe('roller ve izinler (v0.11.0)', () => {
     await bosalt()
     expect(document.querySelector('.channel-gear')).not.toBeNull()
     document.querySelector('.server-name-btn').click()
-    expect(menuOgeleri()).toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucudan ayrıl'])
+    expect(menuOgeleri()).toEqual(['Davet et', 'Tümünü okundu say', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucudan ayrıl'])
   })
 
   it('Sunucu ayarları: MANAGE_SERVER yoksa yalnız Roller sekmesi; rol oluştur RPC çağırır', async () => {

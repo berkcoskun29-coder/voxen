@@ -8,6 +8,8 @@ import { startApp, stopApp } from './ui/app.js'
 import { installTooltips } from './ui/tooltip.js'
 import { toast } from './ui/layout.js'
 import { inviteFromHash, storePendingInvite } from './ui/invite.js'
+import { setCloseToTray } from './desktop.js'
+import { getTraySettings } from './notify.js'
 
 const app = document.querySelector('#app')
 const LINK_GECERSIZ = 'Bu bağlantının süresi dolmuş ya da geçersiz. Yeni bir bağlantı iste.'
@@ -75,4 +77,7 @@ onAuthChange((session, olay) => {
     goster()
   }
 })
+// Masaüstü: "Kapatınca tepsiye küçült" ayarı oturumdan bağımsız, açılışta Rust'a bildirilir (tur 1, K5;
+// giriş ekranında da geçerli olsun). Web'de bir şey yapmaz.
+setCloseToTray(getTraySettings().tepsiyeKucult)
 goster()

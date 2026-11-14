@@ -285,3 +285,85 @@ describe('@bahsetme sayısı', () => {
     expect(satirlar.find((s) => s.textContent.includes('sohbet')).querySelector('.mention-mark')).toBeNull()
   })
 })
+
+describe('sessiz kanal ve rozet toplamı (v0.13.0)', () => {
+  it('sessiz kanal sunucu sayısına ve toplama katılmaz; bahsetmesi katılır; mentionTotal sessiz sunucuyu atlar', async () => {
+    fake.fetch.mockResolvedValue(new Map([
+      ['a', { serverId: 's1', count: 3, mentions: 1 }],
+      ['b', { serverId: 's1', count: 2, mentions: 0 }],
+      ['c', { serverId: 's2', count: 4, mentions: 2 }],
+    ]))
+    const sessiz = new Set(['a'])
+    tracker = createUnreadTracker({ profileId: 'me', getReading: () => null, isFocused: () => true, onChange: degisim, isMuted: (id) => sessiz.has(id) })
+    await bos()
+    expect(tracker.count('a')).toBe(3) // ham sayı (kanal satırı sessizliği kendisi bilir)
+    expect(tracker.serverCount('s1')).toBe(2)
+    expect(tracker.serverMentions('s1')).toBe(1)
+    expect(tracker.total()).toBe(6)
+    expect(tracker.mentionTotal()).toBe(3)
+    expect(tracker.mentionTotal(new Set(['s2']))).toBe(1)
+  })
+
+  it('markServerRead: sunucunun bütün kanalları yerelde sıfırlanır', async () => {
+    await kur()
+    degisim.mockClear()
+    tracker.markServerRead('s1')
+    expect(tracker.serverCount('s1')).toBe(0)
+    expect(tracker.count('c')).toBe(5)
+    expect(degisim).toHaveBeenCalled()
+  })
+
+  it('kanal listesi: sessiz kanal soluk, kalın/sayı yok; beni anan varsa yalnız @ rozeti', () => {
+    document.body.innerHTML = '<div id="p"></div>'
+    const panel = document.querySelector('#p')
+    const sayac = { count: (id) => ({ a: 4, b: 2 })[id] ?? 0, mentions: (id) => ({ a: 1 })[id] ?? 0 }
+    renderChannelList(panel, {
+      server: { id: 's1', name: 'S', owner_id: 'x' },
+      channels: [{ id: 'a', name: 'genel', kind: 'text' }, { id: 'b', name: 'sohbet', kind: 'text' }],
+      profile: { id: 'me', username: 'ben', color: '#fff' },
+      selectedChannelId: null,
+      unread: sayac,
+      channelMuted: () => true,
+      handlers: {},
+    })
+    const satirlar = [...panel.querySelectorAll('.channel-item')]
+    const a = satirlar.find((s) => s.textContent.includes('genel'))
+    const b = satirlar.find((s) => s.textContent.includes('sohbet'))
+    expect(a.classList.contains('channel-muted')).toBe(true)
+    expect(a.classList.contains('unread')).toBe(false)
+    expect(a.querySelector('.unread-count').textContent).toBe('@1')
+    expect(a.getAttribute('aria-label')).toBe('genel, sessizde, 1 bahsetme')
+    expect(b.classList.contains('unread')).toBe(false)
+    expect(b.querySelector('.unread-count')).toBeNull()
+    expect(b.getAttribute('aria-label')).toBe('sohbet, sessizde')
+  })
+
+  it('kanala sağ tık: onChannelNotify(kanal, satır) çağrılır, tarayıcı menüsü açılmaz', () => {
+    document.body.innerHTML = '<div id="p"></div>'
+    const panel = document.querySelector('#p')
+    const onChannelNotify = vi.fn()
+    renderChannelList(panel, {
+      server: { id: 's1', name: 'S', owner_id: 'x' },
+      channels: [{ id: 'a', name: 'genel', kind: 'text' }, { id: 'v', name: 'ses', kind: 'voice' }],
+      profile: { id: 'me', username: 'ben', color: '#fff' },
+      selectedChannelId: null,
+      handlers: { onChannelNotify },
+    })
+    const [a, v] = panel.querySelectorAll('.channel-item')
+    const olay = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+    a.dispatchEvent(olay)
+    expect(olay.defaultPrevented).toBe(true)
+    expect(onChannelNotify).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), a)
+    v.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    expect(onChannelNotify).toHaveBeenCalledTimes(1) // sesli kanalda bildirim yok
+  })
+
+  it('şerit: yalnız bahsetme varsa (sessiz kanaldan) @ rozeti çıkar', () => {
+    document.body.innerHTML = '<div id="r"></div>'
+    const rail = document.querySelector('#r')
+    renderRail(rail, [{ id: 's1', name: 'Bir' }], null, {}, { serverCount: () => 0, serverMentions: () => 2 })
+    const i1 = rail.querySelector('.server-icon')
+    expect(i1.querySelector('.unread-badge').textContent).toBe('@2')
+    expect(i1.getAttribute('aria-label')).toBe('Bir, 2 bahsetme')
+  })
+})

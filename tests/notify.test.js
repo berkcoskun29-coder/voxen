@@ -30,7 +30,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 import {
   shouldNotify, createNotifier, notifyTiming, bildirimBasligi, bildirimMetni, birlesikMetin,
   getNotifySettings, setNotifySettings, requestNotifyPermission, METIN_MAX,
-  shouldNotifyCall, aramaBildirimMetni,
+  shouldNotifyCall, aramaBildirimMetni, bildirimIzni, getTraySettings, setTraySettings,
 } from '../src/notify.js'
 import { BEEPS } from '../src/voice/sounds.js'
 import { getChannel } from '../src/data/channels.js'
@@ -432,5 +432,93 @@ describe('getChannel (bahsetme başlığındaki kanal ve sunucu)', () => {
     expect(await getChannel('yok')).toBeNull()
     sahte.kanalSonuc = { data: null, error: { message: 'ağ' } }
     await expect(getChannel('c1')).rejects.toThrow('ağ')
+  })
+})
+
+describe('v0.13.0: kanal mesajı (Tüm mesajlar), tepsi ayarları, izin durumu', () => {
+  const kanalMsg = { id: 3, channel_id: 'c1', server_id: 's1', author_id: 'u2', content: 'selam', deleted_at: null }
+  const temel = { selfId: 'u1', odakta: false, acikHedef: null, durum: 'online', sessizSunucular: new Set(), ayarlar: { masaustu: true } }
+
+  it('tur "channel": kanal hedefi; açık ve odaktaysa yok; sessiz sunucuda yok; DND yok', () => {
+    expect(shouldNotify({ ...temel, msg: kanalMsg, tur: 'channel' })).toBe(true)
+    expect(shouldNotify({ ...temel, msg: kanalMsg, tur: 'channel', odakta: true, acikHedef: 'c1' })).toBe(false)
+    expect(shouldNotify({ ...temel, msg: kanalMsg, tur: 'channel', sessizSunucular: new Set(['s1']) })).toBe(false)
+    expect(shouldNotify({ ...temel, msg: kanalMsg, tur: 'channel', durum: 'dnd' })).toBe(false)
+  })
+
+  it('kanal mesajı başlığı bahsetmeyle aynı biçimde', () => {
+    expect(bildirimBasligi({ tur: 'channel', ad: 'ayla', kanal: 'genel', sunucu: 'S' })).toBe('ayla (#genel, S)')
+  })
+
+  it('tepsi ayarları: varsayılan "kapatınca tepsiye küçült" açık, bilgi gösterilmedi', () => {
+    expect(getTraySettings()).toEqual({ tepsiyeKucult: true, tepsiBilgisi: false })
+    setTraySettings({ tepsiBilgisi: true })
+    expect(getTraySettings()).toEqual({ tepsiyeKucult: true, tepsiBilgisi: true })
+    setTraySettings({ tepsiyeKucult: false })
+    expect(getTraySettings()).toEqual({ tepsiyeKucult: false, tepsiBilgisi: true })
+    expect(getNotifySettings()).toEqual({ masaustu: true, ses: true }) // bildirim ayarları ayrı
+  })
+
+  it('bildirimIzni: masaüstünde ve API yokken "yok", tarayıcıda izin durumu', () => {
+    vi.stubGlobal('Notification', { permission: 'denied' })
+    expect(bildirimIzni()).toBe('denied')
+    window.__TAURI_INTERNALS__ = {}
+    expect(bildirimIzni()).toBe('yok')
+    delete window.__TAURI_INTERNALS__
+    vi.stubGlobal('Notification', undefined)
+    expect(bildirimIzni()).toBe('yok')
+  })
+})
+
+describe('düzeltme turu 1 (K1, K8): kanal bildirimlerinin birleşmesi', () => {
+  afterEach(() => { vi.useRealTimers() })
+  function kur() {
+    const gosterilen = []
+    const sesler = []
+    const n = createNotifier({ ac: () => {}, deps: { goster: (b) => { gosterilen.push(b); return true }, sesCal: () => sesler.push(1), odakla: () => {} } })
+    return { n, gosterilen, sesler }
+  }
+  const kanalHedef = { type: 'channel', id: 'c1', serverId: 's1' }
+
+  it('kanal penceresi kayar: mesaj geldikçe uzar; özet kanalı anlatır; ses bir kez', () => {
+    vi.useFakeTimers()
+    const { n, gosterilen, sesler } = kur()
+    const ozet = { baslik: 'S', ad: '#genel' }
+    n.bildir({ hedef: kanalHedef, ad: 'ayla', baslik: 'ayla (#genel, S)', metin: 'a', ozet })
+    for (let i = 0; i < 4; i++) {
+      vi.advanceTimersByTime(4000)
+      n.bildir({ hedef: kanalHedef, ad: i % 2 ? 'kerem' : 'ayla', baslik: 'x', metin: 'b', ozet })
+    }
+    expect(gosterilen).toHaveLength(1) // 16 sn geçti, pencere hâlâ açık
+    vi.advanceTimersByTime(5000)
+    expect(gosterilen.map((g) => [g.baslik, g.metin])).toEqual([['ayla (#genel, S)', 'a'], ['S', '#genel: 5 yeni mesaj']])
+    expect(sesler).toHaveLength(1)
+  })
+
+  it('kayan pencere en fazla 30 sn uzar', () => {
+    vi.useFakeTimers()
+    const { n, gosterilen } = kur()
+    n.bildir({ hedef: kanalHedef, ad: 'a', baslik: 'a', metin: 'a' })
+    for (let i = 0; i < 10; i++) { vi.advanceTimersByTime(4000); n.bildir({ hedef: kanalHedef, ad: 'a', baslik: 'a', metin: 'a' }) }
+    // 28. sn'deki mesaj son uzatma (33. sn'ye); 32. sn'deki sayılır ama uzatmaz; 36. sn'deki yeni pencere açar
+    expect(gosterilen.map((g) => g.metin)).toEqual(['a', 'a: 9 yeni mesaj', 'a'])
+  })
+
+  it('kanal penceresi açıkken gelen anma hemen ve kendi metniyle gösterilir', () => {
+    vi.useFakeTimers()
+    const { n, gosterilen } = kur()
+    n.bildir({ hedef: kanalHedef, ad: 'ayla', baslik: 'ayla (#genel, S)', metin: 'selam' })
+    n.bildir({ hedef: { type: 'mention', id: 'c1', serverId: 's1' }, ad: 'kerem', baslik: 'kerem (#genel, S)', metin: '@berk bak' })
+    expect(gosterilen.map((g) => g.metin)).toEqual(['selam', '@berk bak'])
+  })
+
+  it('K8: "Bildirimlere izin ver" (acik) masaüstü anahtarı kapalıyken de izin sorar', async () => {
+    const izin = { permission: 'default', requestPermission: vi.fn(async () => 'granted') }
+    vi.stubGlobal('Notification', izin)
+    setNotifySettings({ masaustu: false })
+    await requestNotifyPermission()
+    expect(izin.requestPermission).not.toHaveBeenCalled()
+    await requestNotifyPermission({ acik: true })
+    expect(izin.requestPermission).toHaveBeenCalledTimes(1)
   })
 })

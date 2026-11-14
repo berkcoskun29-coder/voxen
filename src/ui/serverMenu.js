@@ -3,6 +3,7 @@
 // Menü: küçük bir açılır liste (profileCard.js ile aynı kalıp): Esc, dışarı tıklama, Tab, kayma ya da
 // pencere boyutu değişince kapanır; kapanınca odak açan düğmeye döner.
 import { createModalShell, formAlani } from './modal.js'
+import { DUZEYLER, DUZEY_YAZILARI, SESSIZ_SURELERI, VARSAYILAN_DUZEY } from '../bildirimDuzeyi.js'
 
 const KENAR = 8 // ekran kenarına en az bu kadar boşluk
 const ARALIK = 4 // açan düğme ile menü arası
@@ -71,7 +72,9 @@ export function herhangiMenuAcikMi() {
 }
 
 // opener: menüyü açan düğme; etiket: ekran okuyucu için menü adı
-// secenekler: [{ yazi, tehlikeli?, tik() }]; seçilince menü kapanır, sonra tik() çalışır
+// secenekler: [{ yazi, tehlikeli?, secili?, tik() }]; seçilince menü kapanır, sonra tik() çalışır.
+//   secili (true/false) verilirse öğe seçimli olur (role="menuitemradio", aria-checked; seçilide ✓).
+//   { baslik } odaklanmayan küçük bölüm başlığı, { ayirici: true } ince çizgi (v0.13.0).
 // yan: 'alt' | 'sag'. Dönen: menü öğesi.
 export function openMenu({ opener, etiket, secenekler, yan = 'alt' }) {
   closeMenu()
@@ -79,11 +82,32 @@ export function openMenu({ opener, etiket, secenekler, yan = 'alt' }) {
   menu.className = 'popup-menu'
   menu.setAttribute('role', 'menu')
   menu.setAttribute('aria-label', etiket)
-  const ogeler = secenekler.map((s) => {
+  const ogeler = []
+  for (const s of secenekler) {
+    if (s.baslik != null) {
+      const h = document.createElement('div')
+      h.className = 'popup-heading'
+      h.setAttribute('role', 'presentation')
+      h.textContent = s.baslik
+      menu.appendChild(h)
+      continue
+    }
+    if (s.ayirici) {
+      const c = document.createElement('div')
+      c.className = 'popup-sep'
+      c.setAttribute('role', 'separator')
+      menu.appendChild(c)
+      continue
+    }
     const b = document.createElement('button')
     b.type = 'button'
     b.className = 'popup-item' + (s.tehlikeli ? ' danger' : '')
-    b.setAttribute('role', 'menuitem')
+    if (typeof s.secili === 'boolean') {
+      b.setAttribute('role', 'menuitemradio')
+      b.setAttribute('aria-checked', String(s.secili))
+    } else {
+      b.setAttribute('role', 'menuitem')
+    }
     b.tabIndex = -1
     b.textContent = s.yazi
     b.onclick = () => {
@@ -91,8 +115,8 @@ export function openMenu({ opener, etiket, secenekler, yan = 'alt' }) {
       s.tik()
     }
     menu.appendChild(b)
-    return b
-  })
+    ogeler.push(b)
+  }
   document.body.appendChild(menu)
   opener?.setAttribute?.('aria-expanded', 'true')
 
@@ -151,13 +175,20 @@ export function openMenu({ opener, etiket, secenekler, yan = 'alt' }) {
 // izinler (v0.11.0, isteğe bağlı): { has(perm) } güncel yetkim (src/data/rolKurallari.js). Verilmezse
 //   yalnız sahip yönetir (eski davranış). "Sunucuyu sil" her durumda yalnız sahipte.
 // tik: { onInvite, onToggleMute, onSettings, onAddChannel, onLeave, onDelete }
-export function openServerMenu({ opener, sunucu, sahip, izinler = null, sessiz = false, tik }) {
+// v0.13.0: tik.onLevel(düzey) verilirse "Bildirim ayarları" başlığı altında üç düzey (duzey: şu anki,
+// yoksa varsayılan) çıkar; tik.onMarkRead verilirse "Tümünü okundu say".
+export function openServerMenu({ opener, sunucu, sahip, izinler = null, sessiz = false, duzey = null, tik }) {
   if (menuAcikMi(opener)) { closeMenu({ returnFocus: true }); return null }
   const izin = (p) => !!sahip || !!izinler?.has?.(p)
-  const secenekler = [
-    { yazi: 'Davet et', tik: () => tik.onInvite?.() },
-    { yazi: sessiz ? 'Sessizden çıkar' : 'Sunucuyu sessize al', tik: () => tik.onToggleMute?.() },
-  ]
+  const secenekler = [{ yazi: 'Davet et', tik: () => tik.onInvite?.() }]
+  if (tik.onMarkRead) secenekler.push({ yazi: 'Tümünü okundu say', tik: () => tik.onMarkRead() })
+  if (tik.onLevel) {
+    const secili = duzey ?? VARSAYILAN_DUZEY
+    secenekler.push({ ayirici: true }, { baslik: 'Bildirim ayarları' })
+    for (const d of DUZEYLER) secenekler.push({ yazi: DUZEY_YAZILARI[d], secili: d === secili, tik: () => tik.onLevel(d) })
+  }
+  secenekler.push({ yazi: sessiz ? 'Sessizden çıkar' : 'Sunucuyu sessize al', tik: () => tik.onToggleMute?.() })
+  if (tik.onLevel) secenekler.push({ ayirici: true })
   if (izin('MANAGE_SERVER') || izin('MANAGE_ROLES')) secenekler.push({ yazi: 'Sunucu ayarları', tik: () => tik.onSettings?.() })
   if (izin('MANAGE_CHANNELS')) secenekler.push({ yazi: 'Kanal ekle', tik: () => tik.onAddChannel?.() })
   if (sahip) {
@@ -177,6 +208,49 @@ export function openChannelMenu({ opener, kanal, tik }) {
   if (tik.onMoveDown) secenekler.push({ yazi: 'Aşağı taşı', tik: () => tik.onMoveDown() })
   secenekler.push({ yazi: 'Kanalı sil', tehlikeli: true, tik: () => tik.onDelete?.() })
   return openMenu({ opener, etiket: `${kanal.name} kanal menüsü`, yan: 'sag', secenekler })
+}
+
+// ---- Kanal bildirim menüsü (v0.13.0): kanala sağ tık ya da başlıktaki 🔔 ----
+// duzey: kanalın kendi düzeyi (null = sunucu varsayılanı), sunucuDuzeyi: sunucununki (yazıda gösterilir),
+// sessiz: kanal şu an sessizde mi, sessizBitis: ISO metni ya da null (ben açana kadar).
+// tik: { onLevel(düzey | null), onMute(saat | null), onUnmute() }
+export function openChannelNotifyMenu({ opener, kanal, duzey = null, sunucuDuzeyi = null, sessiz = false, sessizBitis = null, yan = 'alt', tik }) {
+  if (menuAcikMi(opener)) { closeMenu({ returnFocus: true }); return null }
+  const varsayilan = DUZEY_YAZILARI[sunucuDuzeyi ?? VARSAYILAN_DUZEY]
+  const secenekler = [
+    { baslik: 'Bildirim ayarları' },
+    { yazi: `Sunucu varsayılanı (${varsayilan})`, secili: duzey == null, tik: () => tik.onLevel?.(null) },
+  ]
+  for (const d of DUZEYLER) secenekler.push({ yazi: DUZEY_YAZILARI[d], secili: d === duzey, tik: () => tik.onLevel?.(d) })
+  secenekler.push({ ayirici: true })
+  if (sessiz) {
+    secenekler.push({ baslik: `Sessizde: ${bitisYazisi(sessizBitis)}` }, { yazi: 'Sessizden çıkar', tik: () => tik.onUnmute?.() })
+  } else {
+    secenekler.push({ baslik: 'Kanalı sessize al' })
+    for (const s of SESSIZ_SURELERI) secenekler.push({ yazi: s.yazi, tik: () => tik.onMute?.(s.saat) })
+  }
+  return openMenu({ opener, etiket: `${kanal.name} bildirim ayarları`, yan, secenekler })
+}
+
+// "ben açana kadar" ya da "15 Kas 14:30'a kadar"
+function bitisYazisi(iso) {
+  if (iso == null) return 'ben açana kadar'
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return 'ben açana kadar'
+  const saat = t.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+  const bugun = new Date().toDateString() === t.toDateString()
+  const gun = bugun ? '' : t.toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' }) + ' '
+  return `${gun}${saat} kadar`
+}
+
+// ---- DM bildirim menüsü (v0.13.0): DM başlığındaki 🔔 ----
+export function openDmNotifyMenu({ opener, ad, sessiz = false, onToggle }) {
+  if (menuAcikMi(opener)) { closeMenu({ returnFocus: true }); return null }
+  return openMenu({
+    opener,
+    etiket: `${ad} bildirim ayarları`,
+    secenekler: [{ yazi: sessiz ? 'Sessizden çıkar' : 'Konuşmayı sessize al', tik: () => onToggle?.() }],
+  })
 }
 
 // ---- Pencereler ----

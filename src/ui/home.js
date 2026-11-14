@@ -69,6 +69,11 @@ export function dmUnreadTotal(dms) {
   return dms.reduce((t, d) => t + (d.unread > 0 ? d.unread : 0), 0)
 }
 
+// Rozet ve başlık için DM toplamı (v0.13.0): sessize alınan konuşmalar (bire bir ve grup) sayılmaz
+export function dmRozetToplami(dms) {
+  return dmUnreadTotal(dms.filter((d) => !d.muted))
+}
+
 function simgeDugme(sinif, etiket, simge) {
   const b = document.createElement('button')
   b.type = 'button'
@@ -144,6 +149,8 @@ export function renderHomeSidebar({ dms = [], presence = new Map(), view = { tur
     if (grup) {
       satir.classList.add('dm-row-group')
       if (t.muted) ac.classList.add('muted')
+    } else if (t.muted) {
+      ac.classList.add('dm-muted') // sessize alınan bire bir konuşma da soluk (v0.13.0)
     }
     const isim = document.createElement('span')
     isim.className = 'dm-name'
@@ -154,7 +161,7 @@ export function renderHomeSidebar({ dms = [], presence = new Map(), view = { tur
       say.className = 'unread-count'
       say.textContent = sayiYazisi(okunmamis)
       ac.appendChild(say)
-      ac.setAttribute('aria-label', `${adi}, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
+      ac.setAttribute('aria-label', `${adi}, ${sayiYazisi(okunmamis)} okunmamış mesaj` + (t.muted ? ', sessizde' : ''))
     }
     ac.onclick = () => handlers.onOpenDm?.(t)
     // × : DM listeden gizlenir (mesajlar silinmez; yeni mesaj gelince geri döner)

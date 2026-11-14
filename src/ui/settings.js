@@ -4,11 +4,11 @@
 // Her değişiklik hemen kaydedilir (src/settings.js); canlı oturuma uygulamayı app.js yapar.
 import { getSettings, updateSettings, onSettingsChange, BITRATE_MIN, BITRATE_MAX, UPLOAD_SECENEKLERI } from '../settings.js'
 import { keyLabel, isPrintableCode } from '../voice/ptt.js'
-import { isTauri } from '../desktop.js'
+import { isTauri, getAutostart, setAutostart, setCloseToTray } from '../desktop.js'
 import { openMicTest } from './micTest.js'
 import { createModalShell } from './modal.js'
 import { avatarTextColor } from './avatarColor.js'
-import { getNotifySettings, setNotifySettings, requestNotifyPermission } from '../notify.js'
+import { getNotifySettings, setNotifySettings, requestNotifyPermission, bildirimIzni, getTraySettings, setTraySettings } from '../notify.js'
 
 function el(tag, cls, text) {
   const e = document.createElement(tag)
@@ -352,6 +352,54 @@ export function openSettings({ ptt, onProfile, onSignOut, account, notify } = {}
   })
   const sesSatiri = onayKutusu('ayar-bildirim-ses', 'Bildirim sesi', bs.ses, (acik) => setNotifySettings({ ses: acik }))
 
+  // Tarayıcı izni (v0.13.0): sorulmadıysa açıklama + "Bildirimlere izin ver"; reddedildiyse nasıl açılacağı.
+  // İzin verilmişse ya da masaüstündeyse (izin gerekmez) kutu gizli.
+  const izinKutusu = el('div', 'notify-permission')
+  function izinCiz() {
+    izinKutusu.replaceChildren()
+    const durum = bildirimIzni()
+    izinKutusu.hidden = durum !== 'default' && durum !== 'denied'
+    if (durum === 'default') {
+      izinKutusu.appendChild(el('p', 'hint', 'Voxen sana bildirim gösterebilsin diye tarayıcının izni gerekiyor. Sekme açıkken DM ve bahsetme bildirimleri gelir.'))
+      const izinVer = el('button', 'secondary', 'Bildirimlere izin ver')
+      izinVer.type = 'button'
+      izinVer.onclick = async () => {
+        izinVer.disabled = true
+        await requestNotifyPermission({ acik: true })
+        izinCiz()
+      }
+      izinKutusu.appendChild(izinVer)
+    } else if (durum === 'denied') {
+      izinKutusu.appendChild(el('p', 'hint', 'Bildirimler bu tarayıcıda engellendi. Adres çubuğundaki kilit simgesine tıklayıp bildirimlere izin verebilirsin.'))
+    }
+  }
+  izinCiz()
+
+  // Masaüstü (v0.13.0): kapatınca tepsiye küçült (cihazda; Rust'a bildirilir) ve Windows açılışında başlat
+  const masaustuSatirlari = []
+  if (isTauri()) {
+    const tepsiSatiri = onayKutusu('ayar-tepsi', 'Kapatınca tepsiye küçült', getTraySettings().tepsiyeKucult, (acik) => {
+      setTraySettings({ tepsiyeKucult: acik })
+      setCloseToTray(acik)
+    })
+    const tepsiIpucu = el('p', 'hint', 'Açıkken pencereyi kapatınca Voxen tepside çalışmaya devam eder: bildirimler gelir, sesli kanaldan düşmezsin.')
+    const acilisHata = el('p', 'hint')
+    acilisHata.setAttribute('role', 'status')
+    const acilisSatiri = onayKutusu('ayar-acilis', 'Windows açılışında başlat', false, async (acik) => {
+      acilisKutusu.disabled = true
+      acilisHata.textContent = ''
+      const tamam = await setAutostart(acik)
+      acilisKutusu.disabled = false
+      if (!tamam) {
+        acilisKutusu.checked = !acik
+        acilisHata.textContent = 'Ayar değiştirilemedi. Tekrar dene.'
+      }
+    })
+    const acilisKutusu = acilisSatiri.querySelector('input')
+    getAutostart().then((acik) => { acilisKutusu.checked = acik }).catch(() => {})
+    masaustuSatirlari.push(tepsiSatiri, tepsiIpucu, acilisSatiri, acilisHata)
+  }
+
   const sessizBaslik = el('span', 'group-label', 'Sessize alınan sunucular')
   const sessizListe = el('ul', 'muted-servers')
   function sessizleriCiz() {
@@ -462,11 +510,18 @@ export function openSettings({ ptt, onProfile, onSignOut, account, notify } = {}
         alan('Ekran paylaşımı', ekranKalite, 'Bir sonraki paylaşımda geçerli olur.'),
       ) },
       { ad: 'bildirimler', baslik: 'Bildirimler', kutu: bolum('Bildirimler',
+        izinKutusu,
         masaustuSatiri,
         sesSatiri,
+        ...masaustuSatirlari,
         sessizBaslik,
         sessizListe,
-      ), acilinca: () => { sessizleriCiz(); requestNotifyPermission() } },
+      ), acilinca: () => {
+        sessizleriCiz()
+        izinCiz()
+        // Eski davranış korunur: bölüm açılınca izin (oturumda bir kez) sorulur; cevaptan sonra kutu tazelenir
+        requestNotifyPermission().then(izinCiz, () => {})
+      } },
       { ad: 'hesap', baslik: 'Hesap', kutu: bolum('Hesap', hesapSatiri) },
     ])],
     onKapat: () => {

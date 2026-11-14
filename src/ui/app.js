@@ -6,7 +6,7 @@ import { createChannel, listChannels, deleteChannel, renameChannel, getChannel }
 import { subscribeServerEvents } from '../data/serverEvents.js'
 import {
   openServerMenu, openChannelMenu, closeMenu, leaveServerDialog, deleteServerDialog, deleteChannelDialog,
-  renameChannelDialog, serverSettingsDialog, kickMemberDialog,
+  renameChannelDialog, serverSettingsDialog, kickMemberDialog, openChannelNotifyMenu, openDmNotifyMenu,
 } from './serverMenu.js'
 import {
   loadServerRoles, createRole, updateRole, deleteRole, moveRole, setMemberRole, kickMember, regenerateInvite, moveChannel,
@@ -25,7 +25,12 @@ import { createIncomingCall, zilCalsinMi, GELEN_ARAMA_METINLERI } from './incomi
 import { createCallFlow, mountCallPanel, createCallButton, aramaGorunumu, ARAMA_METINLERI } from './callPanel.js'
 import { openSettings, askPttKeyIfNeeded } from './settings.js'
 import { PttController, pttBeepName, connectDesktopPtt, pttHintText, PTT_HOOK_ERROR_TEXT } from '../voice/ptt.js'
-import { isTauri, loadTauriApi, setWindowTitle } from '../desktop.js'
+import { isTauri, loadTauriApi, setWindowTitle, setCloseToTray, setTrayDnd, showDesktopNotification, quitNow } from '../desktop.js'
+import { createQuitHandler } from '../cikis.js'
+import { setUnreadBadge, resetBadge } from '../badge.js'
+import { bellIcon } from './icons.js'
+import { fetchNotifyPrefs, setServerNotifyLevel, setChannelNotifyPrefs, markServerRead, fetchMutedDms } from '../data/notifyPrefs.js'
+import { etkinDuzey, kanalSessizMi, kanalBildirimKarari, sessizBitisi, enYakinBitis } from '../bildirimDuzeyi.js'
 import { createUnreadTracker, baslikYazisi } from './unread.js'
 import { flushReads, resetReads } from '../data/reads.js'
 import { createUpdateBanner } from './updateBanner.js'
@@ -49,8 +54,11 @@ import { fetchMutedServers, muteServer, unmuteServer } from '../data/mutes.js'
 import { fetchProfiles } from '../data/messages.js'
 import { yetimleriTemizle } from '../data/attachments.js'
 import { mentionsUser, mentionsEveryone } from '../mentions.js'
-import { shouldNotify, shouldNotifyCall, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni } from '../notify.js'
-import { renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, kisiDurumu } from './home.js'
+import {
+  shouldNotify, shouldNotifyCall, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni,
+  getTraySettings, setTraySettings,
+} from '../notify.js'
+import { renderHomeSidebar, createFriendsPage, sortDms, dmRozetToplami, kisiDurumu } from './home.js'
 import {
   fetchGroupList, createGroup, addGroupMember, removeGroupMember, leaveGroup, renameGroup, muteDm, unmuteDm,
   startGroupCall, joinGroupCall, leaveGroupCall, pingGroupCall, parseGroupCallEvent, grupAdi, grupAriyorMetni,
@@ -198,6 +206,11 @@ export async function startApp(root, profile, { email = '' } = {}) {
   let dmPaneli = false // sağ panel şu an DM profil kartını mı gösteriyor
   // Sessize alınan sunucular (hesapta saklanır, src/data/mutes.js): bahsetmeleri bildirim vermez, simge soluk
   let sessizSunucular = new Set()
+  // Bildirim düzeyleri ve kanal sessizliği (v0.13.0, hesapta: src/data/notifyPrefs.js, 015)
+  let bildirimAyarlari = { sunucular: new Map(), kanallar: new Map() }
+  let sessizlikZamanlayici = null // en yakın süreli sessizlik bitince listeler yeniden çizilir
+  let sessizDmler = new Set() // sessize aldığım konuşmalar (dm_mutes; bire bir ve grup)
+  let sonTepsiDnd = null // tepsideki "Rahatsız etmeyin" işaretine en son yazılan
 
   // Çevrimiçi durumu: giriş yapılınca başlar, Çıkış'ta durur. Tercihler tarayıcıda saklanır.
   aktifDurdur?.() // önceki startApp kalmışsa: izleyiciyi durdur + dinleyicisini bırak
@@ -571,9 +584,19 @@ export async function startApp(root, profile, { email = '' } = {}) {
           },
         }),
         await api.listen('tray-toggle-mute', () => susturmayiDegistir()), // çubuktaki Sustur ile aynı
+        // v0.13.0: tepsideki "Rahatsız etmeyin" (durum burada tutulur; işaret set_tray_dnd ile eşitlenir)
+        await api.listen('tray-toggle-dnd', () => { if (!durduruldu) durumuAyarla(!getLocalPresencePrefs().dnd) }),
+        // Pencere ilk kez tepsiye küçülünce bir kez bilgi verilir
+        await api.listen('hidden-to-tray', () => tepsiBilgisi()),
+        // Tur 1 (Ö2): tepsiden "Çıkış" / ayar kapalıyken kapatma: önce sesli kanaldan ve aramadan düzgün ayrıl
+        await api.listen('app-quitting', () => { duzgunCikis() }),
       ]
       if (durduruldu) birakanlar.forEach((f) => f())
       else masaustuBirak = birakanlar
+      if (!durduruldu) {
+        setCloseToTray(getTraySettings().tepsiyeKucult) // Rust varsayılanı açık; kapalı seçildiyse bildir
+        tepsiDndEsitle()
+      }
       // Olay web yüklenmeden önce gönderilmiş olabilir: bekleyen güncelleme var mı sor
       const bekleyen = await api.invoke('pending_update')
       if (bekleyen && !durduruldu) guncellemeBandi.offer(bekleyen)
@@ -585,9 +608,30 @@ export async function startApp(root, profile, { email = '' } = {}) {
     return pttHintText({ mode: s.mode, pttKey: s.pttKey, hookError: kancaHatasi })
   }
   function benimDurumum() { return varlikHaritasi.get(profile.id)?.status ?? 'online' }
+  // Kendi durum seçimim (profil kartı ve tepsi menüsü aynı yoldan): tercih yazılır, varlık yenilenir
+  function durumuAyarla(dnd) {
+    setLocalPresencePrefs({ dnd })
+    varlik.refresh()
+    tepsiDndEsitle()
+  }
+  // Tepsideki "Rahatsız etmeyin" işareti tercihle aynı olsun (yalnız değişince çağrı yapılır)
+  function tepsiDndEsitle() {
+    if (!isTauri()) return // durduruldu'ya bakılmaz: varlık dinleyicisi onun tanımından önce çağırabilir
+    const dnd = !!getLocalPresencePrefs().dnd
+    if (dnd === sonTepsiDnd) return
+    sonTepsiDnd = dnd
+    setTrayDnd(dnd)
+  }
+  // "Voxen arka planda çalışıyor." bilgisi: ilk küçültmede bir kez (cihazda işaretlenir)
+  function tepsiBilgisi() {
+    if (durduruldu || getTraySettings().tepsiBilgisi) return
+    setTraySettings({ tepsiBilgisi: true })
+    showDesktopNotification({ id: 2147480001, title: 'Voxen', body: 'Voxen arka planda çalışıyor.', extra: {} })
+  }
   // Kullanıcı çubuğundaki durum (ikinci satır, nokta) değişince yalnız kanal panelini yeniden çiz
   function cubukDurumunuYenile() {
     const yeni = benimDurumum() + '|' + (varlikHaritasi.get(profile.id)?.statusText ?? '')
+    tepsiDndEsitle() // durum profil penceresinden de değişebilir
     if (yeni === cubukDurumu) return
     const ilk = cubukDurumu === ''
     cubukDurumu = yeni
@@ -736,6 +780,21 @@ export async function startApp(root, profile, { email = '' } = {}) {
     aramadanCik('hangup', { ciz: false })
   }
   window.addEventListener('pagehide', sayfaKapaniyor)
+  // Masaüstünde programdan çıkış (src/cikis.js): sesli kanaldan ayrıl (bye + voice_states silme), aramayı kapat,
+  // okunduları yaz; sonra Rust'a quit_now. Rust ayrıca 2 sn sonra her durumda çıkar.
+  const duzgunCikis = createQuitHandler({
+    temizle: async () => {
+      sesliAyril(false, { hemen: true })
+      aramaAkisi.iptal()
+      await Promise.all([
+        aramadanCik('hangup', { ciz: false }),
+        flushVoiceStates(),
+        flushReads().catch(() => {}),
+        flushDmReads().catch(() => {}),
+      ])
+    },
+    cik: () => quitNow(),
+  })
   function varligiDurdur() {
     sesliAyril(false, { hemen: true })
     aramaAkisi.iptal() // "Aranıyor…" iken: arama iptal (sayaç ve bekleme tonu durur)
@@ -773,6 +832,9 @@ export async function startApp(root, profile, { email = '' } = {}) {
     flushDmReads().catch(() => {})
     resetDmReads()
     setWindowTitle(baslikYazisi(0))
+    setUnreadBadge(0)
+    resetBadge()
+    clearTimeout(sessizlikZamanlayici)
     closeMenu()
     ayarDinlemeyiBirak()
     ptt.dispose()
@@ -877,7 +939,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       // Kendi kartımız: durum seçimi profil penceresindekiyle AYNI yoldan gider
       // (tercih yazılır, varlık yenilenir; gönderim sınırı presence.js'te kalır).
       bilgi.own = {
-        onStatus: (dnd) => { setLocalPresencePrefs({ dnd }); varlik.refresh() },
+        onStatus: (dnd) => durumuAyarla(dnd),
         onEdit: profilAc,
       }
     }
@@ -1049,7 +1111,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     getUsername: () => profile.username, // @bahsetme sayısı (ad değişebilir)
     getReading: () => (sohbet && acikSohbetId ? { channelId: acikSohbetId, atBottom: sohbet.isAtBottom() } : null),
     isFocused: pencereOdakta,
-    onMessage: (m, serverId) => kanalMesajiGeldi(m, serverId), // @bahsetme bildirimi (aynı tek abonelik)
+    onMessage: (m, serverId) => kanalMesajiGeldi(m, serverId), // kanal bildirimi (aynı tek abonelik)
+    isMuted: (cid) => kanalSessizMi(bildirimAyarlari.kanallar.get(cid)), // sessiz kanal sunucu sayısına katılmaz
     onChange: () => {
       if (durduruldu) return
       basligiGuncelle()
@@ -1058,9 +1121,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
       cizKanalPaneli()
     },
   })
-  // Pencere başlığı "(N) Voxen": kanal okunmamışları + DM okunmamışları
+  // Pencere başlığı "(N) Voxen" ve rozet (v0.13.0): sessiz olmayan sunuculardaki bahsetmeler + sessiz olmayan
+  // DM ve grupların okunmamışları. Tarayıcıda favicon noktası, masaüstünde görev çubuğu bindirmesi (src/badge.js).
   function basligiGuncelle() {
-    setWindowTitle(baslikYazisi(okunmamis.total() + dmUnreadTotal(dmListesi)))
+    const n = okunmamis.mentionTotal(sessizSunucular) + dmRozetToplami(dmListesi)
+    setWindowTitle(baslikYazisi(n))
+    setUnreadBadge(n)
   }
   // Açık kanal ya da DM okundu sayılır: pencere odakta ve en alttaysa (açılınca, en alta inince, odağa gelince)
   function okunduIsaretle() {
@@ -1206,6 +1272,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // verir; grup sistem satırları ve engellediğim kişinin grup mesajları (anma dahil) bildirim vermez.
   function dmBildirimi(m, thread) {
     if (durduruldu || !bildirimGelsinMi(m, 'dm')) return
+    if (!thread.isGroup && thread.muted) return // sessize alınan bire bir konuşma (v0.13.0)
     if (thread.isGroup && (m.kind === 'system' || engelledim(m.author_id) || (thread.muted && !mentionsUser(m.content, profile.username)))) return
     const ad = thread.isGroup ? grupAdi(thread, profile.id) : (thread.other?.username ?? '')
     bildirimci.bildir({
@@ -1215,36 +1282,76 @@ export async function startApp(root, profile, { email = '' } = {}) {
       metin: bildirimMetni(m.content),
     })
   }
-  // Sunucu mesajı beni anıyorsa: başlık "Ad (#kanal, Sunucu)". Kanal ve yazar elimizde yoksa (başka
-  // sunucu) veritabanından alınır; yalnız beni anan mesajlarda (seyrek) sorgu atılır.
-  // @herkes/@everyone (v0.11.0): yalnız yazarın o sunucuda MENTION_EVERYONE izni varsa bildirim verir
-  // (bakılan sunucuda yerel rollerden, başka sunucuda veritabanına sorulur; yalnız @herkes içeren seyrek mesajlarda).
+  // Sunucu kanalındaki yeni mesaj (v0.13.0): bildirim düzeyine göre (src/bildirimDuzeyi.js kanalBildirimKarari).
+  // Başlık "Ad (#kanal, Sunucu)". Kanal ve yazar elimizde yoksa (başka sunucu) veritabanından bir kez alınıp
+  // bellekte tutulur. Yalnız bildirim olasıysa sorgu atılır (anma, @herkes ya da "Tüm mesajlar" düzeyi).
+  // @herkes/@everyone (v0.11.0): "Yalnız @bahsetmeler" düzeyinde yazarın MENTION_EVERYONE izni gerekir.
+  const kanalOnbellegi = new Map() // kanalId -> { id, name, server_id }
+  const profilOnbellegi = new Map() // userId -> profil
+  function kanalKarari(m, serverId, anar, herkes) {
+    const kanalAyari = bildirimAyarlari.kanallar.get(m.channel_id)
+    const karar = kanalBildirimKarari({
+      duzey: etkinDuzey(bildirimAyarlari.sunucular.get(serverId), kanalAyari),
+      kanalSessiz: kanalSessizMi(kanalAyari),
+      sunucuSessiz: sessizSunucular.has(serverId),
+      anar,
+      herkes,
+    })
+    // "Tüm mesajlar": engellediğim kişinin sıradan mesajı bildirim vermez (karar: uygulayıcı; anma kuralı aynı kalır)
+    return karar === 'all' && engelledim(m.author_id) ? null : karar
+  }
   async function kanalMesajiGeldi(m, serverId) {
+    if (durduruldu) return
     const anar = mentionsUser(m.content, profile.username)
-    if (durduruldu || (!anar && !mentionsEveryone(m.content))) return
+    const herkes = !anar && mentionsEveryone(m.content)
     let kanal = kanallar.find((k) => k.id === m.channel_id) ?? null
     if (kanal) serverId = sunucuId
-    // Ucuz ön denetim (sunucu biliniyorsa sessiz kuralı dahil); sorgudan sonra yeniden bakılır
-    if (!bildirimGelsinMi({ ...m, server_id: serverId }, 'mention')) return
+    else kanal = kanalOnbellegi.get(m.channel_id) ?? null
+    if (kanal?.server_id) serverId = kanal.server_id
+    // Ucuz ön denetim: sunucu biliniyorsa karar şimdi; bilinmiyorsa yalnız bildirim olasıysa devam edilir
+    if (serverId) {
+      const karar = kanalKarari(m, serverId, anar, herkes)
+      if (!karar || !bildirimGelsinMi({ ...m, server_id: serverId }, karar === 'all' ? 'channel' : 'mention')) return
+    } else {
+      const olasi = anar || herkes || bildirimAyarlari.kanallar.get(m.channel_id)?.level === 'all'
+        || [...bildirimAyarlari.sunucular.values()].includes('all')
+      if (!olasi) return
+    }
     try {
-      if (!kanal) kanal = await getChannel(m.channel_id)
-      if (!kanal) return
+      if (!kanal) {
+        kanal = await getChannel(m.channel_id)
+        if (kanal) kanalOnbellegi.set(m.channel_id, kanal)
+      }
+      if (!kanal || durduruldu) return
       serverId = kanal.server_id ?? serverId
-      if (!anar) {
+      const karar = kanalKarari(m, serverId, anar, herkes)
+      if (!karar) return
+      if (karar === 'everyone') {
         const izinli = rolVerisi.serverId === serverId && sunucuId === serverId
           ? yetkiSunucuda(serverId, m.author_id).has('MENTION_EVERYONE')
           : await hasPermission(serverId, m.author_id, 'MENTION_EVERYONE')
         if (!izinli || durduruldu) return
       }
-      const yazar = uyeler.find((u) => u.id === m.author_id) ?? (await fetchProfiles([m.author_id]))[0]
+      let yazar = uyeler.find((u) => u.id === m.author_id) ?? profilOnbellegi.get(m.author_id)
+      if (!yazar) {
+        yazar = (await fetchProfiles([m.author_id]))[0]
+        if (yazar) {
+          if (profilOnbellegi.size > 500) profilOnbellegi.clear()
+          profilOnbellegi.set(m.author_id, yazar)
+        }
+      }
       const sunucu = servers.find((s) => s.id === serverId)
       if (durduruldu || !yazar || !sunucu) return
-      if (!bildirimGelsinMi({ ...m, server_id: serverId }, 'mention')) return // beklerken durum değişmiş olabilir
+      const tur = karar === 'all' ? 'channel' : 'mention'
+      // Beklerken durum ya da ayar değişmiş olabilir
+      if (kanalKarari(m, serverId, anar, herkes) == null || !bildirimGelsinMi({ ...m, server_id: serverId }, tur)) return
+      // Tur 1 (K1): sıradan kanal mesajı ('channel') ile anma ('mention') ayrı birleşir; özet kanalı anlatır
       bildirimci.bildir({
-        hedef: { type: 'mention', id: m.channel_id, serverId },
+        hedef: { type: tur, id: m.channel_id, serverId },
         ad: yazar.username,
-        baslik: bildirimBasligi({ tur: 'mention', ad: yazar.username, kanal: kanal.name, sunucu: sunucu.name }),
+        baslik: bildirimBasligi({ tur, ad: yazar.username, kanal: kanal.name, sunucu: sunucu.name }),
         metin: bildirimMetni(m.content),
+        ozet: { baslik: sunucu.name, ad: `#${kanal.name}` },
       })
     } catch { /* bilgi alınamadı: bildirim gösterilmez, okunmamış sayacı yine çalışır */ }
   }
@@ -1264,7 +1371,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       }).catch(() => { /* liste alınamadı: açılmaz */ })
       return
     }
-    if (hedef.type !== 'mention' || !servers.some((s) => s.id === hedef.serverId)) return
+    if ((hedef.type !== 'mention' && hedef.type !== 'channel') || !servers.some((s) => s.id === hedef.serverId)) return
     if (!anaSayfa && sunucuId === hedef.serverId && kanallar.some((k) => k.id === hedef.id)) kanalSec(hedef.id)
     else sunucuSec(hedef.serverId, hedef.id)
   }
@@ -1276,6 +1383,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
         if (durduruldu) return
         const degisti = liste.size !== sessizSunucular.size || [...liste].some((id) => !sessizSunucular.has(id))
         sessizSunucular = liste
+        if (degisti) basligiGuncelle()
         if (degisti && ilkCizimYapildi) cizSerit()
       })
       .catch(() => { /* alınamadı: eski liste kalır, odağa gelince yeniden denenir */ })
@@ -1294,6 +1402,125 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (sessiz) sessizSunucular.add(id)
     else sessizSunucular.delete(id)
     cizSerit()
+    basligiGuncelle()
+  }
+
+  // ---- Bildirim düzeyi ve kanal sessizliği (v0.13.0; hesapta saklanır: her cihazda geçerli) ----
+  // Açılışta ve pencere odağa gelince (başka cihazda değişmiş olabilir) yeniden okunur.
+  // Tur 1 (K7): yazma sürerken ya da okuma başladıktan sonra yazma olduysa okunan (eski) sonuç uygulanmaz
+  let ayarYazmaNo = 0
+  let bekleyenAyarYazma = 0
+  async function ayarYaz(is) {
+    ayarYazmaNo++
+    bekleyenAyarYazma++
+    try { return await is() } finally { bekleyenAyarYazma-- }
+  }
+  function bildirimAyarlariniYukle() {
+    const no = ayarYazmaNo
+    const yazmaVardi = bekleyenAyarYazma > 0 // okuma, yolda olan yazmayı görmeyebilir
+    return fetchNotifyPrefs()
+      .then((a) => {
+        if (durduruldu || yazmaVardi || bekleyenAyarYazma > 0 || no !== ayarYazmaNo) return
+        bildirimAyarlari = a
+        bildirimAyarlariDegisti()
+      })
+      .catch(() => { /* alınamadı: eski ayarlar kalır, odağa gelince yeniden denenir */ })
+  }
+  // Ayarlar değişti: listeler, başlık, 🔔 düğmesi; süreli sessizlik için zamanlayıcı yeniden kurulur
+  function bildirimAyarlariDegisti() {
+    if (durduruldu) return
+    basligiGuncelle()
+    bildirimDugmesiniGuncelle()
+    if (ilkCizimYapildi) { cizSerit(); cizKanalPaneli() }
+    clearTimeout(sessizlikZamanlayici)
+    sessizlikZamanlayici = null
+    const bitis = enYakinBitis(bildirimAyarlari.kanallar)
+    if (bitis != null) {
+      const bekle = Math.min(Math.max(bitis - Date.now() + 500, 1000), 2147483647)
+      sessizlikZamanlayici = setTimeout(() => { sessizlikZamanlayici = null; bildirimAyarlariDegisti() }, bekle)
+    }
+  }
+  async function sunucuDuzeyiniAyarla(id, duzey) {
+    const onceki = bildirimAyarlari.sunucular.get(id)
+    bildirimAyarlari.sunucular.set(id, duzey)
+    try { await ayarYaz(() => setServerNotifyLevel(id, duzey)) } catch (e) {
+      if (onceki == null) bildirimAyarlari.sunucular.delete(id)
+      else bildirimAyarlari.sunucular.set(id, onceki)
+      toast(hataMetni(e), 'hata')
+    }
+    bildirimAyarlariDegisti()
+  }
+  // Kanalın ayarını yazar (önce yerelde: ekran hemen değişir; hata olursa geri alınır)
+  async function kanalAyariniYaz(kanalId, yeni) {
+    const onceki = bildirimAyarlari.kanallar.get(kanalId)
+    if (yeni.level == null && !yeni.muted) bildirimAyarlari.kanallar.delete(kanalId)
+    else bildirimAyarlari.kanallar.set(kanalId, { level: yeni.level ?? null, muted: !!yeni.muted, mutedUntil: yeni.muted ? (yeni.mutedUntil ?? null) : null })
+    bildirimAyarlariDegisti()
+    try { await ayarYaz(() => setChannelNotifyPrefs(kanalId, yeni)) } catch (e) {
+      if (onceki) bildirimAyarlari.kanallar.set(kanalId, onceki)
+      else bildirimAyarlari.kanallar.delete(kanalId)
+      toast(hataMetni(e), 'hata')
+      bildirimAyarlariDegisti()
+    }
+  }
+  // Kanalın bildirim menüsü: sağ tık (satırın sağında) ya da başlıktaki 🔔 (altında)
+  function kanalBildirimMenusu(kanal, opener, yan = 'alt') {
+    if (!kanal || kanal.kind !== 'text') return
+    const ayar = bildirimAyarlari.kanallar.get(kanal.id) ?? { level: null, muted: false, mutedUntil: null }
+    const sessiz = kanalSessizMi(ayar)
+    openChannelNotifyMenu({
+      opener,
+      kanal,
+      yan,
+      duzey: ayar.level ?? null,
+      sunucuDuzeyi: bildirimAyarlari.sunucular.get(kanal.server_id ?? sunucuId) ?? null,
+      sessiz,
+      sessizBitis: sessiz ? ayar.mutedUntil : null,
+      tik: {
+        onLevel: (d) => kanalAyariniYaz(kanal.id, { level: d, muted: sessiz, mutedUntil: sessiz ? ayar.mutedUntil : null }),
+        onMute: (saat) => kanalAyariniYaz(kanal.id, { level: ayar.level ?? null, muted: true, mutedUntil: sessizBitisi(saat) }),
+        onUnmute: () => kanalAyariniYaz(kanal.id, { level: ayar.level ?? null, muted: false, mutedUntil: null }),
+      },
+    })
+  }
+  // "Tümünü okundu say": sunucudaki bütün kanallar (yerel sayılar yazma başarılıysa sıfırlanır)
+  async function tumunuOkunduSay(id) {
+    try { await markServerRead(id) } catch (e) { toast(hataMetni(e), 'hata'); return }
+    if (!durduruldu) okunmamis.markServerRead(id)
+  }
+
+  // Başlıktaki 🔔 düğmesi (v0.13.0): kanalda kanalın bildirim menüsü, DM'de "Konuşmayı sessize al".
+  // Tek öğe; görünüm değişince başlığa taşınır (mesaj arama kutusu gibi).
+  const bildirimDugmesi = document.createElement('button')
+  bildirimDugmesi.type = 'button'
+  bildirimDugmesi.className = 'icon-btn notify-btn'
+  bildirimDugmesi.dataset.odak = 'bildirim-menu'
+  bildirimDugmesi.dataset.tipSide = 'bottom'
+  bildirimDugmesi.setAttribute('aria-haspopup', 'menu')
+  bildirimDugmesi.setAttribute('aria-expanded', 'false')
+  bildirimDugmesi.onclick = () => {
+    if (durduruldu) return
+    if (dmKaynak && anaGorunum.tur === 'dm') { dmBildirimMenusu(guncelDm(anaGorunum.thread.id) ?? anaGorunum.thread, bildirimDugmesi); return }
+    const kanal = kanallar.find((k) => k.id === yaziliId && k.kind === 'text')
+    if (kanal) kanalBildirimMenusu(kanal, bildirimDugmesi)
+  }
+  // Düğmenin simgesi ve etiketi: açık konuşma sessizse üstü çizili zil
+  function bildirimDugmesiniGuncelle() {
+    let sessiz = false
+    if (anaSayfa && anaGorunum.tur === 'dm') sessiz = !!(guncelDm(anaGorunum.thread.id) ?? anaGorunum.thread).muted
+    else if (yaziliId) sessiz = kanalSessizMi(bildirimAyarlari.kanallar.get(yaziliId))
+    const etiket = sessiz ? 'Bildirim ayarları (sessizde)' : 'Bildirim ayarları'
+    bildirimDugmesi.setAttribute('aria-label', etiket)
+    bildirimDugmesi.dataset.tip = etiket
+    bildirimDugmesi.classList.toggle('sessiz', sessiz) // aria-pressed yok: düğme menü açar (tur 1, K6)
+    bildirimDugmesi.replaceChildren(bellIcon(sessiz, 20))
+  }
+  bildirimDugmesiniGuncelle()
+  function guncelDm(id) { return dmListesi.find((t) => t.id === id) ?? null }
+  // DM'in bildirim menüsü: "Konuşmayı sessize al" / "Sessizden çıkar" (dm_mutes; bire bir ve grup)
+  function dmBildirimMenusu(thread, opener) {
+    const ad = thread.isGroup ? grupAdi(thread, profile.id) : (thread.other?.username ?? '')
+    openDmNotifyMenu({ opener, ad, sessiz: !!thread.muted, onToggle: () => grupSessiz(thread) })
   }
 
   // Sunucu listesi durumu: 'yukleniyor' | 'hazir' | 'hata'. Karşılama kartı yalnız liste GERÇEKTEN
@@ -1324,6 +1551,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // sunucular yüklenemediyse hata kutusu ve "Yeniden dene" (acikSohbetId = 'hata'); yazılı kanal yoksa 'bos'.
   function cizMain() {
     aramaKapsaminiDenetle()
+    bildirimDugmesiniGuncelle() // 🔔: açık kanalın/DM'in sessizliği
     if (anaSayfa) { cizAnaSayfaMain(); return }
     const kanal = kanallar.find((k) => k.id === yaziliId && k.kind === 'text')
     let anahtar = kanal?.id ?? 'bos' // 'bos': yazılı kanal yok (yükleniyor ya da yalnız sesli kanallar)
@@ -1348,7 +1576,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     } else {
       sohbet = mountChat(sohbetAlani, {
         channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id,
-        headerActions: [mesajArama.kutu, uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(),
+        headerActions: [mesajArama.kutu, bildirimDugmesi, uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(),
         members: uyeSunucusu === sunucuId ? uyeler : [],
         // Roller (v0.11.0): her çizimde yeniden sorulur
         getYetki: () => yetkim(),
@@ -1373,7 +1601,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   const railHandlers = { onSelect: (id) => sunucuSec(id), onAdd: () => sunucuOlustur(), onJoin: () => sunucuyaKatil(), onHome: () => anaSayfayaGec({ tur: 'arkadaslar' }) }
   // Şerit: en üstte Ana sayfa (rozet: okunmamış DM toplamı), sonra sunucular
   function cizSerit() {
-    renderRail(rail, servers, anaSayfa ? null : sunucuId, railHandlers, okunmamis, { selected: anaSayfa, unread: dmUnreadTotal(dmListesi) }, sessizSunucular)
+    renderRail(rail, servers, anaSayfa ? null : sunucuId, railHandlers, okunmamis, { selected: anaSayfa, unread: dmRozetToplami(dmListesi) }, sessizSunucular)
   }
   function cizHepsi() {
     sagPaneliAyarla()
@@ -1491,11 +1719,21 @@ export async function startApp(root, profile, { email = '' } = {}) {
       onRename: async (ad) => { await renameGroup(thread.id, ad); await sosyalTazele() },
     })
   }
+  // Konuşmayı sessize alma (grup paneli ve 🔔 menüsü; v0.13.0'dan beri bire bir de)
   async function grupSessiz(thread) {
+    const sessiz = !(guncelDm(thread.id) ?? thread).muted
     try {
-      if (thread.muted) await unmuteDm(thread.id)
-      else await muteDm(thread.id)
+      if (sessiz) await muteDm(thread.id)
+      else await unmuteDm(thread.id)
     } catch (e) { toast(hataMetni(e), 'hata'); return }
+    if (durduruldu) return
+    sessizDmler = new Set(sessizDmler)
+    if (sessiz) sessizDmler.add(thread.id)
+    else sessizDmler.delete(thread.id)
+    dmListesi = dmListesi.map((t) => (t.id === thread.id ? { ...t, muted: sessiz } : t))
+    if (anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id) anaGorunum = { tur: 'dm', thread: { ...anaGorunum.thread, muted: sessiz } }
+    dmSayilariDegisti()
+    bildirimDugmesiniGuncelle()
     await sosyalTazele()
     if (!durduruldu && anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id) cizUyeler()
   }
@@ -1578,7 +1816,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
         peerStatus: thread.isGroup ? 'offline' : kisiDurumu(varlikHaritasi, thread.other?.id),
         onBottom: () => okunduIsaretle(),
         // 📞 Sesli arama başlat (grupta: Grubu ara / Aramaya katıl (N))
-        headerActions: [mesajArama.kutu, thread.isGroup ? grupAramaDugmesi.button : aramaDugmesi.button],
+        headerActions: [mesajArama.kutu, bildirimDugmesi, thread.isGroup ? grupAramaDugmesi.button : aramaDugmesi.button],
       })
     } else {
       const sayfa = arkadasSayfasiniAl()
@@ -1633,12 +1871,15 @@ export async function startApp(root, profile, { email = '' } = {}) {
   }
   let sonGruplar = [] // grup listesi alınamazsa eskisi kalır (bire bir liste yine güncellenir)
   async function sosyalTek() {
-    const [dm, ark, gr] = await Promise.allSettled([fetchDmList(), fetchFriends(profile.id), fetchGroupList()])
+    const [dm, ark, gr, sz] = await Promise.allSettled([fetchDmList(), fetchFriends(profile.id), fetchGroupList(), fetchMutedDms()])
     if (durduruldu) return
     let dmYenidenKur = false
     if (gr.status === 'fulfilled') sonGruplar = gr.value
+    if (sz.status === 'fulfilled') sessizDmler = sz.value
     if (dm.status === 'fulfilled') {
-      dmListesi = sortDms([...dm.value, ...sonGruplar])
+      // Bire bir konuşmanın sessizliği dm_mutes'tan (dm_list döndürmez); grubunki group_dm_list'ten gelir
+      const birebir = dm.value.map((t) => ({ ...t, muted: sessizDmler.has(t.id) }))
+      dmListesi = sortDms([...birebir, ...sonGruplar])
       // Açık ve okunan DM'in işareti henüz yazılmamış olabilir: sunucudaki eski sayıyı gösterme
       if (dmKaynak && dmOkunuyor(dmKaynak.id)) dmListesi = dmListesi.map((t) => (t.id === dmKaynak.id ? { ...t, unread: 0 } : t))
       // Açık DM'de engel durumu değiştiyse (engellendi / kaldırıldı) sohbet yeni duruma göre yeniden kurulur
@@ -1695,6 +1936,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       myStatusText: varlikHaritasi.get(profile.id)?.statusText ?? '',
       selectedChannelId: kanalId,
       unread: okunmamis,
+      channelMuted: (id) => kanalSessizMi(bildirimAyarlari.kanallar.get(id)), // sessiz kanal soluk (v0.13.0)
       // Çubuktaki Sustur/Sağırlaştır: aramadaysak aramanın durumu, değilsek kayıtlı tercih
       // (sesli kanaldaysak çubuk zaten voice.state'i gösterir)
       audio: arama ? arama.oturum.getState() : getSettings(),
@@ -1732,6 +1974,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
         onAddChannel: kanalEkle,
         onServerMenu: sunucuMenusu,
         onChannelMenu: kanalMenusu,
+        onChannelNotify: (kanal, satir) => kanalBildirimMenusu(kanal, satir, 'sag'),
         onCopyInvite: () => davetKopyala(sunucu),
         onToggleMute: susturmayiDegistir,
         onToggleDeafen: sagirlastirmayiDegistir,
@@ -2025,8 +2268,11 @@ export async function startApp(root, profile, { email = '' } = {}) {
       sahip: sunucu.owner_id === profile.id,
       izinler: yetkim(),
       sessiz: sessizSunucular.has(sunucu.id),
+      duzey: bildirimAyarlari.sunucular.get(sunucu.id) ?? null,
       tik: {
         onInvite: () => davetKopyala(sunucu),
+        onMarkRead: () => { tumunuOkunduSay(sunucu.id) },
+        onLevel: (d) => { sunucuDuzeyiniAyarla(sunucu.id, d) },
         onToggleMute: () => { sessizeAl(sunucu.id, !sessizSunucular.has(sunucu.id)).catch(() => {}) },
         onSettings: () => sunucuAyarlari(sunucu),
         onAddChannel: () => kanalEkle('text'),
@@ -2340,7 +2586,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       .catch(() => { /* sonraki olayda yeniden denenir */ })
   }
   // Yedek: olay kaçmış olabilir; pencere odağa gelince listeler tazelenir
-  const pencereOdaga = () => { listeleriTazele({ sayilar: false }); sosyalTazele(); sessizleriYukle(); okunduIsaretle() }
+  const pencereOdaga = () => { listeleriTazele({ sayilar: false }); sosyalTazele(); sessizleriYukle(); bildirimAyarlariniYukle(); okunduIsaretle() }
   window.addEventListener('focus', pencereOdaga)
 
   // Sunucuya/kanala yazılamadığında (ağ, yetki): Supabase'in İngilizce metni yerine çözüm söyleyen metin
@@ -2465,6 +2711,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   })
   sosyalTazele() // şeritteki DM rozeti ve profil kartı düğmeleri için (beklenmez)
   sessizleriYukle() // sessize alınan sunucular (şeritte soluk simge, bildirim kuralı; beklenmez)
+  bildirimAyarlariniYukle() // bildirim düzeyleri ve kanal sessizliği (v0.13.0; beklenmez)
   // Son seçilen yer Ana sayfaysa oradan açılır (davetle gelindiyse davetin sunucusu açılır)
   if (!kod && yerOku() === 'ana') anaSayfa = true
   try { await sunuculariYukle() } catch (e) { sunucuDurumu = 'hata'; toast(e.message, 'hata') }
