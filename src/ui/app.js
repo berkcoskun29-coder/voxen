@@ -43,7 +43,7 @@ import { renderMemberList } from './memberList.js'
 import { mountVideoPane, buildVideoPeers } from './videoPane.js'
 import { installProfileCards, buildProfileCard } from './profileCard.js'
 import { fetchFriends, sendFriendRequest, acceptFriend, declineFriend, removeFriend, blockUser, unblockUser } from '../data/friends.js'
-import { fetchDmList, openDm, hideDm, dmSource, subscribeAllDmMessages, flushDmReads, resetDmReads } from '../data/dms.js'
+import { fetchDmList, openDm, hideDm, canSendDm, dmSource, subscribeAllDmMessages, flushDmReads, resetDmReads } from '../data/dms.js'
 import { subscribeUserEvents } from '../data/userEvents.js'
 import { fetchMutedServers, muteServer, unmuteServer } from '../data/mutes.js'
 import { fetchProfiles } from '../data/messages.js'
@@ -147,8 +147,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Mesaj arama (v0.10.0): başlıktaki 🔍 kutusu (tek öğe, görünüm değişince başlığa taşınır) ve sonuç paneli
   // (ana alanın sağında; açıkken CSS üye panelini gizler). Kapsam: sunucudayken o sunucu, Ana sayfada DM'ler.
   const mesajArama = createMessageSearch({
-    ara: (cozum, { oncesi }) => searchMessages(anaSayfa ? { tur: 'dm' } : { tur: 'sunucu', id: sunucuId }, cozum, { oncesi }),
-    kapsam: () => (anaSayfa ? 'dm' : 'sunucu'),
+    ara: (cozum, { oncesi }) => searchMessages(anaSayfa || !sunucuId ? { tur: 'dm' } : { tur: 'sunucu', id: sunucuId }, cozum, { oncesi }),
+    kapsam: () => (anaSayfa || !sunucuId ? 'dm' : 'sunucu'),
     bilgi: () => aramaOneriBilgisi(),
     onOpen: (sonuc) => { aramaSonucunuAc(sonuc).catch(() => { /* açılamadı: toast zaten gösterildi */ }) },
   })
@@ -156,6 +156,26 @@ export async function startApp(root, profile, { email = '' } = {}) {
   let aramaKapsami = null // kutunun son kapsamı ('dm' ya da 's:<sunucu>'); değişince kutu boşalır
   let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
   let uyeler = []
+  // v0.12 (inceleme Y2): üye listesi okumaları sırasız bitebilir. Her okuma artan bir numara alır; yalnız en son
+  // uygulanandan daha yeni okumanın sonucu uygulanır (uyeler ve sesli kanalın izin listesi için ayrı ayrı). Eski bir
+  // yanıt, bu arada çıkarılan kişiyi izin listesine geri ekleyemez.
+  let uyeOkumaSayaci = 0
+  let uyelerOkumaNo = 0 // uyeler dizisine en son uygulanan okuma
+  let sesOkumaNo = 0 // sesli kanalın izin listesine en son uygulanan okuma (ya da çıkarma)
+  const yeniUyeOkumasi = () => ++uyeOkumaSayaci
+  // Okuma sonucu uyeler'e uygulanabilir mi (uygulanacaksa numara kaydedilir)
+  function uyelerOkumasiGuncel(no) {
+    if (no < uyelerOkumaNo) return false
+    uyelerOkumaNo = no
+    return true
+  }
+  // Okuma sonucu sesli kanalın izin listesine uygulanır (yalnız daha yeni okumaysa)
+  function sesUyeleriniOkumadanAyarla(no, liste) {
+    if (no < sesOkumaNo) return false
+    sesOkumaNo = no
+    sesUyeleriniAyarla(liste)
+    return true
+  }
   // Roller (v0.11.0): bakılan sunucunun rolleri ve atamaları. Sunucu değişince boşalır (bkz. rolVerisiniSifirla);
   // yüklenene kadar yetki eski kuralla hesaplanır (yalnız sahip yönetir).
   let rolVerisi = { serverId: null, roles: [], memberRoles: [] }
@@ -763,6 +783,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     masaustuBirak = []
     varlik.stop()
     clearTimeout(uyeZamanlayici)
+    clearTimeout(sesYabanciZamanlayici)
     uyeDugmesi.dispose()
     document.removeEventListener('keydown', aramaKisayolu)
     mesajArama.destroy()
@@ -904,11 +925,13 @@ export async function startApp(root, profile, { email = '' } = {}) {
     const id = sunucuId
     uyeYukleniyor = true
     sonUyeYukleme = Date.now()
+    const no = yeniUyeOkumasi()
     listMembers(id)
       .then((liste) => {
         if (sunucuId !== id || durduruldu) return // beklerken sunucu değişti ya da uygulama kapandı
+        if (!uyelerOkumasiGuncel(no)) return // daha yeni bir okuma zaten uygulandı
         uyeler = liste
-        if (ses && id === sesSunucuId) sesUyeleri = liste
+        if (ses && id === sesSunucuId) sesUyeleriniOkumadanAyarla(no, liste)
         if (!anaSayfa) sohbet?.setMembers(liste) // @ önerisi ve @ad etiketleri
         cizUyeler()
         cizKanalPaneli() // sesli kanaldaki kişiler de üye listesinden gelir
@@ -1107,14 +1130,14 @@ export async function startApp(root, profile, { email = '' } = {}) {
   document.addEventListener('keydown', aramaKisayolu)
   // Kapsam değişince (başka sunucu, Sunucu <-> Ana sayfa) kutu boşalır, panel kapanır
   function aramaKapsaminiDenetle() {
-    const k = anaSayfa ? 'dm' : `s:${sunucuId ?? ''}`
+    const k = anaSayfa || !sunucuId ? 'dm' : `s:${sunucuId}`
     if (k === aramaKapsami) return
     aramaKapsami = k
     mesajArama.sifirla()
   }
   // Öneri listesi için adlar: sunucuda üyeler ve metin kanalları; Ana sayfada DM kişileri ve grup üyeleri
   function aramaOneriBilgisi() {
-    if (!anaSayfa) {
+    if (!anaSayfa && sunucuId) {
       return {
         kisiler: uyeler.map((u) => u.username).filter(Boolean),
         kanallar: kanallar.filter((k) => k.kind === 'text').map((k) => k.name),
@@ -1136,10 +1159,17 @@ export async function startApp(root, profile, { email = '' } = {}) {
       else if (yaziliId !== s.channel_id) kanalSec(s.channel_id)
       if (durduruldu || anaSayfa || sunucuId !== s.server_id || acikSohbetId !== s.channel_id) return
     } else {
-      // Listede yoksa (gizlenmiş bire bir konuşma) sonucun bilgisiyle açılır; liste tazelenince güncellenir
-      const thread = dmListesi.find((t) => t.id === s.thread_id) ?? (s.is_group
-        ? { id: s.thread_id, isGroup: true, name: s.yer_adi ?? null, members: [], unread: 0, canSend: true }
-        : { id: s.thread_id, other: { id: s.other_id, username: s.yer_adi ?? '', color: null, avatar_url: null }, createdAt: null, lastMessageAt: null, unread: 0, canSend: true })
+      // Listede yoksa (gizlenmiş bire bir konuşma) sonucun bilgisiyle açılır; liste tazelenince güncellenir.
+      // v0.12 (v10 K1): gizlenmiş bire bir konuşmada karşı taraf engelli olabilir (dm_list onu getirmez):
+      // yazma kutusu açılmadan önce sunucuya sorulur (can_send_dm), sahte "yazılabilir" açılmaz.
+      let thread = dmListesi.find((t) => t.id === s.thread_id)
+      if (!thread && s.is_group) thread = { id: s.thread_id, isGroup: true, name: s.yer_adi ?? null, members: [], unread: 0, canSend: true }
+      if (!thread) {
+        const yazabilir = await canSendDm(s.thread_id).catch(() => false)
+        if (durduruldu) return
+        thread = dmListesi.find((t) => t.id === s.thread_id)
+          ?? { id: s.thread_id, other: { id: s.other_id, username: s.yer_adi ?? '', color: null, avatar_url: null }, createdAt: null, lastMessageAt: null, unread: 0, canSend: yazabilir }
+      }
       if (!(anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id)) openDmView(thread)
       if (!dmListesi.some((t) => t.id === s.thread_id)) sosyalTazele()
       if (durduruldu || acikSohbetId !== `dm:${s.thread_id}`) return
@@ -1291,12 +1321,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Ana alan: sohbet her zaman SON SEÇİLEN YAZILI kanalı gösterir (sesli kanala tıklamak onu değiştirmez).
   // Aynı kanal zaten açıksa yeniden kurmayız; değişince eski sohbetin aboneliği kapatılır.
   // Hiç sunucu yoksa sohbet yerine karşılama kartı çizilir (acikSohbetId = 'karsilama');
-  // sunucular yüklenemediyse hata kutusu ve "Yeniden dene" (acikSohbetId = 'hata').
+  // sunucular yüklenemediyse hata kutusu ve "Yeniden dene" (acikSohbetId = 'hata'); yazılı kanal yoksa 'bos'.
   function cizMain() {
     aramaKapsaminiDenetle()
     if (anaSayfa) { cizAnaSayfaMain(); return }
     const kanal = kanallar.find((k) => k.id === yaziliId && k.kind === 'text')
-    let anahtar = kanal?.id ?? null
+    let anahtar = kanal?.id ?? 'bos' // 'bos': yazılı kanal yok (yükleniyor ya da yalnız sesli kanallar)
     if (sunucuDurumu === 'hata') anahtar = 'hata'
     else if (sunucuDurumu === 'hazir' && servers.length === 0 && !davetIsleniyor) anahtar = 'karsilama'
     if (anahtar === acikSohbetId) return
@@ -1309,9 +1339,13 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (anahtar === 'karsilama') {
       // Düğmeler şeritteki + ve zincir düğmeleriyle aynı pencereleri açar
       sohbetAlani.appendChild(renderWelcome(profile, { onCreate: sunucuOlustur, onJoin: sunucuyaKatil }))
+      yalinBaslik()
     } else if (anahtar === 'hata') {
       sohbetAlani.appendChild(renderLoadError('Sunucular yüklenemedi. Bağlantını kontrol edip yeniden dene.', yenidenDene))
-    } else if (kanal) {
+      yalinBaslik()
+    } else if (!kanal) {
+      yalinBaslik() // yazılı kanalı olmayan sunucu (yalnız sesli kanallar): 🔍 kutusu yine başlıkta
+    } else {
       sohbet = mountChat(sohbetAlani, {
         channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id,
         headerActions: [mesajArama.kutu, uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(),
@@ -1322,6 +1356,18 @@ export async function startApp(root, profile, { email = '' } = {}) {
         herkesAnabilir: (id) => !!sunucuId && yetkiSunucuda(sunucuId, id).has('MENTION_EVERYONE'),
       })
     }
+  }
+
+  // v0.12 (v10 K2): sohbet yokken (karşılama, hata kartı, yazılı kanalı olmayan sunucu) başlıkta yalnız 🔍 kutusu
+  // durur; Ctrl+F de ona odaklanır. Sunucu yokken kutu DM'lerde arar (bkz. aramaSunucusu).
+  function yalinBaslik() {
+    const baslik = document.createElement('div')
+    baslik.className = 'main-header'
+    const sag = document.createElement('div')
+    sag.className = 'header-actions'
+    sag.append(mesajArama.kutu)
+    baslik.appendChild(sag)
+    baslikAlani.appendChild(baslik)
   }
 
   const railHandlers = { onSelect: (id) => sunucuSec(id), onAdd: () => sunucuOlustur(), onJoin: () => sunucuyaKatil(), onHome: () => anaSayfayaGec({ tur: 'arkadaslar' }) }
@@ -1767,7 +1813,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     const oturum = createVoiceSession({ channelId: kanal.id, userId: profile.id, muted: tercih.muted, deafened: tercih.deafened })
     ses = oturum
     sesSunucuId = sunucuId
-    sesUyeleri = uyeSunucusu === sunucuId ? uyeler : [] // üyeler henüz yüklenmediyse yüklenince gelir
+    sesUyeleriniAyarla(uyeSunucusu === sunucuId ? uyeler : []) // üyeler henüz yüklenmediyse yüklenince gelir
     sesAbonelikleriniAyarla()
     guncellemeBandi?.refresh() // sesli kanala girildi: bant gizlenir
     sesKanalAdi = kanal.name
@@ -1779,6 +1825,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       goruntu?.update() // kendi kamera/ekran önizlememiz
     })
     oturum.on('notice', (metin) => { if (ses === oturum) toast(metin) }) // örn. kulaklık uyarısı
+    oturum.on('not-allowed', (id) => { if (ses === oturum) sesYabanciGeldi(id) }) // yeni katılan üye olabilir
     oturum.on('speaking', (konusanlar) => {
       if (ses !== oturum) return
       updateSpeakingRings(panel, konusanlar)
@@ -1953,11 +2000,13 @@ export async function startApp(root, profile, { email = '' } = {}) {
     rolleriYukle(id) // roller üyelerle aynı anda (gelince ilgili yerler yeniden çizilir)
     // Üye listesi (çevrimiçi/çevrimdışı gruplu)
     let uyeListesi = []
+    const no = yeniUyeOkumasi()
     try { uyeListesi = await listMembers(id) } catch (e) { toast(e.message, 'hata') }
     if (sunucuId !== id) return
+    if (!uyelerOkumasiGuncel(no)) return // daha yeni bir okuma (olaydan) zaten uygulandı
     uyeler = uyeListesi
     uyeSunucusu = id
-    if (ses && id === sesSunucuId) { sesUyeleri = uyeListesi; goruntu?.update() }
+    if (ses && id === sesSunucuId) { sesUyeleriniOkumadanAyarla(no, uyeListesi); goruntu?.update() }
     if (!anaSayfa) sohbet?.setMembers(uyeListesi) // @ önerisi ve @ad etiketleri
     cizUyeler()
   }
@@ -2211,19 +2260,78 @@ export async function startApp(root, profile, { email = '' } = {}) {
   function sunucuOlayi(sid, payload) {
     if (durduruldu) return
     if (payload?.tablo === 'server_members' && payload?.islem === 'DELETE' && payload?.user_id === profile.id) ayrildimIdleri.add(sid)
+    if (ses && sid === sesSunucuId && (payload?.yeniden || payload?.tablo === 'server_members')) sesUyeOlayi(sid, payload)
     if (sid === sunucuId && (payload?.yeniden || payload?.tablo === 'server_members')) uyeleriYenile()
     if (sid === sunucuId && payload?.yeniden && !anaSayfa) rolleriGecikmeliYukle() // kaçan "roller" olayı olabilir
     listeleriTazele()
   }
+  // v0.12 (v11 K1): sunucu sesli kanalında yalnız sunucu üyeleriyle bağlantı kurulur. Sunucudan çıkarılan biri
+  // değiştirilmiş bir istemciyle sinyal kanalında kalsa bile dürüst eşler onun teklifine cevap vermez, var olan
+  // bağlantısı da kapanır. Liste henüz yüklenmediyse (boş) herkes serbest kalır; yüklenince süzgeç başlar.
+  const SES_YABANCI_ARALIK_MS = 5000
+  function sesUyeleriniAyarla(liste) {
+    sesUyeleri = liste
+    if (!ses) return
+    ses.setAllowedPeers?.(liste.length ? liste.map((u) => u.id).filter((id) => id !== profile.id) : null)
+  }
+  // Sesli kanalımızın sunucusunda üyelik değişti (katılma, çıkma, çıkarılma) ya da bağlantı yeniden kuruldu (kaçan
+  // olay olabilir): çıkan/çıkarılan kişinin eşi hemen kapanır, liste yeniden okunur (başka sunucuya bakarken de; o
+  // sunucuya bakıyorsak uyeleriYenile zaten okuyor). Yeni katılan liste gelince izinli olur; setAllowedPeers ona
+  // özel hello gönderir.
+  function sesUyeOlayi(sid, payload) {
+    if (payload.islem === 'DELETE' && payload.user_id && payload.user_id !== profile.id && sesUyeleri.length) {
+      // Çıkarma da bir "okuma" sayılır: ondan önce başlamış okumaların (eski) sonucu artık uygulanmaz
+      sesUyeleriniOkumadanAyarla(yeniUyeOkumasi(), sesUyeleri.filter((u) => u.id !== payload.user_id))
+      goruntu?.update()
+    }
+    if (sid === sunucuId) return
+    sesUyeleriniOku(sid)
+  }
+  // İzin listesinde olmayan birinden hello/teklif geldi: olay kaçmış ya da gecikmiş olabilir (yeni katılan üye).
+  // Liste yeniden okunur. Sınırlar (çıkarılmış ya da sahte "from" gönderen biri sorgu yağmuru açamasın):
+  //  - aynı kişi için en çok 5 sn'de bir (harita 100 kişiyi geçince boşaltılır);
+  //  - inceleme Y3: bütün kişiler için toplam en çok 5 sn'de bir okuma. Pencere içinde gelen istek atılmaz,
+  //    pencere bitince TEK bir okuma yapılır (yeni üyenin hello'su kaybolmasın).
+  // Üyeyse setAllowedPeers ona özel hello gönderir, bağlantı kurulur; değilse yok sayılmaya devam eder.
+  const sesYabanciZamani = new Map() // userId -> son istek zamanı
+  let sesYabanciSonOkuma = -Infinity // son (yabancı kaynaklı) okumanın zamanı
+  let sesYabanciZamanlayici = null // pencere sonunda yapılacak tek okuma
+  function sesYabanciGeldi(id) {
+    if (!id || !ses || !sesSunucuId || durduruldu) return
+    const simdi = Date.now()
+    if (simdi - (sesYabanciZamani.get(id) ?? -Infinity) < SES_YABANCI_ARALIK_MS) return
+    if (sesYabanciZamani.size >= 100) sesYabanciZamani.clear()
+    sesYabanciZamani.set(id, simdi)
+    if (sesYabanciZamanlayici) return // pencere sonundaki okuma zaten bekliyor
+    const bekle = sesYabanciSonOkuma + SES_YABANCI_ARALIK_MS - simdi
+    if (bekle <= 0) { sesYabanciOku(); return }
+    sesYabanciZamanlayici = setTimeout(() => { sesYabanciZamanlayici = null; sesYabanciOku() }, bekle)
+  }
+  function sesYabanciOku() {
+    if (!ses || !sesSunucuId || durduruldu) return
+    sesYabanciSonOkuma = Date.now()
+    sesUyeleriniOku(sesSunucuId)
+  }
+  function sesUyeleriniOku(sid) {
+    const no = yeniUyeOkumasi()
+    listMembers(sid)
+      .then((liste) => {
+        if (durduruldu || !ses || sesSunucuId !== sid) return
+        if (sesUyeleriniOkumadanAyarla(no, liste)) goruntu?.update()
+      })
+      .catch(() => { /* sonraki olayda yeniden denenir */ })
+  }
   function uyeleriYenile() {
     const id = sunucuId
     if (!id) return
+    const no = yeniUyeOkumasi()
     listMembers(id)
       .then((liste) => {
         if (sunucuId !== id || durduruldu) return
+        if (!uyelerOkumasiGuncel(no)) return // daha yeni bir okuma zaten uygulandı
         uyeler = liste
         uyeSunucusu = id
-        if (ses && id === sesSunucuId) sesUyeleri = liste
+        if (ses && id === sesSunucuId) sesUyeleriniOkumadanAyarla(no, liste)
         if (!anaSayfa) sohbet?.setMembers(liste) // @ önerisi ve @ad etiketleri
         cizUyeler()
         cizKanalPaneli()

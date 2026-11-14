@@ -55,6 +55,43 @@ describe('PeerMesh.setAllowedPeers', () => {
     expect(bus.sent.some((s) => s.msg.type === 'hello' && s.msg.from === 'aaa' && s.msg.to === 'yyy')).toBe(true)
   })
 
+  it('v0.12 (v11 K1): herkes serbestken liste verilince kimseye hello gitmez; listede olmayanın teklifi yok sayılır', async () => {
+    const a = esKur('aaa')
+    const b = esKur('bbb')
+    a.join(); b.join()
+    await akit()
+    const once = bus.sent.length
+    a.setAllowedPeers(['bbb', 'ccc']) // sunucu üyeleri (ccc kanalda değil)
+    await akit()
+    expect(bus.sent.slice(once).some((s) => s.msg.from === 'aaa' && s.msg.type === 'hello')).toBe(false)
+    expect(bagli(a)).toEqual(['bbb'])
+    // Sunucudan çıkarılmış (listede olmayan) değiştirilmiş istemci doğrudan teklif gönderir: a cevap vermez
+    const x = esKur('xxx')
+    x.setAllowedPeers(null)
+    x.join()
+    await akit()
+    expect(bagli(a)).toEqual(['bbb'])
+    expect(bus.sent.some((s) => s.msg.from === 'aaa' && s.msg.to === 'xxx')).toBe(false)
+  })
+
+  it('inceleme KR1: izin listesinde olmayandan hello/teklif gelince "peer-not-allowed" yayılır; sonra izin verilince bağlanılır', async () => {
+    const a = esKur('aaa')
+    const reddedilen = []
+    a.on('peer-not-allowed', ({ userId }) => reddedilen.push(userId))
+    a.join()
+    a.setAllowedPeers([])
+    a.setAllowedPeers(['bbb']) // bbb henüz kanalda değil
+    await akit()
+    const y = esKur('yyy') // yeni katılan üye: a'nın listesi bayat
+    y.join()
+    await akit()
+    expect(reddedilen).toContain('yyy')
+    expect(bagli(a)).toEqual([])
+    a.setAllowedPeers(['bbb', 'yyy']) // uygulama listeyi tazeledi
+    await akit()
+    expect(bagli(a)).toEqual(['yyy'])
+  })
+
   it('null: herkes (sesli kanal ve bire bir arama davranışı değişmez)', async () => {
     const a = esKur('aaa')
     const b = esKur('bbb')

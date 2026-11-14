@@ -5,7 +5,7 @@ import { supabase } from '../lib/supabase.js'
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../config.js'
 import { rpcHatasi } from './friends.js'
 import { EK_SECIMI } from './sorgular.js'
-import { EK_KOVASI, EK_METINLERI, IMZA_SURESI, KOTA } from './ekKurallari.js'
+import { EK_KOVASI, EK_METINLERI, IMZA_SURESI, KOTA, turYasakMi } from './ekKurallari.js'
 import { isTauri } from '../desktop.js'
 
 const MAX_UZUNLUK = 2000
@@ -32,15 +32,19 @@ function yuklemeHatasi(durum, metin) {
 }
 
 // Politika reddinde kota doluysa QUOTA metni (depodaki toplam 150 MB'a ulaştıysa yükleme politikası reddeder;
-// Storage hatası nedeni söylemez). Kota dolu değilse ya da bilinemezse asıl hata kalır.
-async function kotaMi(hata) {
+// Storage hatası nedeni söylemez). v0.12 (v08 K-4): kota dolu değilse nedeni yoldan tahmin edilir: yasaklı tür
+// ise BLOCKED_TYPE; değilse "izin yok" metni (üyelik düşmüş, DM engeli). Kod UPLOAD kalır.
+async function kotaMi(hata, yol, tur) {
   if (!hata?.reddedildi) return hata
   const kullanilan = await kullanimim()
-  if (kullanilan == null || kullanilan < KOTA) return hata
-  const e = new Error(EK_METINLERI.QUOTA)
-  e.code = 'QUOTA'
+  let kod = 'UPLOAD'
+  if (kullanilan != null && kullanilan >= KOTA) kod = 'QUOTA'
+  else if (turYasakMi(yol, tur)) kod = 'BLOCKED_TYPE'
+  const e = new Error(kod === 'UPLOAD' ? YUKLEME_REDDEDILDI : EK_METINLERI[kod])
+  e.code = kod
   return e
 }
+const YUKLEME_REDDEDILDI = 'Dosya buraya yüklenemedi. Buraya dosya gönderme iznin olmayabilir.'
 
 // Tek dosyayı depoya yükler. onProgress(0..1) yükledikçe çağrılır.
 // İlerleme için XMLHttpRequest ile Storage REST adresine yazılır (supabase-js ilerleme vermez).
@@ -49,7 +53,7 @@ export async function uploadFile(yol, govde, tur, secenek = {}) {
   try {
     await yukleHam(yol, govde, tur, secenek)
   } catch (e) {
-    throw await kotaMi(e)
+    throw await kotaMi(e, yol, tur)
   }
 }
 

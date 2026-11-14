@@ -157,6 +157,14 @@ describe('yükleme', () => {
     fake.rpc.mockImplementation(async () => ({ data: 10, error: null }))
     await expect(uploadFile('y', new Blob([]), 'x')).rejects.toMatchObject({ code: 'UPLOAD' })
   })
+  it('v0.12 (v08 K-4): kota boşken politika reddi: yasaklı türde "Bu dosya türü gönderilemez.", değilse izin metni', async () => {
+    SahteXHR.durum = 403; SahteXHR.yanit = JSON.stringify({ message: 'new row violates row-level security policy' })
+    fake.rpc.mockImplementation(async () => ({ data: 10, error: null }))
+    await expect(uploadFile('k/c1/u1/id-kur.exe', new Blob([]), 'application/octet-stream'))
+      .rejects.toMatchObject({ code: 'BLOCKED_TYPE', message: 'Bu dosya türü gönderilemez.' })
+    await expect(uploadFile('k/c1/u1/id-a.txt', new Blob([]), 'application/octet-stream'))
+      .rejects.toMatchObject({ code: 'UPLOAD', message: 'Dosya buraya yüklenemedi. Buraya dosya gönderme iznin olmayabilir.' })
+  })
   it('hatalar Türkçe: 413 -> çok büyük; mime -> tür; diğer -> UPLOAD', async () => {
     SahteXHR.durum = 413
     await expect(uploadFile('y', new Blob([]), 'x')).rejects.toMatchObject({ code: 'TOO_LARGE', message: 'Dosya çok büyük (en fazla 8 MB).' })

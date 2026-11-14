@@ -131,6 +131,9 @@ vi.mock('../src/voice/session.js', async (asil) => {
     createVoiceSession: (o) => {
       const s = m.createVoiceSession(o)
       if (fake.joinHatasi) s.join = () => Promise.reject(new Error('katılamadı')) // DM araması: katılma hatası
+      // 'not-allowed' dinleyicisini yakala (v0.12: izin listesinde olmayandan hello)
+      const asilOn = s.on
+      s.on = (olay, cb) => { if (olay === 'not-allowed') fake.notAllowed = cb; return asilOn(olay, cb) }
       const asilFn = s.setRoomScreenOn
       s.setRoomScreenOn = vi.fn((b) => asilFn?.(b))
       fake.oturum = s
@@ -504,6 +507,145 @@ describe('sesli kanaldayken başka sunucuya bakmak', () => {
     ;[...document.querySelector('.voice-panel').querySelectorAll('button')].find((b) => b.dataset.ad === 'Ayrıl').click()
     await bosalt()
     expect(fake.vs).toBe(1)
+  })
+})
+
+describe('v0.12 (v11 K1): sunucu sesli kanalında yalnız üyelerle bağlantı', () => {
+  const srvOlay = (sid, payload) => { for (const h of fake.srvHandlers) if (h.server === sid && h.event === 'degisti') h.cb({ payload }) }
+  it('üye listesi oturuma izin listesi olarak verilir; çıkarılan kişinin eşi hemen kapanır', async () => {
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }, { user_id: 'u3' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }, { id: 'u3', username: 'can', color: '#e05b5b' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    const izin = vi.spyOn(fake.oturum, 'setAllowedPeers')
+    // u3 çıkarıldı: olay gelir gelmez u3 izin listesinden düşer (liste yeniden okunmadan önce)
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }]
+    srvOlay('s1', { tablo: 'server_members', islem: 'DELETE', server_id: 's1', user_id: 'u3' })
+    expect(izin).toHaveBeenCalledWith(['u2'])
+    await bosalt()
+    expect(izin).toHaveBeenLastCalledWith(['u2'])
+  })
+
+  it('başka sunucuya bakarken de sesli sunucunun üyelik olayı izin listesini günceller', async () => {
+    fake.rows.servers.push({ id: 's2', name: 'T', owner_id: 'u1', invite_code: 'k2' })
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u2' }, { user_id: 'u3' }]
+    fake.rows.profiles = [profil, { id: 'u2', username: 'ali', color: '#e05b5b' }, { id: 'u3', username: 'can', color: '#e05b5b' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    fake.rows.channels = [{ id: 'x', server_id: 's2', name: 'baska', kind: 'text', position: 0 }]
+    document.querySelectorAll('.server-icon')[1].click()
+    await bosalt()
+    const izin = vi.spyOn(fake.oturum, 'setAllowedPeers')
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'u3' }]
+    fake.rows.profiles = [profil, { id: 'u3', username: 'can', color: '#e05b5b' }]
+    srvOlay('s1', { tablo: 'server_members', islem: 'DELETE', server_id: 's1', user_id: 'u2' })
+    await bosalt()
+    expect(izin).toHaveBeenCalledWith(['u3'])
+    expect(izin).toHaveBeenLastCalledWith(['u3'])
+  })
+})
+
+describe('v0.12 inceleme KR1/K1: sesli kanalda izin listesi tazelenir', () => {
+  const srvOlay = (sid, payload) => { for (const h of fake.srvHandlers) if (h.server === sid && h.event === 'degisti') h.cb({ payload }) }
+  const uyelerKur = (ids) => {
+    fake.rows.server_members = ids.map((id) => ({ user_id: id }))
+    fake.rows.profiles = ids.map((id) => (id === 'u1' ? profil : { id, username: 'k' + id, color: '#e05b5b' }))
+  }
+  async function sesliKanalda({ baskaSunucu = false } = {}) {
+    if (baskaSunucu) fake.rows.servers.push({ id: 's2', name: 'T', owner_id: 'u1', invite_code: 'k2' })
+    uyelerKur(['u1', 'u2'])
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    kanalaTikla('Lobi')
+    await bosalt()
+    if (baskaSunucu) {
+      fake.rows.channels = [{ id: 'x', server_id: 's2', name: 'baska', kind: 'text', position: 0 }]
+      document.querySelectorAll('.server-icon')[1].click()
+      await bosalt()
+    }
+    return vi.spyOn(fake.oturum, 'setAllowedPeers')
+  }
+
+  it('sunucuya yeni katılan (server_members INSERT olayı): liste yeniden okunur, yeni üye izinli olur', async () => {
+    for (const baskaSunucu of [false, true]) {
+      const izin = await sesliKanalda({ baskaSunucu })
+      uyelerKur(['u1', 'u2', 'u3'])
+      srvOlay('s1', { tablo: 'server_members', islem: 'INSERT', server_id: 's1', user_id: 'u3' })
+      await bosalt()
+      expect(izin).toHaveBeenLastCalledWith(['u2', 'u3'])
+      stopApp()
+      document.body.innerHTML = '<div id="app"></div>'
+      fake.rows.servers = [{ id: 's1', name: 'S', owner_id: 'u1', invite_code: 'k' }]
+      fake.rows.channels = kanallar
+    }
+  })
+
+  it('başka sunucuya bakarken bağlantı yeniden kurulunca ({ yeniden }) sesli sunucunun listesi yeniden okunur', async () => {
+    const izin = await sesliKanalda({ baskaSunucu: true })
+    uyelerKur(['u1', 'u3'])
+    srvOlay('s1', { yeniden: true })
+    await bosalt()
+    expect(izin).toHaveBeenLastCalledWith(['u3'])
+  })
+
+  it('izin listesinde olmayandan hello gelince liste bir kez okunur (aynı kişi için 5 saniyede bir); üyeyse izinli olur', async () => {
+    const izin = await sesliKanalda()
+    const okumalar = () => fake.from.mock.calls.filter(([t]) => t === 'server_members').length
+    const once = okumalar()
+    uyelerKur(['u1', 'u2', 'u3'])
+    const sesYabanciTetikle = (id) => fake.notAllowed(id)
+    sesYabanciTetikle('u3')
+    await bosalt()
+    expect(okumalar()).toBe(once + 1)
+    expect(izin).toHaveBeenLastCalledWith(['u2', 'u3'])
+    // u9 (aynı 5 sn içinde): genel sınır (inceleme Y3) yüzünden hemen okunmaz; aynı kişinin tekrarı da atılır
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      sesYabanciTetikle('u9')
+      sesYabanciTetikle('u9')
+      sesYabanciTetikle('u8')
+      await bosalt()
+      expect(okumalar()).toBe(once + 1)
+      await vi.advanceTimersByTimeAsync(5100) // pencere bitti: bekleyen istekler için TEK okuma
+      await bosalt()
+      expect(okumalar()).toBe(once + 2)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('inceleme Y3: sahte "from" yağmuru 5 sn’de en çok bir okuma yapar', async () => {
+    await sesliKanalda()
+    const okumalar = () => fake.from.mock.calls.filter(([t]) => t === 'server_members').length
+    const once = okumalar()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      for (let i = 0; i < 50; i++) fake.notAllowed('sahte' + i)
+      await bosalt()
+      expect(okumalar()).toBe(once + 1)
+      await vi.advanceTimersByTimeAsync(5100)
+      await bosalt()
+      expect(okumalar()).toBe(once + 2)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('inceleme Y2: çıkarmadan önce başlamış eski okuma, çıkarılanı izin listesine geri eklemez', async () => {
+    const izin = await sesliKanalda()
+    uyelerKur(['u1', 'u2', 'u3'])
+    let birak
+    fake.membersGate = new Promise((r) => { birak = r })
+    fake.notAllowed('u3') // eski okuma başlar (u3 hâlâ üye görünür), bekletiliyor
+    fake.membersGate = null
+    uyelerKur(['u1', 'u2'])
+    srvOlay('s1', { tablo: 'server_members', islem: 'DELETE', server_id: 's1', user_id: 'u3' })
+    await bosalt()
+    expect(izin).toHaveBeenLastCalledWith(['u2'])
+    birak()
+    await bosalt()
+    expect(izin).toHaveBeenLastCalledWith(['u2']) // eski yanıt uygulanmadı
   })
 })
 
@@ -2779,6 +2921,57 @@ describe('mesaj arama (v0.10.0)', () => {
     expect(document.querySelector('textarea').placeholder).toBe('@ali kişisine mesaj gönder')
     expect(document.querySelector('.header-host .header-actions .search-box')).not.toBeNull()
     expect(document.querySelector('.message[data-id="7"]').classList.contains('flash')).toBe(true)
+  })
+
+  it('v0.12 (v10 K1): listede olmayan (gizlenmiş) bire bir DM sonucu, sunucuya sorulmadan yazılabilir açılmaz', async () => {
+    for (const yazabilir of [false, true]) {
+      supabase.rpc.mockReset()
+      rpcKur()
+      const asil = supabase.rpc.getMockImplementation()
+      supabase.rpc.mockImplementation(async (ad, arg) => (ad === 'can_send_dm' ? { data: yazabilir, error: null } : asil(ad, arg)))
+      await startApp(document.querySelector('#app'), profil)
+      await bosalt()
+      document.querySelector('.rail-home').click()
+      await bosalt()
+      sonuclar = [sonucSatiri({ tur: 'dm', channel_id: null, server_id: null, thread_id: 't9', yer_adi: 'veli', other_id: 'u9' })]
+      fake.rows.dm_messages = [{ id: 7, thread_id: 't9', author_id: 'u9', content: 'm7 merhaba', edited_at: null, deleted_at: null, created_at: '2026-11-13T10:07:00Z' }]
+      ara('merhaba')
+      await bosalt()
+      document.querySelector('.search-result-go').click()
+      await bosalt()
+      await bosalt()
+      expect(supabase.rpc.mock.calls.some(([a, arg]) => a === 'can_send_dm' && arg.tid === 't9')).toBe(true)
+      expect(document.querySelector('.message[data-id="7"]')).not.toBeNull()
+      expect(!!document.querySelector('textarea')).toBe(yazabilir)
+      stopApp()
+      document.body.innerHTML = '<div id="app"></div>'
+    }
+  })
+
+  it('v0.12 (v10 K2): yazılı kanalı olmayan sunucuda ve karşılama ekranında da 🔍 başlıkta, Ctrl+F odaklar', async () => {
+    rpcKur()
+    fake.rows.channels = [{ id: 'v', server_id: 's1', name: 'Lobi', kind: 'voice', position: 0 }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.header-host .header-actions .search-box')).not.toBeNull()
+    const olay = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })
+    document.body.dispatchEvent(olay)
+    expect(olay.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(girdi())
+    ara('merhaba')
+    await bosalt()
+    expect(aramaCagrilari().at(-1)[1]).toMatchObject({ sunucu: 's1' })
+    stopApp()
+    // Hiç sunucu yok: karşılama kartı + kutu; arama DM'lerde
+    document.body.innerHTML = '<div id="app"></div>'
+    fake.rows.servers = []
+    fake.rows.channels = []
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.header-host .header-actions .search-box')).not.toBeNull()
+    ara('merhaba')
+    await bosalt()
+    expect(aramaCagrilari().at(-1)[1]).toMatchObject({ sunucu: null })
   })
 
   it('stopApp kutuyu ve paneli kaldırır, Ctrl+F artık yakalanmaz', async () => {

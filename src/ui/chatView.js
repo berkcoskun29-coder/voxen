@@ -1180,6 +1180,13 @@ export function mountChat(container, { source = null, channel = null, profile, i
       } catch (err) {
         // Kapanmışsak ve gönderim düştüyse dosyalar yetim kalmasın
         if (kapandi) Promise.resolve(kaynak.removeFiles?.(gonderilen.map((e) => e.yol))).catch(() => {})
+        // v0.12 (v08 K-3): BAD_ATTACHMENT, yüklenmiş dosya depoda artık yok demek olabilir (örn. başka cihazdaki
+        // yetim temizliği 1 saatten eski bekleyen eki sildi). Bir sonraki deneme dosyaları yeniden yüklesin.
+        // Eski yollar SİLİNMEZ: aynı kod "yol zaten bir mesaja bağlı" da demek olabilir (önceki gönderim sunucuda
+        // başarılı olup yanıtı kaybolduysa); silmek o mesajın eklerini bozardı. Gerçekten bağsızsa yetim temizliği siler.
+        if (!kapandi && err?.code === 'BAD_ATTACHMENT') {
+          for (const e of gonderilen) { e.yol = null; e.durum = 'hazir'; e.ilerleme = 0 }
+        }
         throw err
       } finally {
         gonderilen.forEach((e) => gonderimdekiler.delete(e))

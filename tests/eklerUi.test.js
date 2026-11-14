@@ -275,6 +275,24 @@ describe('gönderme', () => {
     expect(kaynak.sendWithAttachments).toHaveBeenCalledTimes(1)
     expect(kartlar().length).toBe(0)
   })
+  it('v0.12 (v08 K-3, inceleme Ö1): BAD_ATTACHMENT gelirse eski yol SİLİNMEZ, bir sonraki gönderimde dosya yeniden yüklenir', async () => {
+    const { kaynak } = await kur([])
+    await sec(dosya('a.txt', 'text/plain'))
+    kaynak.sendWithAttachments.mockImplementationOnce(async () => { const e = new Error('Ek gönderilemedi. Tekrar dene.'); e.code = 'BAD_ATTACHMENT'; throw e })
+    tus(kutu(), 'Enter')
+    await bosalt()
+    expect(toastMetni()).toContain('Ek gönderilemedi. Tekrar dene.')
+    const eskiYol = fake.uploadFile.mock.calls[0][0]
+    expect(kaynak.removeFiles).not.toHaveBeenCalled() // ilk gönderim sunucuda başarılı olmuş olabilir
+    expect(kartlar().length).toBe(1)
+    tus(kutu(), 'Enter')
+    await bosalt()
+    expect(fake.uploadFile).toHaveBeenCalledTimes(2) // yeniden yüklendi
+    const yeniYol = fake.uploadFile.mock.calls[1][0]
+    expect(yeniYol).not.toBe(eskiYol)
+    expect(kaynak.sendWithAttachments.mock.calls[1][1][0].path).toBe(yeniYol)
+    expect(kartlar().length).toBe(0)
+  })
   it('kota dolu: yükleme başlamaz, uyarı çıkar; sunucu QUOTA dönerse metin çıkar, kartlar kalır', async () => {
     const { kaynak } = await kur([])
     await sec(dosya('a.txt', 'text/plain'))

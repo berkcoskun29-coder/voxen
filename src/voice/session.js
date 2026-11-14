@@ -71,7 +71,7 @@ export function createVoiceSession({ channelId, topic, userId, muted = false, de
   const uzakIzler = new Map() // userId -> { camera, screen, screenAudio } (gelen izler)
   const ekranSesleri = new Map() // userId -> ekran sesi için <audio> (mikrofon sesinden ayrı)
   const ekranAyari = new Map() // userId -> { volume: 0..1, hidden } (izleyenin kendi tercihi)
-  const dinleyiciler = { change: new Set(), speaking: new Set(), notice: new Set(), tracks: new Set() }
+  const dinleyiciler = { change: new Set(), speaking: new Set(), notice: new Set(), tracks: new Set(), 'not-allowed': new Set() }
   const karsiDurumlari = new Map() // shareState: userId -> { muted, deafened, camera, screen } (karşının bildirdiği)
   let sonGonderilen = '' // shareState: en son gönderdiğimiz durum (değişmediyse yeniden gönderme)
 
@@ -256,6 +256,8 @@ export function createVoiceSession({ channelId, topic, userId, muted = false, de
         yay('tracks') // görüntü bölmesi karşının kamera/ekran durumunu yeniden okusun
       })
     }
+    // İzin listesinde olmayan birinden tanışma iletisi: uygulama üye listesini tazeleyebilsin (v0.12)
+    mesh.on('peer-not-allowed', ({ userId: id }) => { for (const cb of dinleyiciler['not-allowed']) cb(id) })
     mesh.on('connect-failed', durumuGuncelle)
     mesh.on('failed-change', durumuGuncelle)
     mesh.join()
@@ -506,8 +508,9 @@ export function createVoiceSession({ channelId, topic, userId, muted = false, de
       izinliEsler = ids == null ? null : [...ids]
       mesh?.setAllowedPeers?.(izinliEsler)
     },
-    // olay: 'change' (durum/susturma/hata), 'speaking' (konuşanlar kümesi)
-    // ya da 'tracks' (karşının kamera/ekran izleri ya da bir eşin bağlantısı değişti)
+    // olay: 'change' (durum/susturma/hata), 'speaking' (konuşanlar kümesi),
+    // 'tracks' (karşının kamera/ekran izleri ya da bir eşin bağlantısı değişti)
+    // ya da 'not-allowed' (cb(userId): izin listesinde olmayan birinden hello/teklif geldi)
     on(olay, cb) {
       dinleyiciler[olay].add(cb)
       return () => dinleyiciler[olay].delete(cb)

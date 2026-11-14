@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   IZINLER, IZIN_ADLARI, ROL_RENKLERI, EN_UST_SIRA, rolRengiCss, siraliRoller, kisininRolleri, ustSira, yetkiHesapla,
-  rolDuzenlenebilir, rolSilinebilir, rolTasinabilir, izinDegistirilebilir, rolAtanabilir, cikarilabilir, kisiGorunumu, uyeGruplari,
+  rolDuzenlenebilir, rolSilinebilir, rolTasinabilir, rolOlusturulabilir, izinDegistirilebilir, rolAtanabilir, cikarilabilir, kisiGorunumu, uyeGruplari,
 } from '../src/data/rolKurallari.js'
 
 const SAHIP = 'sahip'
@@ -61,6 +61,17 @@ describe('hiyerarşi (SQL ile aynı)', () => {
     expect(rolDuzenlenebilir(ali, herkes)).toBe(true)
     expect(rolDuzenlenebilir(y('ayla'), dj)).toBe(false) // MANAGE_ROLES yok
     expect(rolDuzenlenebilir(y(SAHIP), yonetici)).toBe(true)
+  })
+  it('v0.12 (v11 K3): rol oluşturma: sahip ya da en az bir rolü olan rol yöneticisi; yalnız @herkes üzerinden alan hayır', () => {
+    expect(rolOlusturulabilir(y(SAHIP))).toBe(true)
+    expect(rolOlusturulabilir(y('ali'))).toBe(true)
+    expect(rolOlusturulabilir(y('ayla'))).toBe(false) // MANAGE_ROLES yok
+    const herkesYonetir = { ...herkes, permissions: ['MANAGE_ROLES'] }
+    const rolsuz = yetkiHesapla({ server, roles: [herkesYonetir, dj], memberRoles: [], userId: 'yeni' })
+    expect(rolsuz.has('MANAGE_ROLES')).toBe(true)
+    expect(rolOlusturulabilir(rolsuz)).toBe(false)
+    const djli = yetkiHesapla({ server, roles: [herkesYonetir, dj], memberRoles: [{ user_id: 'yeni', role_id: 'r1' }], userId: 'yeni' })
+    expect(rolOlusturulabilir(djli)).toBe(true) // sıra 1: yeni rol 1'e girer, DJ 2'ye kayar
   })
   it('silme/taşıma: @herkes asla; hedef de üst sıranın altında', () => {
     const ali = y('ali')

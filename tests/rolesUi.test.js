@@ -152,6 +152,12 @@ describe('Roller paneli', () => {
     expect(acik.sort()).toEqual(['MANAGE_MESSAGES', 'MANAGE_ROLES'])
   })
 
+  it('v0.12 (v11 K3): yetkisi yalnız @herkes üzerinden gelen (rolsüz) kişide "Rol oluştur" gizli', () => {
+    const herkesYonetir = roles.map((r) => (r.is_default ? { ...r, permissions: ['MANAGE_ROLES'] } : r))
+    kur('rolsuz', herkesYonetir)
+    expect(document.querySelector('.roles-create').hidden).toBe(true)
+  })
+
   it('yetkisiz: oluştur düğmesi yok, her şey kilitli', () => {
     kur('yabanci')
     expect(document.querySelector('.roles-create').hidden).toBe(true)

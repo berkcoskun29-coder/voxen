@@ -88,6 +88,14 @@ export function rolDuzenlenebilir(yetki, rol) {
   return rol.position < yetki.ustSira
 }
 
+// Rol oluşturabilir miyim? Yeni rol @herkes'in hemen üstüne (sıra 1) eklenir, var olan roller bir kayar.
+// v0.12 (v11 K3): rolü olmayan (yetkisi yalnız @herkes'ten gelen, üst sırası 0) kişi oluşturduğu rolü
+// yönetemezdi; ona düğme gösterilmez (sunucu ROLE_HIERARCHY verir). SQL create_role ile aynı kural.
+export function rolOlusturulabilir(yetki) {
+  if (!yetki?.has('MANAGE_ROLES')) return false
+  return yetki.sahip || yetki.ustSira >= 1
+}
+
 // Silebilir / taşıyabilir miyim? (@herkes hiçbir zaman)
 export function rolSilinebilir(yetki, rol) {
   return !!rol && !rol.is_default && rolDuzenlenebilir(yetki, rol)

@@ -55,6 +55,14 @@ export async function openDm(otherId) {
   return data
 }
 
+// Bu konuşmaya yazabilir miyim? (can_send_dm: taraf/üye ve engel yok). Listede olmayan (gizlenmiş) konuşma
+// arama sonucundan açılırken kullanılır. Hata ya da belirsizlikte false (kutu kapalı açılır; sunucu zaten reddeder).
+export async function canSendDm(threadId) {
+  const { data, error } = await supabase.rpc('can_send_dm', { tid: threadId })
+  if (error) return false
+  return data === true
+}
+
 // Konuşmayı listeden gizler (mesajlar silinmez; yeni mesaj gelince yine görünür)
 export async function hideDm(threadId) {
   const { error } = await supabase.rpc('hide_dm', { tid: threadId })

@@ -15,7 +15,7 @@
 // Kullanıcı yazıları (rol adları) textContent ile basılır.
 import {
   IZINLER, ROL_RENKLERI, ROL_ADI_EN_UZUN, rolRengiCss, siraliRoller, rolDuzenlenebilir, rolSilinebilir, rolTasinabilir,
-  izinDegistirilebilir,
+  izinDegistirilebilir, rolOlusturulabilir,
 } from '../data/rolKurallari.js'
 import { createModalShell } from './modal.js'
 
@@ -102,7 +102,7 @@ export function mountRolesPanel({ getDurum, islemler }) {
   function listeyiCiz() {
     const { roles, yetki } = durum()
     const anahtar = odakAnahtari()
-    olusturDugmesi.hidden = !yetki?.has('MANAGE_ROLES')
+    olusturDugmesi.hidden = !rolOlusturulabilir(yetki) // v11 K3: rolsüz (yalnız @herkes) yönetici oluşturamaz
     liste.replaceChildren()
     const sirali = siraliRoller(roles)
     const enUst = sirali.filter((r) => !r.is_default).length

@@ -90,8 +90,9 @@ export class PeerMesh {
     this.uploadMbps = AYAR_VARSAYILAN.uploadMbps // görüntü bütçesinin kaynağı (ayarlardan gelir)
     this.ekranModu = 'net'
     this.odadaEkran = false // kanalda BAŞKA biri ekran paylaşıyor mu (voice_states'ten, uygulama bildirir)
-    // İzinli eşler (grup araması): null = herkes (sesli kanal, bire bir arama). Set verilince listede olmayan
-    // eşin bağlantısı kapanır ve sinyalleri (bye dışında) yok sayılır (gruptan çıkarılan eş kalamasın).
+    // İzinli eşler (grup araması; v0.12'den beri sunucu sesli kanalında üye listesi): null = herkes (bire bir
+    // arama). Set verilince listede olmayan eşin bağlantısı kapanır ve sinyalleri (bye dışında) yok sayılır
+    // (gruptan ya da sunucudan çıkarılan eş kalamasın).
     this.izinliler = null
   }
 
@@ -102,6 +103,7 @@ export class PeerMesh {
   // 'failed-change' (bağlanamayan eş sayısı değişti; bkz. failedPeerCount),
   // 'peer-track' {peerId, slot, track} (karşının kamera/ekran/ekran sesi izi geldi; track null = kalktı).
   // 'peer-state' {userId, muted, deafened, camera, screen} (karşı tarafın sendState ile bildirdiği durum).
+  // 'peer-not-allowed' {userId} (izin listesinde olmayan birinden hello/teklif geldi ve yok sayıldı).
   //   Not: iz bağlantı kurulurken gelir ve karşı paylaşmıyorsa sessizdir (muted). Gösterip gizleme
   //   kararı presence + izin mute/unmute olaylarıyla verilir (arayüz görevi).
   on(olay, cb) {
@@ -110,9 +112,10 @@ export class PeerMesh {
     return () => this.dinleyiciler.get(olay)?.delete(cb)
   }
 
-  // Grup araması: yalnız bu kişilerle bağlantı kurulur (null = herkes). Listeden çıkanın bağlantısı hemen
-  // kapanır; yeni izin verilen ve henüz bağlı olmadığımız kişiye özel hello gider (onun hello'su biz
-  // izin vermeden geldiyse yok sayılmıştı).
+  // Grup araması ve sunucu sesli kanalı: yalnız bu kişilerle bağlantı kurulur (null = herkes). Listeden çıkanın
+  // bağlantısı hemen kapanır; yeni izin verilen ve henüz bağlı olmadığımız kişiye özel hello gider (onun hello'su
+  // biz izin vermeden geldiyse yok sayılmıştı). Önceden herkes serbestse (null) hiçbir hello yok sayılmamıştır:
+  // o zaman kimseye hello gitmez (sunucu sesli kanalında üye listesi ilk gelince gereksiz yayın olmasın).
   setAllowedPeers(ids) {
     const eski = this.izinliler
     this.izinliler = ids == null ? null : new Set(ids)
@@ -123,7 +126,7 @@ export class PeerMesh {
     }
     if (!this.aktif) return
     for (const id of this.izinliler) {
-      if (id === this.userId || this.eslar.has(id) || (eski && eski.has(id))) continue
+      if (id === this.userId || this.eslar.has(id) || !eski || eski.has(id)) continue
       this._gonder({ type: 'hello', to: id })
     }
   }
@@ -348,7 +351,12 @@ export class PeerMesh {
   _mesajGeldi(m) {
     if (!m || m.from === this.userId) return // kendi mesajımız
     if (m.to && m.to !== this.userId) return // başkasına gönderilmiş
-    if (this.izinliler && !this.izinliler.has(m.from) && m.type !== 'bye') return // izinli değil (grup araması)
+    if (this.izinliler && !this.izinliler.has(m.from) && m.type !== 'bye') {
+      // İzinli değil (grup araması / sunucu üyesi değil): yok sayılır. Tanışma iletisiyse haber verilir; uygulama
+      // listesi bayatsa (yeni katılan üye) listeyi tazeler, setAllowedPeers ona özel hello gönderir.
+      if (m.type === 'hello' || m.type === 'offer') this._yay('peer-not-allowed', { userId: m.from })
+      return
+    }
     if (m.type === 'hello') this._helloGeldi(m)
     else if (m.type === 'offer') this._teklifGeldi(m)
     else if (m.type === 'answer') this._cevapGeldi(m)
