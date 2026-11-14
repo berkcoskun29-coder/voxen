@@ -263,7 +263,7 @@ function odakAnahtariylaBul(kok, anahtar) {
   return [...kok.querySelectorAll('[data-odak]')].find((e) => e.dataset.odak === anahtar) ?? null
 }
 
-// ctx: { server, channels, profile, selectedChannelId, handlers,
+// ctx: { server, channels, profile, selectedChannelId, handlers, canManageChannels (isteğe bağlı; yoksa sahip),
 //        voiceMembers (Map<kanalId, profil[]>), speaking (Set<userId>), voiceStates (Map<userId, durum>),
 //        unread ({ count(kanalId), mentions(kanalId) }, isteğe bağlı: okunmamış ve bahsetme sayaçları),
 //        voice (sesli kanaldaysak: { channelName, state, handlers } -> ses paneli) }
@@ -278,7 +278,8 @@ export function renderChannelList(panel, ctx) {
   const odakli = document.activeElement
   const odakAnahtari = panel.contains(odakli) ? odakli.dataset?.odak : null
   panel.innerHTML = ''
-  const sahip = server ? server.owner_id === profile.id : false
+  // Kanal yönetimi (+ kanal, ⚙): MANAGE_CHANNELS (v0.11.0, app.js verir); verilmezse yalnız sahip
+  const sahip = server ? (ctx.canManageChannels ?? server.owner_id === profile.id) : false
 
   const ust = document.createElement('div')
   ust.className = 'panel-top'

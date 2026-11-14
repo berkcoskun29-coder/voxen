@@ -1018,7 +1018,12 @@ describe('sunucu menüsü, silme/ayrılma ve canlı sunucu olayları (Görev 3)'
     await bosalt()
     const dislisi = (ad) => document.querySelector(`.channel-gear[aria-label="${ad} kanal ayarları"]`)
     dislisi('sohbet').click()
-    expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent)).toEqual(['Kanalı yeniden adlandır', 'Kanalı sil'])
+    // sohbet ikinci yazılı kanal: yalnız "Yukarı taşı" (v0.11.0, move_channel)
+    expect([...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent)).toEqual(['Kanalı yeniden adlandır', 'Yukarı taşı', 'Kanalı sil'])
+    menuOgesi('Yukarı taşı').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('move_channel', { cid: 'b', yon: -1 })
+    dislisi('sohbet').click()
     menuOgesi('Kanalı yeniden adlandır').click()
     const kutu = document.querySelector('.modal-card input')
     expect(kutu.value).toBe('sohbet')
@@ -2785,5 +2790,94 @@ describe('mesaj arama (v0.10.0)', () => {
     const olay = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })
     document.body.dispatchEvent(olay)
     expect(olay.defaultPrevented).toBe(false)
+  })
+})
+
+describe('roller ve izinler (v0.11.0)', () => {
+  const herkes = { id: 'r0', server_id: 's1', name: '@herkes', position: 0, is_default: true, permissions: [], color: null, hoist: false }
+  const kanalci = { id: 'r1', server_id: 's1', name: 'Kanalcı', position: 1, is_default: false, permissions: ['MANAGE_CHANNELS', 'MANAGE_ROLES'], color: 'mor', hoist: false }
+  const menuOgeleri = () => [...document.querySelectorAll('.popup-menu [role=menuitem]')].map((b) => b.textContent)
+  // Gerçek Supabase olayı adına göre süzer: yalnız "roller" dinleyicisine gönder
+  const rolOlayi = (payload) => { for (const h of fake.srvHandlers.filter((x) => x.event === 'roller')) h.cb({ payload }) }
+  const toastlar = () => [...document.querySelectorAll('.toast')].map((t) => t.textContent)
+  const bekle = () => new Promise((r) => setTimeout(r, 200)) // rol yüklemesi 150 ms birleştirilir
+
+  beforeEach(() => {
+    fake.rows.servers = [{ id: 's1', name: 'S', owner_id: 'baskasi', invite_code: 'k' }]
+    fake.rows.roles = [herkes, kanalci]
+    fake.rows.member_roles = []
+    fake.rows.server_members = [{ user_id: 'u1' }, { user_id: 'baskasi' }]
+  })
+
+  it('izinsiz üye: + kanal/⚙ yok; rol atanınca ("roller" olayı) kanal yönetimi ve ayarlar görünür', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.srvHandlers.some((h) => h.event === 'roller')).toBe(true) // aynı server: kanalı, ek abonelik yok
+    expect(fake.srv).toBe(1)
+    expect(document.querySelector('.channel-gear')).toBeNull()
+    fake.rows.member_roles = [{ user_id: 'u1', role_id: 'r1' }]
+    rolOlayi({ tablo: 'member_roles', islem: 'INSERT', server_id: 's1', role_id: 'r1', user_id: 'u1' })
+    await bekle()
+    await bosalt()
+    expect(document.querySelector('.channel-gear')).not.toBeNull()
+    document.querySelector('.server-name-btn').click()
+    expect(menuOgeleri()).toEqual(['Davet et', 'Sunucuyu sessize al', 'Sunucu ayarları', 'Kanal ekle', 'Sunucudan ayrıl'])
+  })
+
+  it('Sunucu ayarları: MANAGE_SERVER yoksa yalnız Roller sekmesi; rol oluştur RPC çağırır', async () => {
+    fake.rows.member_roles = [{ user_id: 'u1', role_id: 'r1' }]
+    supabase.rpc.mockImplementation(async () => ({ data: 'yeni', error: null }))
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    document.querySelector('.server-name-btn').click()
+    ;[...document.querySelectorAll('.popup-menu [role=menuitem]')].find((b) => b.textContent === 'Sunucu ayarları').click()
+    expect([...document.querySelectorAll('[role=tab]')].map((s) => s.textContent)).toEqual(['Roller'])
+    expect([...document.querySelectorAll('.role-row .role-name')].map((e) => e.textContent)).toEqual(['Kanalcı', '@herkes'])
+    // Kendi rolü kilitli (üst sırası 1)
+    expect(document.querySelector('.role-row').classList.contains('kilitli')).toBe(true)
+    document.querySelector('.roles-create').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('create_role', { sid: 's1', ad: 'yeni rol', renk: null, izinler: [] })
+  })
+
+  it('mesaj yazarı rol renginde; üye listesinde ad rol renginde', async () => {
+    fake.rows.member_roles = [{ user_id: 'baskasi', role_id: 'r1' }]
+    fake.rows.messages = [{ id: 1, channel_id: 'a', author_id: 'baskasi', content: 'selam', created_at: new Date().toISOString(), edited_at: null, deleted_at: null }]
+    fake.rows.profiles = [{ id: 'baskasi', username: 'ali', color: '#123456' }, profil]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    await bosalt()
+    expect(document.querySelector('.message .msg-author')?.style.color).toBe('var(--rol-mor)')
+  })
+
+  it('sahip: üyenin kartında rol kutuları ve "Sunucudan çıkar" (onay + kick_member)', async () => {
+    fake.rows.servers = [{ id: 's1', name: 'S', owner_id: 'u1', invite_code: 'k' }]
+    fake.rows.profiles = [{ id: 'baskasi', username: 'ali', color: '#123456' }, profil]
+    supabase.rpc.mockImplementation(async () => ({ data: null, error: null }))
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    await bosalt()
+    document.querySelector('.member-panel [data-profile-opener="baskasi"]').click()
+    const kart = document.querySelector('.profile-card')
+    const kutu = kart.querySelector('.profile-card-role-check input')
+    expect(kutu.disabled).toBe(false)
+    kutu.click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('set_member_role', { sid: 's1', uid: 'baskasi', rid: 'r1', ver: true })
+    document.querySelector('.profile-card .profile-card-kick').click()
+    const onay = [...document.querySelectorAll('.modal-card')].at(-1)
+    expect(onay.textContent).toContain('ali, S sunucusundan çıkarılsın mı?')
+    ;[...onay.querySelectorAll('button')].find((b) => b.textContent === 'Çıkar').click()
+    await bosalt()
+    expect(supabase.rpc).toHaveBeenCalledWith('kick_member', { sid: 's1', uid: 'baskasi' })
+  })
+
+  it('çıkarılınca "S sunucusundan çıkarıldın." bildirimi (bir kez)', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    rolOlayi({ tablo: 'kick', islem: 'DELETE', server_id: 's1', user_id: 'u1' })
+    rolOlayi({ tablo: 'kick', islem: 'DELETE', server_id: 's1', user_id: 'u1' })
+    rolOlayi({ tablo: 'kick', islem: 'DELETE', server_id: 's1', user_id: 'baskasi' })
+    expect(toastlar().filter((t) => t === 'S sunucusundan çıkarıldın.')).toHaveLength(1)
   })
 })

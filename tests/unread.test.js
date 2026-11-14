@@ -229,6 +229,22 @@ describe('@bahsetme sayısı', () => {
     expect(degisim).toHaveBeenCalled()
   })
 
+  it('@herkes içeren mesaj (beni anmıyorsa) sayıları sunucudan yeniden aldırır (izin veritabanında)', async () => {
+    await kurAdli()
+    fake.fetch.mockClear()
+    fake.fetch.mockResolvedValue(anmali({ a: ['s1', 3, 1], b: ['s1', 1, 1], c: ['s2', 5, 2] }))
+    fake.handlers.onInsert({ id: 1, channel_id: 'b', author_id: 'x', content: 'toplantı @herkes' })
+    expect(tracker.mentions('b')).toBe(0) // yerelde sayılmaz
+    await vi.advanceTimersByTimeAsync(unreadTiming.refetchMs)
+    expect(fake.fetch).toHaveBeenCalledTimes(1)
+    expect(tracker.mentions('b')).toBe(1)
+    fake.fetch.mockClear()
+    fake.handlers.onInsert({ id: 2, channel_id: 'b', author_id: 'x', content: '@berk @herkes' }) // zaten sayıldı
+    fake.handlers.onInsert({ id: 3, channel_id: 'b', author_id: 'x', content: 'herkes geldi' })
+    await vi.advanceTimersByTimeAsync(unreadTiming.refetchMs)
+    expect(fake.fetch).not.toHaveBeenCalled()
+  })
+
   it('getUsername verilmezse ya da içerik yoksa sayı artmaz (eski çağrılar bozulmaz)', async () => {
     await kur()
     fake.handlers.onInsert({ id: 1, channel_id: 'b', author_id: 'x', content: '@berk' })

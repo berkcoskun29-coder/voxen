@@ -121,6 +121,19 @@ describe('kaynak arayüzü', () => {
     expect(d.canDelete({ author_id: 'u2' })).toBe(false)
   })
 
+  it('roller (v0.11.0): MANAGE_MESSAGES başkasının mesajını siler ve sabitler; yetki her soruda yeniden okunur', () => {
+    let izinler = new Set()
+    const k = channelSource({ id: 'c1', name: 'genel' }, { selfId: 'u1', getYetki: () => ({ has: (p) => izinler.has(p) }) })
+    expect(k.canDelete({ author_id: 'u2' })).toBe(false)
+    expect(k.canPin({ id: 1 })).toBe(false)
+    izinler = new Set(['MANAGE_MESSAGES'])
+    expect(k.canDelete({ author_id: 'u2' })).toBe(true)
+    expect(k.canPin({ id: 1 })).toBe(true)
+    expect(k.canPin({ id: 1, deleted_at: 'x' })).toBe(false)
+    izinler = new Set(['MANAGE_CHANNELS'])
+    expect(k.canDelete({ author_id: 'u2' })).toBe(false)
+  })
+
   it('kanal kaynağı messages tablosunu ve mark_read\'i kullanır', async () => {
     const k = channelSource({ id: 'c1', name: 'genel' }, { selfId: 'u1' })
     fake.rows.messages = []

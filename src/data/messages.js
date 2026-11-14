@@ -174,13 +174,17 @@ export async function fetchProfiles(ids) {
 // Sohbet ekranı (mountChat) mesajları bir "kaynak" nesnesinden alır; aynı ekran hem kanalı hem DM'i
 // gösterir (DM karşılığı: dms.js dmSource). Kanal kaynağı buradaki fonksiyonları sarar.
 // channel: { id, name }. isOwner: sunucunun sahibi mi (başkasının mesajını da silebilir). selfId: kendi id'miz.
+// getYetki(): (isteğe bağlı, v0.11.0) bu sunucudaki güncel yetkim (src/data/rolKurallari.js yetkiHesapla);
+//   her soruda yeniden okunur: rol değişince sohbet yeniden kurulmadan düğmeler değişir.
 // Dönen: { kind:'channel', id, title, placeholder, other:null, canSend, fetch(beforeId, { after, limit }),
 //   send(content, { replyTo }), edit(id, content), remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
 //   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg),
 //   react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg),
 //   ekKlasoru, sendWithAttachments(content, ekler, { replyTo }), fetchAttachments(ids), removeFiles(yollar) }
-export function channelSource(channel, { isOwner = false, selfId } = {}) {
+export function channelSource(channel, { isOwner = false, selfId, getYetki = null } = {}) {
   const id = channel.id
+  // Mesajları yönetme (başkasının mesajını silme, sabitleme): sahip ya da MANAGE_MESSAGES (013: has_permission)
+  const mesajYoneticisi = () => isOwner || !!getYetki?.()?.has?.('MANAGE_MESSAGES')
   return {
     kind: 'channel',
     id,
@@ -199,17 +203,17 @@ export function channelSource(channel, { isOwner = false, selfId } = {}) {
     pin: (mesajId, sabitle) => pinMessage(mesajId, sabitle),
     fetchPinned: () => fetchPinnedMessages(id),
     fetchByIds: (ids) => fetchMessagesByIds(ids),
-    // Kanalda her üye tepki verir. Sabitleme yalnız sunucu sahibine (veritabanında can_pin; roller v0.11.0)
+    // Kanalda her üye tepki verir. Sabitleme: sahip ya da MANAGE_MESSAGES (veritabanında can_pin)
     canReact: (msg) => !!msg && !msg.deleted_at,
-    canPin: (msg) => !!msg && !msg.deleted_at && isOwner,
+    canPin: (msg) => !!msg && !msg.deleted_at && mesajYoneticisi(),
     edit: (mesajId, content) => editMessage(mesajId, content),
     remove: (mesajId) => deleteMessage(mesajId),
     subscribe: ({ onInsert, onUpdate, getLastId, onReconnect } = {}) =>
       subscribeMessages(id, (m) => onInsert?.(m), { onUpdate, getLastId, onReconnect }),
     joinTyping: (opts = {}) => joinTyping(id, opts),
     markRead: (mesajId) => markRead(id, mesajId),
-    // Sunucu sahibi başkasının mesajını da silebilir
-    canDelete: (msg) => msg?.author_id === selfId || isOwner,
+    // Sahip ya da MANAGE_MESSAGES başkasının mesajını da silebilir
+    canDelete: (msg) => msg?.author_id === selfId || mesajYoneticisi(),
     // Düzenleme yalnız kendi mesajında (sahip de başkasınınkini düzenleyemez)
     canEdit: (msg) => msg?.author_id === selfId,
   }

@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase.js'
 // Sunucunun kanalları, position sırasına göre.
 export async function listChannels(serverId) {
   const { data, error } = await supabase
-    .from('channels').select('*').eq('server_id', serverId).order('position')
+    .from('channels').select('*').eq('server_id', serverId).order('position').order('id') // eşit sırada kararlı düzen (yukarı/aşağı taşıma doğru komşuyla yer değiştirsin)
   if (error) throw new Error(error.message)
   return data ?? []
 }

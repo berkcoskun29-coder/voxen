@@ -12,9 +12,11 @@ import { openPrivateChannel } from './privateChannel.js'
 // Seçenekler (009_tepki_yanit_sabit.sql; aynı konu, yeni abonelik yok):
 //   onReaction(serverId, payload): "tepki" yayını { channel_id, message_id, emoji, user_id, islem }
 //   onPin(serverId, payload): "sabit" yayını { channel_id, message_id, islem, pinned_by }
+// 013_roller.sql (aynı konu):
+//   onRoles(serverId, payload): "roller" yayını { tablo: 'roles'|'member_roles'|'kick', islem, server_id, role_id, user_id }
 // Dönen: { update(serverIds), close() }
 //   update: sunucu listesi değişince çağrılır; yeni sunucuların konusu açılır, çıkanlarınki kapanır.
-export function subscribeServerEvents(serverIds, onChange, { onReaction = null, onPin = null } = {}) {
+export function subscribeServerEvents(serverIds, onChange, { onReaction = null, onPin = null, onRoles = null } = {}) {
   let kapali = false
   const acik = new Map() // serverId -> openPrivateChannel sonucu
 
@@ -34,6 +36,11 @@ export function subscribeServerEvents(serverIds, onChange, { onReaction = null, 
         if (onPin) {
           k.on('broadcast', { event: 'sabit' }, ({ payload }) => {
             if (!kapali && acik.get(sid) === ozel) onPin(sid, payload ?? {})
+          })
+        }
+        if (onRoles) {
+          k.on('broadcast', { event: 'roller' }, ({ payload }) => {
+            if (!kapali && acik.get(sid) === ozel) onRoles(sid, payload ?? {})
           })
         }
       },

@@ -148,16 +148,19 @@ export function openMenu({ opener, etiket, secenekler, yan = 'alt' }) {
 
 // ---- Sunucu menüsü ----
 // sunucu: { name }, sahip: bool, sessiz: sunucu sessizde mi (bildirimler),
+// izinler (v0.11.0, isteğe bağlı): { has(perm) } güncel yetkim (src/data/rolKurallari.js). Verilmezse
+//   yalnız sahip yönetir (eski davranış). "Sunucuyu sil" her durumda yalnız sahipte.
 // tik: { onInvite, onToggleMute, onSettings, onAddChannel, onLeave, onDelete }
-export function openServerMenu({ opener, sunucu, sahip, sessiz = false, tik }) {
+export function openServerMenu({ opener, sunucu, sahip, izinler = null, sessiz = false, tik }) {
   if (menuAcikMi(opener)) { closeMenu({ returnFocus: true }); return null }
+  const izin = (p) => !!sahip || !!izinler?.has?.(p)
   const secenekler = [
     { yazi: 'Davet et', tik: () => tik.onInvite?.() },
     { yazi: sessiz ? 'Sessizden çıkar' : 'Sunucuyu sessize al', tik: () => tik.onToggleMute?.() },
   ]
+  if (izin('MANAGE_SERVER') || izin('MANAGE_ROLES')) secenekler.push({ yazi: 'Sunucu ayarları', tik: () => tik.onSettings?.() })
+  if (izin('MANAGE_CHANNELS')) secenekler.push({ yazi: 'Kanal ekle', tik: () => tik.onAddChannel?.() })
   if (sahip) {
-    secenekler.push({ yazi: 'Sunucu ayarları', tik: () => tik.onSettings?.() })
-    secenekler.push({ yazi: 'Kanal ekle', tik: () => tik.onAddChannel?.() })
     secenekler.push({ yazi: 'Sunucuyu sil', tehlikeli: true, tik: () => tik.onDelete?.() })
   } else {
     secenekler.push({ yazi: 'Sunucudan ayrıl', tehlikeli: true, tik: () => tik.onLeave?.() })
@@ -166,18 +169,14 @@ export function openServerMenu({ opener, sunucu, sahip, sessiz = false, tik }) {
 }
 
 // ---- Kanal menüsü (satırdaki ⚙) ----
-// tik: { onRename, onDelete }
+// tik: { onRename, onDelete, onMoveUp?, onMoveDown? } (taşıma işlevi verilmezse o öğe yok: listenin ucunda)
 export function openChannelMenu({ opener, kanal, tik }) {
   if (menuAcikMi(opener)) { closeMenu({ returnFocus: true }); return null }
-  return openMenu({
-    opener,
-    etiket: `${kanal.name} kanal menüsü`,
-    yan: 'sag',
-    secenekler: [
-      { yazi: 'Kanalı yeniden adlandır', tik: () => tik.onRename?.() },
-      { yazi: 'Kanalı sil', tehlikeli: true, tik: () => tik.onDelete?.() },
-    ],
-  })
+  const secenekler = [{ yazi: 'Kanalı yeniden adlandır', tik: () => tik.onRename?.() }]
+  if (tik.onMoveUp) secenekler.push({ yazi: 'Yukarı taşı', tik: () => tik.onMoveUp() })
+  if (tik.onMoveDown) secenekler.push({ yazi: 'Aşağı taşı', tik: () => tik.onMoveDown() })
+  secenekler.push({ yazi: 'Kanalı sil', tehlikeli: true, tik: () => tik.onDelete?.() })
+  return openMenu({ opener, etiket: `${kanal.name} kanal menüsü`, yan: 'sag', secenekler })
 }
 
 // ---- Pencereler ----
@@ -258,9 +257,24 @@ export function renameChannelDialog(kanal, kaydet) {
   return kabuk
 }
 
-// Sunucu ayarları: ad kutusu + Kaydet, davet kodu ve "Davet linkini kopyala".
-// kaydet(ad) hata metni dönerse pencere açık kalır; kopyala() davet linkini panoya alır.
-export function serverSettingsDialog(sunucu, { kaydet, kopyala }) {
+// Üyeyi çıkarma onayı (v0.11.0). cikar() hata metni dönerse pencere açık kalır.
+export function kickMemberDialog(kisi, sunucu, cikar) {
+  return createModalShell({
+    baslik: 'Sunucudan çıkar',
+    govde: [paragraf(`${kisi.username}, ${sunucu.name} sunucusundan çıkarılsın mı? Davet linkiyle yeniden katılabilir.`)],
+    birincil: { yazi: 'Çıkar', tik: cikar },
+    tehlikeli: true,
+  })
+}
+
+// Sunucu ayarları: ad kutusu + Kaydet, davet kodu, "Davet linkini kopyala" ve (verilirse) "Davet kodunu yenile".
+// kaydet(ad) hata metni dönerse pencere açık kalır; kopyala() davet linkini panoya alır;
+// yenile() (v0.11.0) onaydan sonra çağrılır: { kod } ya da hata metni döner.
+// Sekmeler (v0.11.0): roller verilirse pencere "Genel" ve "Roller" sekmeli açılır (ayarlar penceresinin
+//   sekme kalıbı). roller(): { el, kapat? } Roller sekmesinin içeriği (src/ui/roles.js). genel false ise
+//   (MANAGE_SERVER yok) yalnız Roller sekmesi olur ve Kaydet düğmesi çıkmaz.
+// Dönen: createModalShell sonucu + kod(yeni): görünen davet kodunu günceller (canlı yenileme).
+export function serverSettingsDialog(sunucu, { kaydet, kopyala, yenile = null, roller = null, genel = true }) {
   const kutu = document.createElement('input')
   kutu.type = 'text'
   kutu.maxLength = 40
@@ -278,18 +292,131 @@ export function serverSettingsDialog(sunucu, { kaydet, kopyala }) {
   kopya.className = 'secondary'
   kopya.textContent = 'Davet linkini kopyala'
   kopya.onclick = () => kopyala?.()
+  const genelOgeler = [f.etiket, f.input, f.hata, kodEtiket, kod, kopya]
 
-  return createModalShell({
-    baslik: 'Sunucu ayarları',
-    govde: [f.etiket, f.input, f.hata, kodEtiket, kod, kopya],
-    birincil: {
-      yazi: 'Kaydet',
-      tik: () => {
-        const ad = kutu.value.trim()
-        if (ad.length < 1 || ad.length > 40) return { alan: kutu, metin: 'Sunucu adı boş olamaz. Bir ad yaz (en fazla 40 karakter).' }
-        return kaydet(ad)
-      },
+  if (yenile) {
+    const yeni = document.createElement('button')
+    yeni.type = 'button'
+    yeni.className = 'secondary invite-renew'
+    yeni.textContent = 'Davet kodunu yenile'
+    const durum = document.createElement('p')
+    durum.className = 'invite-renew-status'
+    durum.setAttribute('role', 'status')
+    yeni.onclick = () => {
+      createModalShell({
+        baslik: 'Davet kodunu yenile',
+        govde: [paragraf('Davet kodu yenilensin mi? Eski davet linkleri artık çalışmaz.')],
+        birincil: {
+          yazi: 'Yenile',
+          tik: async () => {
+            const sonuc = await yenile()
+            if (typeof sonuc === 'string' && sonuc) return sonuc
+            if (sonuc?.kod) kod.textContent = sonuc.kod
+            durum.textContent = 'Davet kodu yenilendi.'
+            return null
+          },
+        },
+      })
+    }
+    genelOgeler.push(yeni, durum)
+  }
+
+  const kaydetIsi = {
+    yazi: 'Kaydet',
+    tik: () => {
+      const ad = kutu.value.trim()
+      if (ad.length < 1 || ad.length > 40) return { alan: kutu, metin: 'Sunucu adı boş olamaz. Bir ad yaz (en fazla 40 karakter).' }
+      return kaydet(ad)
     },
-    enterIleKaydet: true,
+  }
+  const kodYaz = (k) => { kod.textContent = k ?? '' }
+
+  if (!roller) {
+    const kabuk = createModalShell({ baslik: 'Sunucu ayarları', govde: genelOgeler, birincil: kaydetIsi, enterIleKaydet: true })
+    return { ...kabuk, kod: kodYaz }
+  }
+
+  // Sekmeli: Genel (izin varsa) + Roller
+  const rolIcerik = roller()
+  const bolumler = []
+  if (genel) {
+    const g = document.createElement('section')
+    g.className = 'settings-section'
+    g.append(...genelOgeler)
+    bolumler.push({ ad: 'genel', baslik: 'Genel', kutu: g })
+  }
+  const r = document.createElement('section')
+  r.className = 'settings-section'
+  r.appendChild(rolIcerik.el)
+  bolumler.push({ ad: 'roller', baslik: 'Roller', kutu: r })
+
+  const duzen = document.createElement('div')
+  duzen.className = 'settings-layout'
+  const menu = document.createElement('div')
+  menu.className = 'settings-nav'
+  menu.setAttribute('role', 'tablist')
+  menu.setAttribute('aria-label', 'Sunucu ayarları bölümleri')
+  const sag = document.createElement('div')
+  sag.className = 'settings-panels'
+  const sekmeler = bolumler.map((b) => {
+    const sekme = document.createElement('button')
+    sekme.type = 'button'
+    sekme.textContent = b.baslik
+    sekme.id = `sunucu-sekme-${b.ad}`
+    sekme.setAttribute('role', 'tab')
+    sekme.setAttribute('aria-controls', `sunucu-bolum-${b.ad}`)
+    b.kutu.id = `sunucu-bolum-${b.ad}`
+    b.kutu.setAttribute('role', 'tabpanel')
+    b.kutu.setAttribute('aria-labelledby', sekme.id)
+    sekme.onclick = () => sec(b.ad)
+    menu.appendChild(sekme)
+    sag.appendChild(b.kutu)
+    return sekme
   })
+  duzen.append(menu, sag)
+
+  const kabuk = createModalShell({
+    baslik: 'Sunucu ayarları',
+    govde: [duzen],
+    birincil: genel ? kaydetIsi : null,
+    ikincil: 'Kapat',
+    genis: true,
+    odakBasliga: true,
+    onKapat: () => rolIcerik.kapat?.(),
+  })
+  kabuk.kart.classList.add('settings-card')
+  // Enter yalnız sunucu adı kutusunda kaydeder (Roller sekmesindeki kutular sunucu adını kaydetmesin)
+  kutu.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return
+    e.preventDefault()
+    kabuk.anaDugme?.click()
+  })
+
+  // Kaydet yalnız Genel sekmesinde görünür (Roller'de her rolün kendi Kaydet'i var)
+  function sec(ad, odakla = false) {
+    bolumler.forEach((b, i) => {
+      const secili = b.ad === ad
+      sekmeler[i].setAttribute('aria-selected', String(secili))
+      sekmeler[i].tabIndex = secili ? 0 : -1
+      b.kutu.hidden = !secili
+      if (secili && odakla) sekmeler[i].focus()
+    })
+    if (kabuk.anaDugme) kabuk.anaDugme.hidden = ad !== 'genel'
+  }
+  // Sekmeler arasında ok tuşları, Home, End (ayarlar penceresiyle aynı)
+  menu.addEventListener('keydown', (e) => {
+    const simdiki = sekmeler.indexOf(document.activeElement)
+    if (simdiki < 0) return
+    const n = sekmeler.length
+    let yeni
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') yeni = (simdiki + 1) % n
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') yeni = (simdiki - 1 + n) % n
+    else if (e.key === 'Home') yeni = 0
+    else if (e.key === 'End') yeni = n - 1
+    else return
+    e.preventDefault()
+    sec(bolumler[yeni].ad, true)
+  })
+  sec(bolumler[0].ad)
+  return { ...kabuk, kod: kodYaz, sec }
 }

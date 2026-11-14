@@ -10,7 +10,7 @@ import { grupRozeti } from './groupDm.js'
 import { makeProfileOpener } from './profileOpener.js'
 import { eylemCubugu, duzenlendiEtiketi, duzenlemeKutusu, silmeOnayi } from './messageActions.js'
 import { bahsetmeliMetin, mountMentionSuggest } from './mentions.js'
-import { mentionsUser } from '../mentions.js'
+import { mentionsUser, mentionsEveryone } from '../mentions.js'
 import { EMOJILER, gomuluTepkiler, gomuluSabit } from '../data/reactions.js'
 import { tepkiRozetleri, tepkiSecici, seciciyiKapat } from './reactions.js'
 import { sabitListesiAc, kisalt } from './pins.js'
@@ -73,6 +73,8 @@ function sabitIsareti() {
 }
 
 const BES_DAKIKA = 5 * 60 * 1000
+// @herkes / @everyone etiketi için sahte "üyeler" (kimliksiz: profil kartı açmaz)
+const HERKES_ETIKETLERI = [{ id: null, username: 'herkes' }, { id: null, username: 'everyone' }]
 // Arama sonucuna giderken (goToMessage): mesajın öncesinden bağlam olarak gelen mesaj sayısı, ileri doğru
 // yükleme sayfası ve en çok sayfa (10 x 200 = 2000 mesaj; daha uzaktaysa yukarı kaydırmak gerekir)
 const BAGLAM = 10
@@ -94,7 +96,8 @@ const tarihBicimi = new Intl.DateTimeFormat('tr-TR', { day: 'numeric', month: 'l
 // vurgulu: kısa süreli vurgu (alıntıdan/listeden gelindi).
 // ekler: [{ path, name, mime, size, width, height }] -> metnin altında resim önizlemeleri / dosya kartları;
 //   tik.onOpenImage(sira), tik.onDownload(ek). Ekli mesajın yer tutucu yazısı ("📎 dosya") gösterilmez.
-export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null, uyeler = null, anar = false, tepkiler = null, tepkiAktif = true, yanit = null, sabitli = false, vurgulu = false, ekler = null } = {}) {
+// yazarRengi (v0.11.0): yazar adının rengi (en yüksek renkli rolün tema değişkeni); yoksa profil rengi.
+export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null, uyeler = null, anar = false, tepkiler = null, tepkiAktif = true, yanit = null, sabitli = false, vurgulu = false, ekler = null, yazarRengi = null } = {}) {
   // Sistem satırı (DM, kind 'call' arama kaydı / 'pin' sabitleme): ortalanmış soluk satır; avatar, ad başlığı
   // ve eylem simgeleri yok
   if (sistemMi(msg)) {
@@ -145,7 +148,7 @@ export function renderMessage(msg, profile, { grouped = false, izin = null, tik 
     const ad = document.createElement('span')
     ad.className = 'msg-author'
     ad.textContent = p.username
-    ad.style.color = p.color
+    ad.style.color = yazarRengi ?? p.color
     makeProfileOpener(ad, profile, null, { yalnizFare: true }) // ad fareyle tıklanır; klavyede durak avatar
     const saat = document.createElement('span')
     saat.className = 'msg-time'
@@ -246,8 +249,13 @@ const gunAnahtari = (iso) => new Date(iso).toDateString()
 // isOwner: giriş yapan kişi bu sunucunun sahibi mi (sahip başkasının mesajını da silebilir; app.js verir).
 // onBottom(sonMesajId): kullanıcı en alta indi ya da en alttayken mesaj geldi (app.js okundu işaretler).
 // members: kanalda sunucu üyeleri (@ önerisi ve @ad etiketleri; sonradan setMembers ile güncellenir). DM'de kullanılmaz.
-export function mountChat(container, { source = null, channel = null, profile, isOwner = false, headerActions = [], headerHost = null, onBottom = null, peerStatus = 'offline', members = [] }) {
-  const kaynak = source ?? channelSource(channel, { isOwner, selfId: profile.id })
+// Roller (v0.11.0, kanalda; app.js verir, her çizimde yeniden sorulur):
+//   getYetki(): güncel yetkim (başkasının mesajını silme/sabitleme: MANAGE_MESSAGES)
+//   getRolRengi(userId): yazar adının rengi (null: profil rengi)
+//   herkesAnabilir(userId): yazarın MENTION_EVERYONE izni var mı (@herkes etiketi ve vurgusu)
+//   Roller değişince rollerDegisti() çağrılır: liste yeniden çizilir.
+export function mountChat(container, { source = null, channel = null, profile, isOwner = false, headerActions = [], headerHost = null, onBottom = null, peerStatus = 'offline', members = [], getYetki = null, getRolRengi = null, herkesAnabilir = null }) {
+  const kaynak = source ?? channelSource(channel, { isOwner, selfId: profile.id, getYetki })
   const dm = kaynak.kind === 'dm'
   // Grup DM (011): başlıkta grup rozeti; @bahsetme kanaldaki gibi açık (üyeler kaynak.group.members)
   const grup = dm && !!kaynak.group
@@ -485,8 +493,10 @@ export function mountChat(container, { source = null, channel = null, profile, i
           onDelete: (shift) => silIste(m.id, shift),
         },
         editor: duzenle?.id === m.id ? duzenle.ed.el : null,
-        uyeler: bahsetmeli ? uyeler : null,
-        anar: bahsetmeli && !sistemMi(m) && m.author_id !== profile.id && mentionsUser(m.content, profile.username),
+        uyeler: bahsetmeli ? (herkesIzni(m) ? [...uyeler, ...HERKES_ETIKETLERI] : uyeler) : null,
+        anar: bahsetmeli && !sistemMi(m) && m.author_id !== profile.id &&
+          (mentionsUser(m.content, profile.username) || (herkesIzni(m) && mentionsEveryone(m.content))),
+        yazarRengi: dm ? null : (getRolRengi?.(m.author_id) ?? null),
         tepkiler: tepkiOzeti(m.id),
         tepkiAktif: tepkiVerilebilir(m),
         yanit: m.reply_to != null ? yanitBilgisi(m.reply_to) : null,
@@ -522,6 +532,11 @@ export function mountChat(container, { source = null, channel = null, profile, i
   // Kendi mesajı, yazılabilir konuşma ve kaynak izin veriyor (DM'de arama kaydı satırı düzenlenemez)
   function duzenlenebilir(m) {
     return m.author_id === profile.id && yazabilir && (kaynak.canEdit?.(m) ?? true)
+  }
+
+  // @herkes (v0.11.0): yalnız kanalda ve yazarın MENTION_EVERYONE izni varsa etiket ve vurgu olur
+  function herkesIzni(m) {
+    return !dm && !sistemMi(m) && !!herkesAnabilir?.(m.author_id)
   }
 
   // --- Tepkiler ---
@@ -1333,6 +1348,11 @@ export function mountChat(container, { source = null, channel = null, profile, i
       const ayni = anahtar(liste ?? []) === anahtar(uyeler)
       uyeler = liste ?? []
       if (!ayni) yenidenCiz() // adlar değişmediyse boşuna çizme
+    },
+    // Roller değişti (v0.11.0): yazar renkleri, @herkes ve silme/sabitleme düğmeleri yeniden hesaplanır
+    rollerDegisti() {
+      if (kapandi || dm) return
+      yenidenCiz()
     },
     // DM: karşı tarafın durumu değişti (başlıktaki nokta). Kanalda bir şey yapmaz.
     setPeerStatus(durum) {

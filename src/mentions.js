@@ -50,3 +50,12 @@ export function findMentions(text, usernames) {
   }
   return sonuc
 }
+
+// @herkes / @everyone (v0.11.0). Kural veritabanındaki mentions_everyone ile AYNI
+// (supabase/migrations/013_roller.sql): mentionsUser'daki kelime sınırı, büyük-küçük harf duyarsız.
+// Bildirim ve sayaç yalnız yazarın MENTION_EVERYONE izni varsa; bunu çağıran denetler.
+const HERKES = /(?<![\p{L}\p{N}_])@(herkes|everyone)(?![\p{L}\p{N}_])/iu
+export function mentionsEveryone(text) {
+  if (!text || !text.includes('@')) return false
+  return HERKES.test(text)
+}

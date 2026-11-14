@@ -3,7 +3,7 @@
 // Kurallar: kendi mesajım sayılmaz; açık kanal, pencere odaktayken ve en alttayken artmaz (okundu işaretlenir);
 // silme/yeniden bağlanma sayıları sunucudan yeniden alır (sorgu birleştirilir; her mesajda ağır sorgu yok).
 import { fetchUnreadCounts, markRead, subscribeAllMessages } from '../data/reads.js'
-import { mentionsUser } from '../mentions.js'
+import { mentionsUser, mentionsEveryone } from '../mentions.js'
 
 export const unreadTiming = { refetchMs: 2000 }
 
@@ -84,6 +84,9 @@ export function createUnreadTracker({ profileId, getReading, isFocused, onChange
       const anar = mentionsUser(m.content, getUsername?.())
       sayilar.set(m.channel_id, { ...s, count: s.count + 1, mentions: (s.mentions ?? 0) + (anar ? 1 : 0) })
       degisti()
+      // @herkes (013): sayılıp sayılmayacağı yazarın MENTION_EVERYONE iznine bağlı; karar veritabanında
+      // (unread_counts). Beni zaten anmıyorsa sayılar kısa süre sonra sunucudan yeniden alınır.
+      if (!anar && mentionsEveryone(m.content)) gecikmeliAl()
     },
     onUpdate: (m) => { if (m?.deleted_at && m.author_id !== profileId) gecikmeliAl() },
     onReconnect: () => { yenidenAl() },

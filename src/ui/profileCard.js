@@ -14,6 +14,7 @@
 // Kullanıcı yazıları her zaman textContent ile basılır (HTML çalışmaz).
 import { avatarWithDot, statusDot } from './memberList.js'
 import { profileOpenerPerson } from './profileOpener.js'
+import { rolRengiCss } from '../data/rolKurallari.js'
 
 export { makeProfileOpener } from './profileOpener.js'
 
@@ -178,6 +179,79 @@ function sosyalBolumu(social) {
   return kutu
 }
 
+// Sunucudayken kişinin rolleri ve (yetkiliye) "Sunucudan çıkar" (v0.11.0).
+// sunucu: { roller: [{ rol, atanmis, degistirilebilir }], onToggle(rol, ver) -> Promise, onKick?() }
+//   Değiştirilebilir rol varsa onay kutuları (yetkili: atama); yoksa yalnız atanmış rollerin rozetleri.
+//   onKick verilirse kırmızı "Sunucudan çıkar" düğmesi (onayı çağıran açar).
+function rolRozeti(rol) {
+  const r = document.createElement('span')
+  r.className = 'profile-card-role'
+  const nokta = document.createElement('span')
+  nokta.className = 'role-dot'
+  nokta.setAttribute('aria-hidden', 'true')
+  const css = rolRengiCss(rol.color)
+  if (css) nokta.style.background = css
+  else nokta.classList.add('renksiz')
+  r.append(nokta, rol.name)
+  return r
+}
+
+function sunucuBolumu(sunucu) {
+  const kutu = document.createElement('div')
+  kutu.className = 'profile-card-roles'
+  const roller = sunucu.roller ?? []
+  const yonetir = roller.some((x) => x.degistirilebilir)
+  const gorunen = yonetir ? roller : roller.filter((x) => x.atanmis)
+  if (gorunen.length) {
+    const baslik = document.createElement('div')
+    baslik.className = 'profile-card-roles-title'
+    baslik.id = `profil-roller-${++rolBaslikSayac}`
+    baslik.textContent = 'Roller'
+    kutu.appendChild(baslik)
+    const liste = document.createElement('div')
+    liste.className = 'profile-card-role-list'
+    liste.setAttribute('role', 'group')
+    liste.setAttribute('aria-labelledby', baslik.id)
+    const hata = document.createElement('div')
+    hata.className = 'profile-card-error'
+    hata.setAttribute('role', 'alert')
+    for (const { rol, atanmis, degistirilebilir } of gorunen) {
+      if (!yonetir) { liste.appendChild(rolRozeti(rol)); continue }
+      const etiket = document.createElement('label')
+      etiket.className = 'profile-card-role-check'
+      const k = document.createElement('input')
+      k.type = 'checkbox'
+      k.checked = !!atanmis
+      k.disabled = !degistirilebilir
+      k.onchange = async () => {
+        const ver = k.checked
+        k.disabled = true
+        hata.textContent = ''
+        try { await sunucu.onToggle?.(rol, ver) } catch (e) {
+          k.checked = !ver // olmadı: eski hâline döner
+          hata.textContent = e?.message || 'Bir şeyler ters gitti. İnternetini kontrol edip tekrar dene.'
+        } finally { k.disabled = !degistirilebilir }
+      }
+      etiket.append(k, rolRozeti(rol))
+      liste.appendChild(etiket)
+    }
+    kutu.append(liste, hata)
+  }
+  if (sunucu.onKick) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'danger profile-card-kick'
+    b.textContent = 'Sunucudan çıkar'
+    b.onclick = () => {
+      closeProfileCard({ returnFocus: true })
+      sunucu.onKick()
+    }
+    kutu.appendChild(b)
+  }
+  return kutu.childElementCount ? kutu : null
+}
+let rolBaslikSayac = 0
+
 // person: profil { id, username, color, avatar_url }
 // status: 'online' | 'idle' | 'dnd' | 'offline'; statusText: durum yazısı (boş olabilir)
 // voiceChannelName: kişi bir sesli kanaldaysa kanalın adı (yoksa null)
@@ -185,9 +259,9 @@ function sosyalBolumu(social) {
 // own: yalnız KENDİ kartımızda: { onStatus(dnd), onEdit() }. Durum seçimi ve "Profili düzenle" düğmesi çıkar;
 // seçimi yapan kod (tercihi yazıp varlığı yenilemek) app.js'tedir, kart yalnız çağırır.
 // social: yalnız BAŞKASININ kartında: arkadaşlık / mesaj düğmeleri (bkz. sosyalBolumu).
-export function openProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, opener = null, own = null, social = null }) {
+export function openProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, opener = null, own = null, social = null, sunucu = null }) {
   closeProfileCard() // tek kart
-  const kart = buildProfileCard({ person, status, statusText, voiceChannelName, own, social })
+  const kart = buildProfileCard({ person, status, statusText, voiceChannelName, own, social, sunucu })
   kart.setAttribute('role', 'dialog')
   kart.tabIndex = -1
   document.body.appendChild(kart)
@@ -197,7 +271,7 @@ export function openProfileCard({ person, status = 'offline', statusText = '', v
 
 // Kartın kendisi (konumsuz, dinleyicisiz). openProfileCard açılır kart olarak kullanır;
 // DM ekranında sağ panel aynı kartı sabit olarak gösterir (app.js, .member-panel içinde).
-export function buildProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, own = null, social = null }) {
+export function buildProfileCard({ person, status = 'offline', statusText = '', voiceChannelName = null, own = null, social = null, sunucu = null }) {
   const kart = document.createElement('div')
   kart.className = 'profile-card'
   kart.setAttribute('aria-label', `${person.username} profili`)
@@ -219,6 +293,8 @@ export function buildProfileCard({ person, status = 'offline', statusText = '', 
   if (own) govde.appendChild(kendiBolumu(own, status, durum))
   if (voiceChannelName) govde.appendChild(satir('profile-card-voice', `Sesli kanalda: ${voiceChannelName}`))
   if (social && !own) govde.appendChild(sosyalBolumu(social))
+  const roller = sunucu ? sunucuBolumu(sunucu) : null
+  if (roller) govde.appendChild(roller)
   kart.append(serit, govde)
   return kart
 }

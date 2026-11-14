@@ -3,7 +3,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { mentionsUser, findMentions } from '../src/mentions.js'
+import { mentionsUser, findMentions, mentionsEveryone } from '../src/mentions.js'
 
 describe('mentionsUser', () => {
   // [metin, ad, beklenen]
@@ -90,5 +90,19 @@ describe('findMentions', () => {
     expect(findMentions('selam', ['selam'])).toEqual([])
     expect(findMentions('@ali', [])).toEqual([])
     expect(findMentions('@ali', null)).toEqual([])
+  })
+})
+
+describe('mentionsEveryone (013)', () => {
+  it('@herkes ve @everyone, büyük-küçük harf duyarsız, kelime sınırıyla', () => {
+    for (const [metin, beklenen] of [
+      ['@herkes', true], ['selam @herkes!', true], ['@Everyone', true], ['@HERKES.', true], ['(@herkes)', true],
+      ['@herkesler', false], ['a@herkes', false], ['@ herkes', false], ['herkes', false], ['', false], [null, false],
+      ['@everyone_', false], ['@herkesç', false],
+    ]) expect(mentionsEveryone(metin), String(metin)).toBe(beklenen)
+  })
+  it('veritabanındaki kuralla aynı (013_roller.sql mentions_everyone)', () => {
+    const sql = readFileSync(join(process.cwd(), 'supabase/migrations/013_roller.sql'), 'utf8')
+    expect(sql).toContain("'(^|[^[:alnum:]_])@(herkes|everyone)($|[^[:alnum:]_])'")
   })
 })

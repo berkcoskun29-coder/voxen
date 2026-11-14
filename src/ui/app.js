@@ -6,8 +6,14 @@ import { createChannel, listChannels, deleteChannel, renameChannel, getChannel }
 import { subscribeServerEvents } from '../data/serverEvents.js'
 import {
   openServerMenu, openChannelMenu, closeMenu, leaveServerDialog, deleteServerDialog, deleteChannelDialog,
-  renameChannelDialog, serverSettingsDialog,
+  renameChannelDialog, serverSettingsDialog, kickMemberDialog,
 } from './serverMenu.js'
+import {
+  loadServerRoles, createRole, updateRole, deleteRole, moveRole, setMemberRole, kickMember, regenerateInvite, moveChannel,
+  hasPermission,
+} from '../data/roles.js'
+import { yetkiHesapla, kisiGorunumu, siraliRoller, ustSira, rolAtanabilir, cikarilabilir } from '../data/rolKurallari.js'
+import { mountRolesPanel } from './roles.js'
 import { inviteFromHash, parseInviteInput, takePendingInvite } from './invite.js'
 import { mountLayout, openModal, toast, createMemberToggle, toastKutusunuAl } from './layout.js'
 import { renderRail } from './serverRail.js'
@@ -42,7 +48,7 @@ import { subscribeUserEvents } from '../data/userEvents.js'
 import { fetchMutedServers, muteServer, unmuteServer } from '../data/mutes.js'
 import { fetchProfiles } from '../data/messages.js'
 import { yetimleriTemizle } from '../data/attachments.js'
-import { mentionsUser } from '../mentions.js'
+import { mentionsUser, mentionsEveryone } from '../mentions.js'
 import { shouldNotify, shouldNotifyCall, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni } from '../notify.js'
 import { renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, kisiDurumu } from './home.js'
 import {
@@ -117,6 +123,8 @@ const CIKIS_BEKLEME_MS = 3000
 
 // Üye listesini en sık bu aralıkla yeniden yükleriz (varlık her değiştiğinde sorgu atmamak için)
 const UYE_YENILEME_MS = 2000
+// Rol olayları (rolleri_sirala gibi tek işlemde birden çok satır) tek yüklemede birleşsin
+const ROL_YUKLEME_GECIKMESI_MS = 150
 
 export async function startApp(root, profile, { email = '' } = {}) {
   const { rail, channels: panel, main, members: uyePaneli } = mountLayout(root)
@@ -148,6 +156,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
   let aramaKapsami = null // kutunun son kapsamı ('dm' ya da 's:<sunucu>'); değişince kutu boşalır
   let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
   let uyeler = []
+  // Roller (v0.11.0): bakılan sunucunun rolleri ve atamaları. Sunucu değişince boşalır (bkz. rolVerisiniSifirla);
+  // yüklenene kadar yetki eski kuralla hesaplanır (yalnız sahip yönetir).
+  let rolVerisi = { serverId: null, roles: [], memberRoles: [] }
+  let rolZamanlayici = null // rol olaylarını birleştiren gecikme
+  let ayarlarRolPaneli = null // açık "Sunucu ayarları > Roller" paneli (canlı yenilensin)
+  const cikarildimIdleri = new Set() // çıkarıldığım sunucular (bildirim metni için)
   let cubukDurumu = '' // çubuktaki durum satırının son çizilen hâli (bkz. cubukDurumunuYenile)
   let varlikHaritasi = new Map() // kim çevrimiçi: userId -> { status, statusText }
   // ---- Ana sayfa (arkadaşlar ve DM'ler) durumu ----
@@ -775,7 +789,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
   function cizUyeler() {
     if (anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.isGroup) { cizGrupPaneli(); return }
     if (anaSayfa && anaGorunum.tur === 'dm') { cizDmProfili(); return }
-    renderMemberList(uyePaneli, { members: uyeler, presence: varlikHaritasi })
+    const r = rolVerisiBuSunucu()
+    renderMemberList(uyePaneli, { members: uyeler, presence: varlikHaritasi, roles: r.roles, memberRoles: r.memberRoles })
   }
 
   // DM'de sağ panel: karşı tarafın profil kartı (açılır kartla aynı çizim; geniş pencerede görünür,
@@ -834,6 +849,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     }
     const bilgi = { status: durum, statusText: v?.statusText ?? '', voiceChannelName: kanalAdi }
     if (kisi.id !== profile.id) bilgi.social = sosyalKartBilgisi(kisi)
+    const rolBilgisi = rolKartBilgisi(kisi)
+    if (rolBilgisi) bilgi.sunucu = rolBilgisi
     if (kisi.id === profile.id) {
       bilgi.statusText = getLocalPresencePrefs().statusText
       // Kendi kartımız: durum seçimi profil penceresindekiyle AYNI yoldan gider
@@ -900,6 +917,100 @@ export async function startApp(root, profile, { email = '' } = {}) {
       .catch(() => { /* sessizce geç: bir sonraki varlık değişiminde tekrar denenir */ })
       .finally(() => { uyeYukleniyor = false })
   }
+  // ---- Roller ve izinler (v0.11.0) ----
+  // Asıl koruma veritabanında (has_permission); burada yalnız hangi düğmenin görüneceği hesaplanır.
+  // Üye listesi için (sunucuId'ye bakmaz: cizUyeler sunucuId tanımlanmadan önce de çağrılır; veri sunucu
+  // değişince sıfırlandığı için hep bakılan sunucunundur)
+  function rolVerisiBuSunucu() { return rolVerisi }
+  function rolVerisiniSifirla(id = null) {
+    rolVerisi = { serverId: id, roles: [], memberRoles: [] }
+  }
+  // Bir kişinin bir sunucudaki yetkisi (roller o sunucunun değilse yalnız sahiplik sayılır)
+  function yetkiSunucuda(sid, userId = profile.id) {
+    const server = servers.find((s) => s.id === sid) ?? null
+    const r = rolVerisi.serverId === sid ? rolVerisi : { roles: [], memberRoles: [] }
+    return yetkiHesapla({ server, roles: r.roles, memberRoles: r.memberRoles, userId })
+  }
+  // Bakılan sunucudaki yetkim
+  function yetkim() {
+    return anaSayfa || !sunucuId ? yetkiHesapla() : yetkiSunucuda(sunucuId)
+  }
+  // Rolleri yükler; bakılan sunucu hâlâ o ise uygular ve rolle ilgili her yeri yeniden çizer
+  async function rolleriYukle(id) {
+    let veri
+    try { veri = await loadServerRoles(id) } catch { return } // sonraki olayda/seçimde yeniden denenir
+    if (durduruldu || sunucuId !== id || anaSayfa) return
+    rolVerisi = { serverId: id, roles: veri.roles, memberRoles: veri.memberRoles }
+    rolleriCiz()
+  }
+  function rolleriGecikmeliYukle() {
+    if (rolZamanlayici) return
+    rolZamanlayici = setTimeout(() => {
+      rolZamanlayici = null
+      if (!durduruldu && sunucuId && !anaSayfa) rolleriYukle(sunucuId)
+    }, ROL_YUKLEME_GECIKMESI_MS)
+  }
+  // Rol değişince: kanal paneli (+ kanal, ⚙), üye listesi (gruplar, renkler), sohbet (yazar rengi, @herkes,
+  // 🗑️/📌) ve açık Roller paneli
+  function rolleriCiz() {
+    if (!ilkCizimYapildi || durduruldu) return
+    cizKanalPaneli()
+    if (!anaSayfa) cizUyeler()
+    sohbet?.rollerDegisti?.()
+    ayarlarRolPaneli?.yenile()
+  }
+  // "roller" olayı (server: konusu): bakılan sunucunun rolleri yeniden yüklenir.
+  // { tablo: 'kick', user_id: ben }: çıkarıldım (üyelik silinince "degisti" de gelir, listeler tazelenir).
+  function rolOlayi(sid, p) {
+    if (durduruldu) return
+    if (p?.tablo === 'kick') {
+      if (p.user_id === profile.id && !cikarildimIdleri.has(sid)) {
+        cikarildimIdleri.add(sid)
+        const ad = servers.find((s) => s.id === sid)?.name
+        toast(ad ? `${ad} sunucusundan çıkarıldın.` : 'Bir sunucudan çıkarıldın.')
+      }
+      return
+    }
+    if (sid === sunucuId && !anaSayfa) rolleriGecikmeliYukle()
+  }
+  // Profil kartının "Roller" bölümü ve "Sunucudan çıkar" (bakılan sunucunun üyesiyse)
+  function rolKartBilgisi(kisi) {
+    if (anaSayfa || !sunucuId || rolVerisi.serverId !== sunucuId) return null
+    if (!uyeler.some((u) => u.id === kisi.id)) return null
+    const sid = sunucuId
+    const sunucu = servers.find((s) => s.id === sid)
+    if (!sunucu) return null
+    const y = yetkim()
+    const { roles, memberRoles } = rolVerisi
+    const hedefUstSira = ustSira(sunucu, roles, memberRoles, kisi.id)
+    const benMi = kisi.id === profile.id
+    const atanmis = new Set(memberRoles.filter((m) => m.user_id === kisi.id).map((m) => m.role_id))
+    const roller = siraliRoller(roles).filter((r) => !r.is_default).map((rol) => ({
+      rol,
+      atanmis: atanmis.has(rol.id),
+      degistirilebilir: rolAtanabilir(y, rol, { hedefUstSira, benMi, ver: !atanmis.has(rol.id) }),
+    }))
+    return {
+      roller,
+      onToggle: async (rol, ver) => {
+        await setMemberRole(sid, kisi.id, rol.id, ver)
+        await rolleriYukle(sid)
+      },
+      onKick: cikarilabilir(y, { hedefUstSira, benMi }) ? () => uyeyiCikar(sunucu, kisi) : undefined,
+    }
+  }
+  function uyeyiCikar(sunucu, kisi) {
+    kickMemberDialog(kisi, sunucu, async () => {
+      try { await kickMember(sunucu.id, kisi.id) } catch (e) { return hataMetni(e) }
+      uyeleriYenile()
+      return null
+    })
+  }
+  // Mesaj yazarının adı: en yüksek renkli rolün rengi (bakılan sunucuda)
+  function rolRengi(userId) {
+    return rolVerisi.serverId === sunucuId ? kisiGorunumu(rolVerisi.roles, rolVerisi.memberRoles, userId).renk : null
+  }
+
   let servers = []
   let olaylar = null // sunucu olayları aboneliği (bkz. sunucuOlaylariniAyarla)
   let kanallar = []
@@ -1076,8 +1187,11 @@ export async function startApp(root, profile, { email = '' } = {}) {
   }
   // Sunucu mesajı beni anıyorsa: başlık "Ad (#kanal, Sunucu)". Kanal ve yazar elimizde yoksa (başka
   // sunucu) veritabanından alınır; yalnız beni anan mesajlarda (seyrek) sorgu atılır.
+  // @herkes/@everyone (v0.11.0): yalnız yazarın o sunucuda MENTION_EVERYONE izni varsa bildirim verir
+  // (bakılan sunucuda yerel rollerden, başka sunucuda veritabanına sorulur; yalnız @herkes içeren seyrek mesajlarda).
   async function kanalMesajiGeldi(m, serverId) {
-    if (durduruldu || !mentionsUser(m.content, profile.username)) return
+    const anar = mentionsUser(m.content, profile.username)
+    if (durduruldu || (!anar && !mentionsEveryone(m.content))) return
     let kanal = kanallar.find((k) => k.id === m.channel_id) ?? null
     if (kanal) serverId = sunucuId
     // Ucuz ön denetim (sunucu biliniyorsa sessiz kuralı dahil); sorgudan sonra yeniden bakılır
@@ -1086,6 +1200,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
       if (!kanal) kanal = await getChannel(m.channel_id)
       if (!kanal) return
       serverId = kanal.server_id ?? serverId
+      if (!anar) {
+        const izinli = rolVerisi.serverId === serverId && sunucuId === serverId
+          ? yetkiSunucuda(serverId, m.author_id).has('MENTION_EVERYONE')
+          : await hasPermission(serverId, m.author_id, 'MENTION_EVERYONE')
+        if (!izinli || durduruldu) return
+      }
       const yazar = uyeler.find((u) => u.id === m.author_id) ?? (await fetchProfiles([m.author_id]))[0]
       const sunucu = servers.find((s) => s.id === serverId)
       if (durduruldu || !yazar || !sunucu) return
@@ -1165,7 +1285,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     const idler = servers.map((s) => s.id)
     if (olaylar) olaylar.update(idler)
     // Aynı konudan tepki ve sabit olayları (009): açık sohbete iletilir, yeni abonelik yok
-    else olaylar = subscribeServerEvents(idler, sunucuOlayi, { onReaction: (_sid, p) => tepkiOlayi(p), onPin: (_sid, p) => sabitOlayi(p) })
+    else olaylar = subscribeServerEvents(idler, sunucuOlayi, { onReaction: (_sid, p) => tepkiOlayi(p), onPin: (_sid, p) => sabitOlayi(p), onRoles: (sid, p) => rolOlayi(sid, p) })
   }
 
   // Ana alan: sohbet her zaman SON SEÇİLEN YAZILI kanalı gösterir (sesli kanala tıklamak onu değiştirmez).
@@ -1192,7 +1312,15 @@ export async function startApp(root, profile, { email = '' } = {}) {
     } else if (anahtar === 'hata') {
       sohbetAlani.appendChild(renderLoadError('Sunucular yüklenemedi. Bağlantını kontrol edip yeniden dene.', yenidenDene))
     } else if (kanal) {
-      sohbet = mountChat(sohbetAlani, { channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id, headerActions: [mesajArama.kutu, uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(), members: uyeSunucusu === sunucuId ? uyeler : [] })
+      sohbet = mountChat(sohbetAlani, {
+        channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id,
+        headerActions: [mesajArama.kutu, uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(),
+        members: uyeSunucusu === sunucuId ? uyeler : [],
+        // Roller (v0.11.0): her çizimde yeniden sorulur
+        getYetki: () => yetkim(),
+        getRolRengi: (id) => rolRengi(id),
+        herkesAnabilir: (id) => !!sunucuId && yetkiSunucuda(sunucuId, id).has('MENTION_EVERYONE'),
+      })
     }
   }
 
@@ -1240,6 +1368,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       yaziliId = null
       uyeler = []
       uyeSunucusu = null
+      rolVerisiniSifirla()
       sesAbonelikleriniAyarla()
     }
     yerYaz('ana')
@@ -1511,6 +1640,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     const sunucu = anaSayfa ? null : servers.find((s) => s.id === sunucuId)
     renderChannelList(panel, {
       server: sunucu,
+      // + kanal ve ⚙: MANAGE_CHANNELS (v0.11.0; roller yüklenene kadar yalnız sahip)
+      canManageChannels: sunucu ? yetkim().has('MANAGE_CHANNELS') : false,
       home: anaSayfa ? anaSayfaSolSutun() : null,
       channels: kanallar,
       profile,
@@ -1806,6 +1937,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   async function sunucuSec(id, tercihKanal) {
     anaSayfa = false
     yerYaz('sunucu')
+    if (rolVerisi.serverId !== id) rolVerisiniSifirla(id) // başka sunucunun rolleri bu sunucuda sayılmasın
     sunucuId = id
     sesAbonelikleriniAyarla() // bu sunucunun sesli kanallarında kim var
     let liste = []
@@ -1818,6 +1950,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     kanalId = yaziliId ?? kanallar[0]?.id ?? null
     if (yaziliId) sonuYaz(sunucuId, yaziliId)
     cizHepsi()
+    rolleriYukle(id) // roller üyelerle aynı anda (gelince ilgili yerler yeniden çizilir)
     // Üye listesi (çevrimiçi/çevrimdışı gruplu)
     let uyeListesi = []
     try { uyeListesi = await listMembers(id) } catch (e) { toast(e.message, 'hata') }
@@ -1841,6 +1974,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
       opener,
       sunucu,
       sahip: sunucu.owner_id === profile.id,
+      izinler: yetkim(),
       sessiz: sessizSunucular.has(sunucu.id),
       tik: {
         onInvite: () => davetKopyala(sunucu),
@@ -1854,11 +1988,24 @@ export async function startApp(root, profile, { email = '' } = {}) {
   }
 
   function kanalMenusu(kanal, opener) {
+    // Aynı türdeki komşu varsa taşıma öğeleri (kanallar position sırasıyla gelir)
+    const ayniTur = kanallar.filter((k) => k.kind === kanal.kind)
+    const sira = ayniTur.findIndex((k) => k.id === kanal.id)
     openChannelMenu({
       opener,
       kanal,
-      tik: { onRename: () => kanaliAdlandir(kanal), onDelete: () => kanaliSil(kanal) },
+      tik: {
+        onRename: () => kanaliAdlandir(kanal),
+        onDelete: () => kanaliSil(kanal),
+        onMoveUp: sira > 0 ? () => kanaliTasi(kanal, -1) : undefined,
+        onMoveDown: sira >= 0 && sira < ayniTur.length - 1 ? () => kanaliTasi(kanal, 1) : undefined,
+      },
     })
+  }
+
+  async function kanaliTasi(kanal, yon) {
+    try { await moveChannel(kanal.id, yon) } catch (e) { toast(hataMetni(e), 'hata'); return }
+    await listeleriTazele()
   }
 
   // O sunucudaki sesli kanaldaysak önce oradan çıkarız (RPC'den ÖNCE: satırımız silinirken
@@ -1889,14 +2036,51 @@ export async function startApp(root, profile, { email = '' } = {}) {
     })
   }
 
+  // Sunucu ayarları: Genel (MANAGE_SERVER: ad, davet kodu) ve Roller (MANAGE_ROLES) sekmeleri
   function sunucuAyarlari(sunucu) {
+    const y = yetkim()
+    const genel = y.has('MANAGE_SERVER')
+    const sid = sunucu.id
+    // Rol işlemleri: RPC, sonra roller yeniden yüklenir (panel güncel listeyi görsün); hata panele düşer
+    const rolIsi = async (is) => {
+      const sonuc = await is()
+      await rolleriYukle(sid)
+      return sonuc
+    }
     serverSettingsDialog(sunucu, {
-      kopyala: () => davetKopyala(sunucu),
+      genel,
+      kopyala: () => davetKopyala(servers.find((s) => s.id === sid) ?? sunucu),
       kaydet: async (ad) => {
-        try { await renameServer(sunucu.id, ad) } catch (e) { return hataMetni(e) }
+        try { await renameServer(sid, ad) } catch (e) { return hataMetni(e) }
         await listeleriTazele()
         return null
       },
+      yenile: genel
+        ? async () => {
+            let kod
+            try { kod = await regenerateInvite(sid) } catch (e) { return hataMetni(e) }
+            await listeleriTazele()
+            return { kod }
+          }
+        : null,
+      roller: y.has('MANAGE_ROLES')
+        ? () => {
+            const panel = mountRolesPanel({
+              getDurum: () => ({ roles: rolVerisi.serverId === sid ? rolVerisi.roles : [], yetki: yetkiSunucuda(sid) }),
+              islemler: {
+                olustur: () => rolIsi(() => createRole(sid, { name: 'yeni rol' })),
+                kaydet: (rol, d) => rolIsi(() => updateRole(rol.id, d)),
+                sil: (rol) => rolIsi(() => deleteRole(rol.id)),
+                tasi: (rol, hedef) => rolIsi(() => moveRole(rol.id, hedef)),
+              },
+            })
+            ayarlarRolPaneli = panel
+            return {
+              el: panel.el,
+              kapat: () => { panel.kapat(); if (ayarlarRolPaneli === panel) ayarlarRolPaneli = null },
+            }
+          }
+        : null,
     })
   }
 
@@ -1959,8 +2143,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (ses && !varMi(sesSunucuId)) {
       const gidenId = sesSunucuId
       sesliAyril(false, { hemen: true })
-      // Başka pencereden biz ayrıldıysak "silindi" demeyiz
-      toast(ayrildimIdleri.has(gidenId) ? 'Sunucudan ayrıldın.' : 'Bu sunucu silindi.')
+      // Başka pencereden biz ayrıldıysak "silindi" demeyiz; çıkarıldıysak bildirim zaten gösterildi
+      if (!cikarildimIdleri.has(gidenId)) toast(ayrildimIdleri.has(gidenId) ? 'Sunucudan ayrıldın.' : 'Bu sunucu silindi.')
     }
     // Bakılan sunucu artık yok: sıradakine (yoksa karşılama ekranına) geç
     if (sunucuId && !varMi(sunucuId)) {
@@ -2013,6 +2197,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     yaziliId = null
     uyeler = []
     uyeSunucusu = null
+    rolVerisiniSifirla()
     sesAbonelikleriniAyarla()
     cizHepsi()
     cizUyeler()
@@ -2027,6 +2212,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (durduruldu) return
     if (payload?.tablo === 'server_members' && payload?.islem === 'DELETE' && payload?.user_id === profile.id) ayrildimIdleri.add(sid)
     if (sid === sunucuId && (payload?.yeniden || payload?.tablo === 'server_members')) uyeleriYenile()
+    if (sid === sunucuId && payload?.yeniden && !anaSayfa) rolleriGecikmeliYukle() // kaçan "roller" olayı olabilir
     listeleriTazele()
   }
   function uyeleriYenile() {
