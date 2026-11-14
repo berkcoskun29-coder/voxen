@@ -1,5 +1,5 @@
 // Sabitlenmiş mesajlar penceresi (başlıktaki 📌 düğmesi açar). Ortak pencere kalıbı: modal.js.
-// Her satır: yazar, kısa metin, tarih. Satıra tıklayınca pencere kapanır ve mesaja gidilir.
+// Her satır: yazar, kısa metin, sabitlenme tarihi. Satıra tıklayınca pencere kapanır ve mesaja gidilir.
 // Yetkiliye her satırda "Sabitlemeyi kaldır" düğmesi. Kullanıcı yazısı hep textContent ile.
 import { createModalShell } from './modal.js'
 import { toast } from './layout.js'
@@ -43,7 +43,10 @@ export function sabitListesiAc({ yukle, adBul, yetkili, kaldir, git, profilleriY
     ad.textContent = adBul(m.author_id)
     const zaman = document.createElement('span')
     zaman.className = 'pin-item-date'
-    zaman.textContent = tarihBicimi.format(new Date(m.created_at))
+    // Liste sabitlenme sırasıyla dizili: tarih de sabitlenme tarihi (yoksa mesajın tarihi)
+    const sabitlenme = new Date(m.pinned_at ?? NaN)
+    zaman.textContent = tarihBicimi.format(Number.isNaN(sabitlenme.getTime()) ? new Date(m.created_at) : sabitlenme)
+    zaman.dataset.tip = 'Sabitlenme tarihi'
     ust.append(ad, zaman)
     const metin = document.createElement('span')
     metin.className = 'pin-item-text'

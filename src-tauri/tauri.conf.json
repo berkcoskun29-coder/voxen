@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Voxen",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "identifier": "com.voxen.app",
   "build": {
     "frontendDist": "../dist",
@@ -22,6 +22,7 @@
         "fullscreen": false,
         "center": true,
         "backgroundColor": "#16181d",
+        "dragDropEnabled": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
       }
     ],

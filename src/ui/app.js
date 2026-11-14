@@ -41,6 +41,7 @@ import { fetchDmList, openDm, hideDm, dmSource, subscribeAllDmMessages, flushDmR
 import { subscribeUserEvents } from '../data/userEvents.js'
 import { fetchMutedServers, muteServer, unmuteServer } from '../data/mutes.js'
 import { fetchProfiles } from '../data/messages.js'
+import { yetimleriTemizle } from '../data/attachments.js'
 import { mentionsUser } from '../mentions.js'
 import { shouldNotify, shouldNotifyCall, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni } from '../notify.js'
 import { renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, kisiDurumu } from './home.js'
@@ -99,6 +100,9 @@ export const appVoice = {
 // Kendi pencerelerimizden biri varlıktan düşünce, satırını silmeden önce bu kadar bekleriz
 // (kısa bir bağlantı kopukluğunda canlı pencerenin satırı silinmesin). Testler değiştirebilir.
 export const appTiming = { staleWindowGraceMs: 10000 }
+// Açılıştan bu kadar sonra mesaja bağlı olmayan kendi eklerimiz depodan temizlenir (günde en çok bir kez;
+// bkz. data/attachments.js yetimleriTemizle). Açılışı yavaşlatmasın diye beklenir.
+const EK_TEMIZLIK_GECIKMESI_MS = 30000
 // Çıkış'ta sesli durum silmesini en fazla bu kadar bekleriz (ağ yoksa çıkış takılmasın)
 const CIKIS_BEKLEME_MS = 3000
 
@@ -350,6 +354,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Masaüstü: Rust tuş dinleyicisine bağlan; tepsi menüsündeki "Sustur" sesli kanaldaysak susturur
   let masaustuBirak = []
   let durduruldu = false
+  let ekTemizligi = null // yetim ek temizliği zamanlayıcısı
   let kancaHatasi = false // klavye kancası çalışmıyor: bas-konuş tuşu algılanamaz
   let guncellemeBandi = null
   if (masaustu) {
@@ -574,6 +579,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     ayarDinlemeyiBirak()
     ptt.dispose()
     durduruldu = true
+    clearTimeout(ekTemizligi)
     guncellemeBandi?.dispose()
     masaustuBirak.forEach((f) => f())
     masaustuBirak = []
@@ -584,6 +590,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (aktifUygulama === buUygulama) aktifUygulama = null
   }
   aktifDurdur = varligiDurdur
+  // Gönderilmeyen ya da mesajı silinen kendi eklerimiz (yetimler) depodan silinir (hata yutulur)
+  ekTemizligi = setTimeout(() => { if (!durduruldu) yetimleriTemizle().catch(() => {}) }, EK_TEMIZLIK_GECIKMESI_MS)
   const buUygulama = { aramayaGir, aramadanCik, aktifSes }
   aktifUygulama = buUygulama
 

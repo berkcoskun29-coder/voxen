@@ -53,15 +53,15 @@ beforeEach(() => {
 })
 
 describe('mesaj sorgusu tepki ve sabit bilgisini gömer', () => {
-  it('kanal: message_reactions ve message_pins', async () => {
+  it("kanal: message_reactions, message_pins ve attachments", async () => {
     await fetchMessages('c1')
     expect(fake.sorgular[0].select).toBe(MESAJ_SECIMI)
-    expect(MESAJ_SECIMI).toBe('*, reactions:message_reactions(emoji, user_id), pin:message_pins(pinned_at, pinned_by)')
+    expect(MESAJ_SECIMI).toBe('*, reactions:message_reactions(emoji, user_id), pin:message_pins(pinned_at, pinned_by), attachments(id, path, name, mime, size, width, height, uploader)')
   })
   it('DM: dm_message_reactions ve dm_message_pins', async () => {
     await fetchDmMessages('t1')
     expect(fake.sorgular[0].select).toBe(DM_MESAJ_SECIMI)
-    expect(DM_MESAJ_SECIMI).toBe('*, reactions:dm_message_reactions(emoji, user_id), pin:dm_message_pins(pinned_at, pinned_by)')
+    expect(DM_MESAJ_SECIMI).toBe('*, reactions:dm_message_reactions(emoji, user_id), pin:dm_message_pins(pinned_at, pinned_by), attachments(id, path, name, mime, size, width, height, uploader)')
   })
 })
 

@@ -12,11 +12,15 @@ import { createReadMarker } from './reads.js'
 import { joinTyping } from './typing.js'
 import { rpcHatasi } from './friends.js'
 import { etkilesimHatasi } from './reactions.js'
+import { DM_MESAJ_SECIMI } from './sorgular.js'
+import { sendDmWithAttachments, fetchAttachments, removeFiles } from './attachments.js'
 
-// DM mesaj sorgusu: tepkiler ve sabit bilgisi gömülü (messages.js MESAJ_SECIMI'nin DM karşılığı)
-export const DM_MESAJ_SECIMI = '*, reactions:dm_message_reactions(emoji, user_id), pin:dm_message_pins(pinned_at, pinned_by)'
+// DM mesaj sorgusu: tepkiler, sabit bilgisi ve ekler gömülü (messages.js MESAJ_SECIMI'nin DM karşılığı)
+export { DM_MESAJ_SECIMI }
 
 export const GONDEREMEZSIN = 'Bu kişiye mesaj gönderemezsin.'
+// Ekli DM gönderiminde engel kodları (engel bilgisi sızmaz: ikisi aynı metin)
+const DM_EK_OZEL = { BLOCKED_DM: GONDEREMEZSIN, NOT_ALLOWED: GONDEREMEZSIN }
 // DM bağlamında SELF'in istek cümlesi yanlış okunur
 const DM_OZEL = { SELF: 'Kendine mesaj gönderemezsin.' }
 
@@ -224,7 +228,8 @@ export const sistemSatiri = (msg) => msg?.kind === 'call' || msg?.kind === 'pin'
 //  { kind:'dm', id, title, placeholder, other, canSend, fetch(beforeId, { after, limit }), send(content), edit(id, content),
 //    remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
 //    joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg),
-//    react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg) }
+//    react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg),
+//    ekKlasoru, sendWithAttachments(content, ekler, { replyTo }), fetchAttachments(ids), removeFiles(yollar) }
 export function dmSource(thread, selfProfile) {
   const id = thread.id
   const ad = thread.other?.username ?? ''
@@ -239,6 +244,11 @@ export function dmSource(thread, selfProfile) {
     canSend: yazabilir,
     fetch: (beforeId, { after, limit } = {}) => fetchDmMessages(id, { before: beforeId ?? undefined, after, limit }),
     send: (content, { replyTo } = {}) => sendDmMessage(id, content, selfProfile.id, { replyTo }),
+    // Ekler (010): depo klasörü d/<konuşma>; engelde yükleme ve gönderme sunucuda da reddedilir
+    ekKlasoru: `d/${id}`,
+    sendWithAttachments: (content, ekler, { replyTo } = {}) => sendDmWithAttachments(id, content, ekler, { replyTo }, DM_EK_OZEL),
+    fetchAttachments: (ids) => fetchAttachments('dm', ids),
+    removeFiles: (yollar) => removeFiles(yollar),
     react: (mesajId, emoji, ekle) => reactDmMessage(mesajId, emoji, ekle),
     pin: (mesajId, sabitle) => pinDmMessage(mesajId, sabitle),
     fetchPinned: () => fetchPinnedDmMessages(id),

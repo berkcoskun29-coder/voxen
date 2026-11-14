@@ -3,14 +3,16 @@ import { supabase } from '../lib/supabase.js'
 import { joinTyping } from './typing.js'
 import { markRead } from './reads.js'
 import { etkilesimHatasi } from './reactions.js'
+import { MESAJ_SECIMI } from './sorgular.js'
+import { sendMessageWithAttachments, fetchAttachments, removeFiles } from './attachments.js'
 
 export const MAX_UZUNLUK = 2000
 export const SAYFA = 50
 
-// Mesaj sorgusu tepkileri ve sabit bilgisini de gömer (009): ek sorgu yok.
-//   reactions: [{ emoji, user_id }]   pin: { pinned_at, pinned_by } | null
-// Ayrıştırma: reactions.js gomuluTepkiler / gomuluSabit.
-export const MESAJ_SECIMI = '*, reactions:message_reactions(emoji, user_id), pin:message_pins(pinned_at, pinned_by)'
+// Mesaj sorgusu tepkileri, sabit bilgisini (009) ve ekleri (010) de gömer: ek sorgu yok.
+//   reactions: [{ emoji, user_id }]   pin: { pinned_at, pinned_by } | null   attachments: [{ id, path, ... }]
+// Ayrıştırma: reactions.js gomuluTepkiler / gomuluSabit. Metin tek kaynakta: sorgular.js.
+export { MESAJ_SECIMI }
 
 // Kanalın mesajları, ESKİDEN YENİYE sıralı.
 // before verilirse yalnızca o id'den daha eski mesajlar gelir (yukarı kaydırma için).
@@ -175,7 +177,8 @@ export async function fetchProfiles(ids) {
 // Dönen: { kind:'channel', id, title, placeholder, other:null, canSend, fetch(beforeId, { after, limit }),
 //   send(content, { replyTo }), edit(id, content), remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
 //   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg),
-//   react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg) }
+//   react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg),
+//   ekKlasoru, sendWithAttachments(content, ekler, { replyTo }), fetchAttachments(ids), removeFiles(yollar) }
 export function channelSource(channel, { isOwner = false, selfId } = {}) {
   const id = channel.id
   return {
@@ -187,6 +190,11 @@ export function channelSource(channel, { isOwner = false, selfId } = {}) {
     canSend: true,
     fetch: (beforeId, { after, limit } = {}) => fetchMessages(id, { before: beforeId ?? undefined, after, limit }),
     send: (content, { replyTo } = {}) => sendMessage(id, content, selfId, { replyTo }),
+    // Ekler (010): depo klasörü k/<kanal>; mesaj + ekler tek RPC'de
+    ekKlasoru: `k/${id}`,
+    sendWithAttachments: (content, ekler, { replyTo } = {}) => sendMessageWithAttachments(id, content, ekler, { replyTo }),
+    fetchAttachments: (ids) => fetchAttachments('channel', ids),
+    removeFiles: (yollar) => removeFiles(yollar),
     react: (mesajId, emoji, ekle) => reactMessage(mesajId, emoji, ekle),
     pin: (mesajId, sabitle) => pinMessage(mesajId, sabitle),
     fetchPinned: () => fetchPinnedMessages(id),

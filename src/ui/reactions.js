@@ -47,6 +47,10 @@ export function tepkiRozetleri(ozet, { aktif = true, onToggle } = {}) {
 
 let acikSecici = null // aynı anda tek seçici
 
+// Açık seçiciyi kapatır (odak taşınmaz). Sohbet kapanırken (chatView.destroy) çağrılır: seçici
+// document.body'de durduğu için sohbetle birlikte kendiliğinden gitmez.
+export function seciciyiKapat() { acikSecici?.kapat(false) }
+
 // 😊 düğmesinin yanında 8 emojilik kutu açar (sayfanın üstünde, position: fixed).
 // Klavye: ok tuşları / Home / End gezinir, Enter-boşluk seçer (düğme), Esc kapatır ve odak düğmeye döner.
 // Dışarı tıklamak da kapatır. onSec(emoji) seçimde çağrılır (kutu kapanır).

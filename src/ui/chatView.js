@@ -11,8 +11,11 @@ import { eylemCubugu, duzenlendiEtiketi, duzenlemeKutusu, silmeOnayi } from './m
 import { bahsetmeliMetin, mountMentionSuggest } from './mentions.js'
 import { mentionsUser } from '../mentions.js'
 import { EMOJILER, gomuluTepkiler, gomuluSabit } from '../data/reactions.js'
-import { tepkiRozetleri, tepkiSecici } from './reactions.js'
+import { tepkiRozetleri, tepkiSecici, seciciyiKapat } from './reactions.js'
 import { sabitListesiAc, kisalt } from './pins.js'
+import { YER_TUTUCU, EN_FAZLA_EK, KOTA, EK_METINLERI, ekDenetle, turYasakMi, resimMi, depoTuru, ekYolu } from '../data/ekKurallari.js'
+import { uploadFile, kullanimim, indir } from '../data/attachments.js'
+import { ekTepsisi, mesajEkleri, goruntuleyiciAc, goruntuleyiciyiKapat, birakmaKatmani, resimHazirla } from './attachments.js'
 
 // Sistem satırı (DM): arama kaydı ('call') ya da "… bir mesajı sabitledi." ('pin'). Yalnız sunucu yazar.
 const sistemMi = (m) => m?.kind === 'call' || m?.kind === 'pin'
@@ -82,7 +85,9 @@ const tarihBicimi = new Intl.DateTimeFormat('tr-TR', { day: 'numeric', month: 'l
 // tepkiler: [{ emoji, adlar, benim }] -> altta rozetler (tepkiAktif false ise pasif); tik.onToggleReaction(emoji, ekle).
 // yanit: { durum, ad, metin } -> üstte alıntı; tik.onJump() asıl mesaja gider. sabitli: 📌 işareti.
 // vurgulu: kısa süreli vurgu (alıntıdan/listeden gelindi).
-export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null, uyeler = null, anar = false, tepkiler = null, tepkiAktif = true, yanit = null, sabitli = false, vurgulu = false } = {}) {
+// ekler: [{ path, name, mime, size, width, height }] -> metnin altında resim önizlemeleri / dosya kartları;
+//   tik.onOpenImage(sira), tik.onDownload(ek). Ekli mesajın yer tutucu yazısı ("📎 dosya") gösterilmez.
+export function renderMessage(msg, profile, { grouped = false, izin = null, tik = null, editor = null, uyeler = null, anar = false, tepkiler = null, tepkiAktif = true, yanit = null, sabitli = false, vurgulu = false, ekler = null } = {}) {
   // Sistem satırı (DM, kind 'call' arama kaydı / 'pin' sabitleme): ortalanmış soluk satır; avatar, ad başlığı
   // ve eylem simgeleri yok
   if (sistemMi(msg)) {
@@ -150,11 +155,15 @@ export function renderMessage(msg, profile, { grouped = false, izin = null, tik 
     el.classList.add('editing')
     govde.appendChild(editor)
   } else {
-    metin.appendChild(uyeler ? bahsetmeliMetin(msg.content, uyeler) : linkliMetin(msg.content))
+    // Yazısız ekli mesajın içeriği yer tutucudur (eski istemciler için); ekler görünüyorsa yazılmaz
+    const yerTutucu = ekler?.length > 0 && msg.content === YER_TUTUCU
+    if (!yerTutucu) metin.appendChild(uyeler ? bahsetmeliMetin(msg.content, uyeler) : linkliMetin(msg.content))
     // Gruplanmış satırda görünür saat yok (yalnız hover'da); etiket bu durumda metnin sonunda kalır
     if (msg.edited_at && grouped) metin.appendChild(duzenlendiEtiketi(msg.edited_at))
     if (sabitli && grouped) metin.appendChild(sabitIsareti())
-    govde.appendChild(metin)
+    if (metin.childNodes.length) govde.appendChild(metin)
+    const ekKutusu = mesajEkleri(ekler, { onAc: (i) => tik?.onOpenImage?.(i), onIndir: (ek) => tik?.onDownload?.(ek) })
+    if (ekKutusu) govde.appendChild(ekKutusu)
   }
   const rozetler = tepkiRozetleri(tepkiler, { aktif: tepkiAktif, onToggle: (emoji, ekle) => tik?.onToggleReaction?.(emoji, ekle) })
   if (rozetler) govde.appendChild(rozetler)
@@ -254,6 +263,16 @@ export function mountChat(container, { source = null, channel = null, profile, i
   let yanit = null // yazı kutusundaki yanıt: { id, ad }
   let vurgulu = null // kısa süre vurgulanan mesaj id'si
   let vurguZamani = null
+  // --- Ekler (010) ---
+  // Kaynak ekli göndermeyi desteklemiyorsa (eski/sahte kaynak) ya da yazılamıyorsa (engel) ekleme kapalı.
+  const ekGonderilir = yazabilir && typeof kaynak.sendWithAttachments === 'function' && !!kaynak.ekKlasoru
+  const ekler = new Map() // mesaj id -> [ek] (id sırasıyla)
+  let bekleyenEkler = [] // yazı kutusundaki ekler: { id, blob, ad, tur, boyut, genislik, yukseklik, onizleme, yol, durum, ilerleme, hata }
+  let ekSayaci = 0
+  let hazirlanan = 0 // küçültülmekte olan dosya sayısı (4 sınırına sayılır)
+  let yuklemeSozu = null // süren eski mesaj yüklemesi (mesajaGit bekler)
+  const gonderimdekiler = new Set() // RPC'si süren ekler (destroy bunları silmez)
+  const hazirliklar = new Set() // süren dosyalariEkle işleri (Enter bunları bekler)
 
   container.innerHTML = ''
   if (headerHost) headerHost.innerHTML = ''
@@ -313,7 +332,33 @@ export function mountChat(container, { source = null, channel = null, profile, i
   yanitSeridi.className = 'reply-bar'
   yanitSeridi.hidden = true
   yanitSeridi.setAttribute('aria-live', 'polite')
-  if (yazabilir) alt.append(yanitSeridi, uyari, kutu, yaziyor)
+  // Ek kartları (yazı kutusunun üstünde) ve 📎 "Dosya ekle" düğmesi (kutunun solunda)
+  const tepsi = ekGonderilir ? ekTepsisi({ onKaldir: (id) => ekKaldir(id), onTekrar: () => gonder() }) : null
+  const satir = document.createElement('div')
+  satir.className = 'composer-row'
+  if (ekGonderilir) {
+    const ekDugmesi = document.createElement('button')
+    ekDugmesi.type = 'button'
+    ekDugmesi.className = 'icon-btn composer-attach'
+    ekDugmesi.setAttribute('aria-label', 'Dosya ekle')
+    ekDugmesi.dataset.tip = 'Dosya ekle'
+    ekDugmesi.textContent = '📎'
+    const dosyaGirdisi = document.createElement('input')
+    dosyaGirdisi.type = 'file'
+    dosyaGirdisi.multiple = true
+    dosyaGirdisi.hidden = true
+    dosyaGirdisi.tabIndex = -1
+    dosyaGirdisi.className = 'composer-file-input'
+    ekDugmesi.onclick = () => dosyaGirdisi.click()
+    dosyaGirdisi.addEventListener('change', () => {
+      const secilen = [...(dosyaGirdisi.files ?? [])]
+      dosyaGirdisi.value = ''
+      dosyalariEkle(secilen)
+    })
+    satir.append(ekDugmesi, dosyaGirdisi)
+  }
+  satir.appendChild(kutu)
+  if (yazabilir) alt.append(yanitSeridi, ...(tepsi ? [tepsi.el] : []), uyari, satir, yaziyor)
   else {
     // Engel: kutu kapanır, yerine açıklama (eski mesajlar görünür kalır)
     const kapali = document.createElement('div')
@@ -418,6 +463,8 @@ export function mountChat(container, { source = null, channel = null, profile, i
           onPin: () => sabitDegistir(m.id, !sabitler.has(m.id)),
           onToggleReaction: (emoji, ekle) => tepkiDegistir(m.id, emoji, ekle),
           onJump: () => mesajaGit(m.reply_to),
+          onOpenImage: (sira) => resmiAc(m.id, sira),
+          onDownload: (ek) => ekiIndir(ek),
           onEdit: () => duzenleBaslat(m.id),
           onDelete: (shift) => silIste(m.id, shift),
         },
@@ -429,6 +476,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
         yanit: m.reply_to != null ? yanitBilgisi(m.reply_to) : null,
         sabitli: sabitler.has(m.id),
         vurgulu: vurgulu === m.id,
+        ekler: ekler.get(m.id) ?? null,
       }))
       onceki = m
     }
@@ -514,11 +562,17 @@ export function mountChat(container, { source = null, channel = null, profile, i
       const s = gomuluSabit(m)
       if (s === null) sabitler.delete(m.id)
       else if (s !== undefined) sabitler.add(m.id)
+      // Gömülü ekler (010); alan yoksa (canlı satır) dokunulmaz
+      if (Array.isArray(m.attachments)) {
+        if (m.attachments.length) ekler.set(m.id, siraliEkler(m.attachments))
+        else ekler.delete(m.id)
+      }
     }
   }
 
   const tepkiSuruyor = new Set() // "id:emoji" (çift tık tek istek)
   async function tepkiDegistir(id, emoji, ekle) {
+    if (kapandi) return // sohbet kapandı: açık kalmış seçiciden gelen seçim RPC atmasın
     const m = bul(id)
     if (!m || !tepkiVerilebilir(m)) return
     const anahtar = `${id}:${emoji}`
@@ -631,11 +685,14 @@ export function mountChat(container, { source = null, channel = null, profile, i
   // Asıl mesaja kaydırır ve 2 sn vurgular. Yüklü değilse eski mesajlar sayfa sayfa yüklenir (en çok 10 sayfa).
   async function mesajaGit(id) {
     if (id == null || kapandi) return
-    for (let i = 0; i < 10 && !bul(id) && eskiVar && mesajlar.length && Number(id) < Number(mesajlar[0].id); i++) {
-      const once = mesajlar.length
+    // Yalnız burada başlatılan sayfalar 10 sınırına sayılır; süren bir yükleme (ör. yukarı kaydırma) varsa
+    // onun bitmesi beklenir (yavaş bağlantıda erkenden "Mesaj bulunamadı" denmesin).
+    let sayfa = 0
+    while (!kapandi && !bul(id) && eskiVar && mesajlar.length && Number(id) < Number(mesajlar[0].id)) {
+      if (yukleniyor && yuklemeSozu) { await yuklemeSozu; continue }
+      if (sayfa >= 10) break
+      sayfa++
       await eskileriYukle()
-      if (kapandi) return
-      if (mesajlar.length === once && yukleniyor) await new Promise((r) => setTimeout(r, 50)) // başka yükleme sürüyor
     }
     if (kapandi) return
     if (!bul(id)) { toast('Mesaj bulunamadı'); return }
@@ -655,7 +712,8 @@ export function mountChat(container, { source = null, channel = null, profile, i
     const m = bul(id)
     if (!m || !duzenlenebilir(m) || kapandi) return
     if (duzenle?.id === id) { duzenle.ed.kutu.focus(); return }
-    const ed = duzenlemeKutusu(m.content, {
+    // Yazısız ekli mesajda kutu yer tutucuyla ("📎 dosya") değil boş açılır
+    const ed = duzenlemeKutusu(ilkDuzenlemeMetni(m), {
       kaydet: (metin) => duzenleKaydet(id, ed, metin),
       vazgec: () => duzenleKapat(true),
     })
@@ -672,10 +730,15 @@ export function mountChat(container, { source = null, channel = null, profile, i
     if (odakVer) kutu.focus()
   }
 
+  function ilkDuzenlemeMetni(m) {
+    return ekler.get(m.id)?.length && m.content === YER_TUTUCU ? '' : m.content
+  }
+
   async function duzenleKaydet(id, ed, metin) {
     const m = bul(id)
     if (!m || ed.kaydediyor) return
-    if (metin.trim() === m.content) { duzenleKapat(true); return } // değişmedi: boşuna istek atma
+    // Değişmedi: boşuna istek atma. Yazısız ekli mesajda kutu boş açılır; boş kalırsa da değişmedi sayılır.
+    if (metin.trim() === m.content || (metin.trim() === '' && ilkDuzenlemeMetni(m) === '')) { duzenleKapat(true); return }
     ed.kaydediyor = true
     try {
       const sonuc = await kaynak.edit(id, metin)
@@ -707,6 +770,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
     yanitHedefleri.set(id, { ...(eski ?? { id }), deleted_at: eski?.deleted_at || 'silindi' })
     tepkiler.delete(id)
     sabitler.delete(id)
+    ekler.delete(id)
     if (yanit?.id === id) { yanitIptal(); toast('Yanıtladığın mesaj silindi.') }
     const vardi = mesajlar.length
     mesajlar = mesajlar.filter((m) => m.id !== id)
@@ -719,7 +783,12 @@ export function mountChat(container, { source = null, channel = null, profile, i
   async function silYap(m) {
     if (siliniyor.has(m.id)) return null
     siliniyor.add(m.id)
+    // Silinen mesajın dosyaları depodan da silinir. Yollar silmeden ÖNCE alınır (mesaj listeden kalkınca gider).
+    // Yazar kendi dosyalarını siler; sunucu sahibi (moderasyon) başkasının dosyasını, mesaj silinip ek satırı
+    // gidince siler (010: ek_silinebilir). Silinemeyen olursa sahibinin yetim temizliği alır.
+    const dosyalar = (ekler.get(m.id) ?? []).map((e) => e.path).filter(Boolean)
     try { await kaynak.remove(m.id) } catch { return 'Mesaj silinemedi. Tekrar dene.' } finally { siliniyor.delete(m.id) }
+    if (dosyalar.length) Promise.resolve(kaynak.removeFiles?.(dosyalar)).catch(() => {})
     if (!kapandi) mesajKaldir(m.id)
     return null
   }
@@ -816,12 +885,20 @@ export function mountChat(container, { source = null, channel = null, profile, i
     if (yeniler.some((m) => m.reply_to != null && !bul(m.reply_to) && !yanitHedefleri.has(m.reply_to))) {
       yanitHedefleriniYukle(yeniler).then(() => { if (!kapandi) yenidenCiz() })
     }
+    // Canlı gelen ekli mesaj: satırda yalnız ek sayısı var; ekler tek sorguyla gelir
+    const eksikEk = yeniler.filter((m) => Number(m.attachment_count) > 0 && !Array.isArray(m.attachments) && !ekler.has(m.id))
+    if (eksikEk.length) ekleriYukle(eksikEk.map((m) => m.id))
   }
 
   // Yukarı kaydırınca 50 eski mesaj
-  async function eskileriYukle() {
-    if (yukleniyor || !eskiVar || mesajlar.length === 0) return
+  // Dönen Promise yükleme bitince çözülür (süren yükleme varsa onunki)
+  function eskileriYukle() {
+    if (yukleniyor || !eskiVar || mesajlar.length === 0) return yuklemeSozu ?? Promise.resolve()
     yukleniyor = true
+    yuklemeSozu = eskileriGetir().finally(() => { yukleniyor = false; yuklemeSozu = null })
+    return yuklemeSozu
+  }
+  async function eskileriGetir() {
     try {
       const gelen = await kaynak.fetch(mesajlar[0].id, { limit: SAYFA })
       if (kapandi) return
@@ -829,8 +906,6 @@ export function mountChat(container, { source = null, channel = null, profile, i
       await ekle(gelen, 'basa')
     } catch {
       if (!kapandi) toast('Eski mesajlar yüklenemedi. Biraz sonra tekrar dene.', 'hata')
-    } finally {
-      yukleniyor = false
     }
   }
   liste.addEventListener('scroll', () => {
@@ -881,26 +956,257 @@ export function mountChat(container, { source = null, channel = null, profile, i
   kutu.addEventListener('input', sayacGuncelle)
   async function gonder() {
     if (gonderiyor) return
+    if (hazirliklar.size) {
+      // Dosya hâlâ hazırlanıyor (resim küçültme): önce bitsin, mesaj eksiz gitmesin
+      gonderiyor = true
+      try { await Promise.all([...hazirliklar]) } finally { gonderiyor = false }
+      if (kapandi) return
+    }
+    if (ekGonderilir && bekleyenEkler.length) return ekliGonder()
     gonderiyor = true
+    const yanitlanan = yanit
     try {
-      const yanitlanan = yanit
       const sonuc = yanitlanan ? await kaynak.send(kutu.value, { replyTo: yanitlanan.id }) : await kaynak.send(kutu.value)
       if (!sonuc.ok) {
         if (sonuc.warning) uyari.textContent = sonuc.warning
         return
       }
-      kutu.value = '' // sadece başarılı gönderimden sonra temizle
-      if (yanit === yanitlanan) yanitIptal()
-      yazanTakibi.stopped()
-      sayacGuncelle()
+      gonderildi(yanitlanan)
       await ekle([sonuc.message], 'sona')
       if (!kapandi) { liste.scrollTop = liste.scrollHeight; altaYapisik = true } // kendi mesajımızda hep en alta in
     } catch (e) {
-      // DM'de engel (veritabanı reddetti): genel "tekrar dene" yerine nedenini söyle
-      toast(e?.message === GONDEREMEZSIN ? GONDEREMEZSIN : 'Mesaj gönderilemedi. Tekrar dene.', 'hata')
+      await gonderimHatasi(e, yanitlanan)
     } finally {
       gonderiyor = false
     }
+  }
+
+  // Başarılı gönderimden sonra kutu, yanıt şeridi ve "yazıyor" temizlenir
+  function gonderildi(yanitlanan) {
+    kutu.value = '' // sadece başarılı gönderimden sonra temizle
+    if (yanit === yanitlanan) yanitIptal()
+    yazanTakibi.stopped()
+    sayacGuncelle()
+  }
+
+  // Gönderim hatası. Yanıtlı gönderim reddedildiyse önce yanıtlanan mesaja bakılır: silinmişse (ya da artık
+  // yoksa) yanıt şeridi kapanır, "Yanıtladığın mesaj silinmiş." çıkar; yazı kutuda kalır, tekrar gönderilebilir.
+  // Engel (DM) ve ek hataları kendi metniyle; gerisi genel metin.
+  async function gonderimHatasi(e, yanitlanan) {
+    if (kapandi) return
+    if (yanitlanan && (e?.code === 'REPLY_GONE' || await yanitHedefiGitti(yanitlanan.id))) {
+      if (kapandi) return
+      if (yanit?.id === yanitlanan.id) yanitIptal()
+      if (bul(yanitlanan.id)) mesajKaldir(yanitlanan.id)
+      toast(EK_METINLERI.REPLY_GONE, 'hata')
+      return
+    }
+    const bilinen = e?.message === GONDEREMEZSIN || (e?.code && Object.hasOwn(EK_METINLERI, e.code))
+    toast(bilinen ? e.message : 'Mesaj gönderilemedi. Tekrar dene.', 'hata')
+  }
+  async function yanitHedefiGitti(id) {
+    if (typeof kaynak.fetchByIds !== 'function') return false
+    try {
+      const [h] = await kaynak.fetchByIds([id])
+      return !h || !!h.deleted_at
+    } catch { return false } // bakılamadı: genel hata gösterilir
+  }
+
+  // --- Ekler: ekleme, kaldırma, gönderme, gösterme ---
+  const siraliEkler = (l) => l.slice().sort((a, b) => Number(a.id) - Number(b.id))
+  const onizlemeAdresi = (blob) => { try { return globalThis.URL?.createObjectURL?.(blob) ?? null } catch { return null } }
+  const onizlemeBirak = (e) => { if (e.onizleme) try { URL.revokeObjectURL(e.onizleme) } catch { /* önemli değil */ } }
+  function tepsiCiz() { tepsi?.ciz(bekleyenEkler, { kilitli: gonderiyor }) }
+
+  // Dosyaları yazı kutusunun üstüne ekler (📎, sürükle-bırak, yapıştırma). Sırayla: tür denetimi, resim
+  // küçültme, sonra boyut denetimi (küçülen fotoğraf 8 MB'a sığabilir). En fazla 4 ek.
+  // Süren her ekleme işi hazirliklar'da tutulur: küçültme sürerken basılan Enter onu bekler (ek geride kalmaz)
+  function dosyalariEkle(dosyalar) {
+    if (!ekGonderilir || kapandi) return Promise.resolve()
+    const is = dosyalariHazirla(dosyalar).finally(() => hazirliklar.delete(is))
+    hazirliklar.add(is)
+    return is
+  }
+  async function dosyalariHazirla(dosyalar) {
+    for (const f of dosyalar) {
+      if (bekleyenEkler.length + hazirlanan >= EN_FAZLA_EK) { toast(EK_METINLERI.TOO_MANY, 'hata'); return }
+      if (turYasakMi(f.name, f.type)) { toast(EK_METINLERI.BLOCKED_TYPE, 'hata'); continue }
+      hazirlanan++
+      let h
+      try { h = await resimHazirla(f) } catch { h = { blob: f, name: f.name, type: f.type, width: null, height: null } } finally { hazirlanan-- }
+      if (kapandi) return
+      const hata = ekDenetle(h.name, h.type, h.blob.size)
+      if (hata) { toast(hata, 'hata'); continue }
+      bekleyenEkler.push({
+        id: ++ekSayaci, blob: h.blob, ad: h.name || 'dosya', tur: h.type || '', boyut: h.blob.size,
+        genislik: h.width ?? null, yukseklik: h.height ?? null,
+        onizleme: resimMi(h.type) ? onizlemeAdresi(h.blob) : null,
+        yol: null, durum: 'hazir', ilerleme: 0, hata: '',
+      })
+      tepsiCiz()
+    }
+  }
+
+  function ekKaldir(id) {
+    if (gonderiyor) return
+    const e = bekleyenEkler.find((x) => x.id === id)
+    if (!e) return
+    bekleyenEkler = bekleyenEkler.filter((x) => x !== e)
+    onizlemeBirak(e)
+    if (e.yol) Promise.resolve(kaynak.removeFiles?.([e.yol])).catch(() => {}) // yüklenmişti: depoda yetim kalmasın
+    tepsiCiz()
+    kutu.focus()
+  }
+
+  // Ekli gönderim: kota → yüklenmemiş ekleri sırayla yükle (ilerleme) → mesaj + ekler tek RPC.
+  // Yükleme hatasında kart kırmızı olur ("Tekrar dene" yeniden çağırır; yüklenmiş ekler yeniden yüklenmez).
+  async function ekliGonder() {
+    gonderiyor = true
+    tepsiCiz()
+    const yanitlanan = yanit
+    try {
+      if (kutu.value.trim().length > MAX_UZUNLUK) { uyari.textContent = 'Mesaj en fazla 2000 karakter olabilir'; return }
+      const yuklenecek = bekleyenEkler.filter((e) => !e.yol)
+      if (yuklenecek.length) {
+        const kullanilan = await kullanimim()
+        if (kapandi) return
+        const yeni = yuklenecek.reduce((t, e) => t + e.boyut, 0)
+        if (kullanilan != null && kullanilan + yeni > KOTA) { toast(EK_METINLERI.QUOTA, 'hata'); return }
+      }
+      for (const e of yuklenecek) {
+        e.durum = 'yukleniyor'; e.ilerleme = 0; e.hata = ''
+        tepsiCiz()
+        const yol = ekYolu(kaynak.ekKlasoru, profile.id, yeniKimlik(), e.ad)
+        try {
+          await uploadFile(yol, e.blob, depoTuru(e.tur), { onProgress: (p) => { e.ilerleme = p; if (!kapandi) tepsiCiz() } })
+        } catch (err) {
+          if (kapandi) return
+          e.durum = 'hata'
+          e.hata = err?.message || 'Yüklenemedi.'
+          return
+        }
+        if (kapandi) { Promise.resolve(kaynak.removeFiles?.([yol])).catch(() => {}); return }
+        e.yol = yol
+        e.durum = 'yuklendi'
+      }
+      tepsiCiz()
+      // Yalnız yüklenmiş ekler gider: gönderim sürerken eklenen dosya (yolu yok) kutuda kalır, sonra gider
+      const gonderilen = bekleyenEkler.filter((e) => e.yol)
+      if (!gonderilen.length) return
+      // Gönderimdeki ekler: sohbet bu arada kapanırsa destroy() bunları silmez; sonucu burada belli olur
+      gonderilen.forEach((e) => gonderimdekiler.add(e))
+      let sonuc
+      try {
+        sonuc = await kaynak.sendWithAttachments(kutu.value, gonderilen.map((e) => ({
+          path: e.yol, name: e.ad, mime: e.tur || 'application/octet-stream', width: e.genislik, height: e.yukseklik,
+        })), { replyTo: yanitlanan?.id ?? null })
+      } catch (err) {
+        // Kapanmışsak ve gönderim düştüyse dosyalar yetim kalmasın
+        if (kapandi) Promise.resolve(kaynak.removeFiles?.(gonderilen.map((e) => e.yol))).catch(() => {})
+        throw err
+      } finally {
+        gonderilen.forEach((e) => gonderimdekiler.delete(e))
+      }
+      if (kapandi) {
+        // Başarılı: mesaj dosyalara bağlı, dokunulmaz. Uyarıyla dönüldüyse (gönderilmedi) dosyalar silinir.
+        if (!sonuc.ok) Promise.resolve(kaynak.removeFiles?.(gonderilen.map((e) => e.yol))).catch(() => {})
+        return
+      }
+      if (!sonuc.ok) { if (sonuc.warning) uyari.textContent = sonuc.warning; return }
+      bekleyenEkler = bekleyenEkler.filter((e) => !gonderilen.includes(e))
+      gonderilen.forEach(onizlemeBirak)
+      gonderildi(yanitlanan)
+      // Ekler bizde zaten var: mesaj hemen ekleriyle çizilir (canlı INSERT aynı id ile gelirse atlanır)
+      const mesaj = {
+        ...sonuc.message,
+        attachments: gonderilen.map((e, i) => ({
+          id: i, path: e.yol, name: e.ad, mime: e.tur || 'application/octet-stream', size: e.boyut,
+          width: e.genislik, height: e.yukseklik, uploader: profile.id,
+        })),
+      }
+      await ekle([mesaj], 'sona')
+      if (!kapandi) { liste.scrollTop = liste.scrollHeight; altaYapisik = true }
+    } catch (e) {
+      await gonderimHatasi(e, yanitlanan)
+    } finally {
+      gonderiyor = false
+      if (!kapandi) tepsiCiz()
+    }
+  }
+  const yeniKimlik = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+
+  // Canlı gelen ekli mesajların ekleri (tek sorgu). Gelmezse yer tutucu yazı görünür kalır.
+  async function ekleriYukle(ids) {
+    if (typeof kaynak.fetchAttachments !== 'function') return
+    try {
+      const gelen = await kaynak.fetchAttachments(ids)
+      if (kapandi) return
+      const gruplar = new Map()
+      for (const e of gelen) {
+        const mid = e.message_id ?? e.dm_message_id
+        if (!gruplar.has(mid)) gruplar.set(mid, [])
+        gruplar.get(mid).push(e)
+      }
+      let degisti = false
+      for (const [mid, l] of gruplar) if (bul(mid)) { ekler.set(mid, siraliEkler(l)); degisti = true }
+      if (degisti) yenidenCiz()
+    } catch { /* ekler gelmedi: yazı görünür kalır */ }
+  }
+
+  function resmiAc(mesajId, sira) {
+    const resimler = (ekler.get(mesajId) ?? []).filter((e) => resimMi(e.mime))
+    if (!resimler.length || kapandi) return
+    goruntuleyiciAc(resimler, sira, {
+      onIndir: (ek) => ekiIndir(ek),
+      donusOdagi: () => liste.querySelectorAll(`.message[data-id="${mesajId}"] .att-image`)[sira] ?? kutu,
+    })
+  }
+  function ekiIndir(ek) {
+    indir(ek).catch(() => { if (!kapandi) toast('Dosya indirilemedi. Tekrar dene.', 'hata') })
+  }
+
+  // Sürükle-bırak: dosya sohbetin üstüne gelince "Göndermek için bırak" katmanı
+  const katman = ekGonderilir ? birakmaKatmani() : null
+  let surukleDerinligi = 0
+  const dosyaSurukleniyor = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files')
+  const surukleOlaylari = {
+    dragenter: (e) => {
+      if (!dosyaSurukleniyor(e)) return
+      e.preventDefault()
+      surukleDerinligi++
+      katman.hidden = false
+    },
+    dragover: (e) => {
+      if (!dosyaSurukleniyor(e)) return
+      e.preventDefault() // bırakmaya izin
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    },
+    dragleave: (e) => {
+      if (!dosyaSurukleniyor(e)) return
+      surukleDerinligi = Math.max(0, surukleDerinligi - 1)
+      if (surukleDerinligi === 0) katman.hidden = true
+    },
+    drop: (e) => {
+      if (!dosyaSurukleniyor(e)) return
+      e.preventDefault()
+      surukleDerinligi = 0
+      katman.hidden = true
+      dosyalariEkle([...(e.dataTransfer?.files ?? [])])
+    },
+  }
+  if (katman) {
+    container.appendChild(katman)
+    for (const [ad, fn] of Object.entries(surukleOlaylari)) container.addEventListener(ad, fn)
+  }
+  // Panodan resim yapıştırma (yazı da varsa yazı ayrıca yapıştırılır)
+  if (ekGonderilir) {
+    kutu.addEventListener('paste', (e) => {
+      const resimler = [...(e.clipboardData?.files ?? [])].filter((f) => String(f.type).startsWith('image/'))
+      if (!resimler.length) return
+      const yaziVar = [...(e.clipboardData?.types ?? [])].includes('text/plain')
+      if (!yaziVar) e.preventDefault()
+      dosyalariEkle(resimler)
+    })
   }
   kutu.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return // @ öneri listesi tuşu kullandı (seçim/gezinme)
@@ -985,6 +1291,27 @@ export function mountChat(container, { source = null, channel = null, profile, i
       if (kapandi || (p?.channel_id ?? p?.thread_id) !== kaynak.id) return
       if (sabitIsle(p.message_id, p.islem === 'INSERT') && bul(p.message_id)) yenidenCiz()
     },
-    destroy() { kapandi = true; clearTimeout(vurguZamani); oneri?.destroy(); gozlemci?.disconnect(); abonelikiKapat(); yazanTakibi.leave().catch(() => {}); if (headerHost) baslik.remove() },
+    destroy() {
+      kapandi = true
+      clearTimeout(vurguZamani)
+      seciciyiKapat() // açık tepki seçicisi (body'de) kalmasın
+      goruntuleyiciyiKapat()
+      oneri?.destroy()
+      gozlemci?.disconnect()
+      abonelikiKapat()
+      yazanTakibi.leave().catch(() => {})
+      if (headerHost) baslik.remove()
+      // Gönderilmemiş ekler: önizlemeler bırakılır, yüklenmiş olanlar depodan silinir
+      // (Gönderimi süren ekler hariç: onları ekliGonder, RPC sonucuna göre halleder)
+      bekleyenEkler.forEach(onizlemeBirak)
+      const yuklenmis = bekleyenEkler.filter((e) => e.yol && !gonderimdekiler.has(e)).map((e) => e.yol)
+      if (yuklenmis.length) Promise.resolve(kaynak.removeFiles?.(yuklenmis)).catch(() => {})
+      bekleyenEkler = []
+      // Sohbet alanı sonraki sohbette yeniden kullanılır: sürükle dinleyicileri kalkar
+      if (katman) {
+        for (const [ad, fn] of Object.entries(surukleOlaylari)) container.removeEventListener(ad, fn)
+        katman.remove()
+      }
+    },
   }
 }
