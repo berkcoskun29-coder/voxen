@@ -2687,3 +2687,103 @@ describe('grup araması düzeltme turu 1 (I1, K6, K8)', () => {
     fake.rows.blocks = []
   })
 })
+
+describe('mesaj arama (v0.10.0)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const msj = (id, ek = {}) => ({
+    id, channel_id: 'b', author_id: 'u1', content: `m${id}`, edited_at: null, deleted_at: null,
+    created_at: new Date(Date.UTC(2026, 10, 13, 10, 0) + id * 60000).toISOString(), ...ek,
+  })
+  const sonucSatiri = (ek = {}) => ({
+    id: 7, tur: 'channel', channel_id: 'b', server_id: 's1', thread_id: null, is_group: false, yer_adi: 'sohbet',
+    other_id: null, author_id: 'u1', author_name: 'berk', content: 'm7 merhaba', created_at: '2026-11-13T10:07:00Z',
+    attachment_count: 0, ...ek,
+  })
+  let sonuclar
+  function rpcKur() {
+    supabase.rpc.mockImplementation(async (ad) => {
+      if (ad === 'search_messages') return { data: sonuclar, error: null }
+      if (ad === 'unread_counts') return { data: [], error: null }
+      if (ad === 'dm_list') return { data: [{ thread_id: 't1', other_id: 'u2', username: 'ali', color: ali.color, avatar_url: null, created_at: '2026-11-01T00:00:00Z', last_message_at: null, unread: 0, can_send: true }], error: null }
+      return { data: null, error: null }
+    })
+  }
+  const girdi = () => document.querySelector('.search-input')
+  const ara = (metin) => {
+    girdi().focus()
+    girdi().value = metin
+    girdi().dispatchEvent(new Event('input', { bubbles: true }))
+    girdi().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  }
+  const aramaCagrilari = () => supabase.rpc.mock.calls.filter(([a]) => a === 'search_messages')
+  beforeEach(() => { sonuclar = [sonucSatiri()] })
+
+  it('sunucuda kutu başlıkta, panel ana alanın sağında; Ctrl+F odaklar; arama sunucu kapsamında', async () => {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('.header-host .header-actions .search-box')).not.toBeNull()
+    expect(document.querySelector('.main-area + .search-panel + .member-panel')).not.toBeNull()
+    const olay = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })
+    document.body.dispatchEvent(olay)
+    expect(olay.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(girdi())
+    ara('merhaba kimden:berk')
+    await bosalt()
+    expect(aramaCagrilari()[0][1]).toMatchObject({ sorgu: 'merhaba', sunucu: 's1', yazar_adi: 'berk', sinir: 26 })
+    expect(document.querySelector('.search-panel').hidden).toBe(false)
+    expect(document.querySelector('.search-result .search-result-place').textContent).toBe('#sohbet')
+    expect(document.querySelector('.search-result mark').textContent).toBe('merhaba')
+  })
+
+  it('sonuca tıklayınca kanal açılır, mesaja kaydırılır ve vurgulanır', async () => {
+    rpcKur()
+    fake.rows.messages = [msj(7, { content: 'm7 merhaba' }), msj(8)]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#genel kanalına mesaj yaz…')
+    ara('merhaba')
+    await bosalt()
+    document.querySelector('.search-result-go').click()
+    await bosalt()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('#sohbet kanalına mesaj yaz…')
+    expect(document.querySelector('.message[data-id="7"]').classList.contains('flash')).toBe(true)
+  })
+
+  it('Ana sayfaya geçince kutu boşalır, panel kapanır; DM kapsamında aranır, DM sonucu DM\'i açar', async () => {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    ara('merhaba')
+    await bosalt()
+    document.querySelector('.rail-home').click()
+    await bosalt()
+    expect(girdi().value).toBe('')
+    expect(document.querySelector('.search-panel').hidden).toBe(true)
+    expect(document.querySelector('.friends-header .search-box')).not.toBeNull()
+    sonuclar = [sonucSatiri({ tur: 'dm', channel_id: null, server_id: null, thread_id: 't1', yer_adi: 'ali', other_id: 'u2' })]
+    fake.rows.dm_messages = [{ id: 7, thread_id: 't1', author_id: 'u1', content: 'm7 merhaba', edited_at: null, deleted_at: null, created_at: '2026-11-13T10:07:00Z' }]
+    ara('merhaba')
+    await bosalt()
+    expect(aramaCagrilari().at(-1)[1]).toMatchObject({ sorgu: 'merhaba', sunucu: null, kanal_adi: null })
+    expect(document.querySelector('.search-result-place').textContent).toBe('@ali')
+    document.querySelector('.search-result-go').click()
+    await bosalt()
+    await bosalt()
+    expect(document.querySelector('textarea').placeholder).toBe('@ali kişisine mesaj gönder')
+    expect(document.querySelector('.header-host .header-actions .search-box')).not.toBeNull()
+    expect(document.querySelector('.message[data-id="7"]').classList.contains('flash')).toBe(true)
+  })
+
+  it('stopApp kutuyu ve paneli kaldırır, Ctrl+F artık yakalanmaz', async () => {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    stopApp()
+    expect(document.querySelector('.search-panel')).toBeNull()
+    const olay = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true })
+    document.body.dispatchEvent(olay)
+    expect(olay.defaultPrevented).toBe(false)
+  })
+})

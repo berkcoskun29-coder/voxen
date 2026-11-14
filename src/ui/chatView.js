@@ -73,6 +73,11 @@ function sabitIsareti() {
 }
 
 const BES_DAKIKA = 5 * 60 * 1000
+// Arama sonucuna giderken (goToMessage): mesajın öncesinden bağlam olarak gelen mesaj sayısı, ileri doğru
+// yükleme sayfası ve en çok sayfa (10 x 200 = 2000 mesaj; daha uzaktaysa yukarı kaydırmak gerekir)
+const BAGLAM = 10
+const ARALIK_SAYFA = 200
+const ARALIK_SAYFA_SAYISI = 10
 
 const saatBicimi = new Intl.DateTimeFormat('tr-TR', { hour: '2-digit', minute: '2-digit' })
 const tarihBicimi = new Intl.DateTimeFormat('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })
@@ -719,6 +724,52 @@ export function mountChat(container, { source = null, channel = null, profile, i
     }, 2000)
   }
 
+  // Arama sonucundan gelinen mesaja gider (v0.10.0). İlk yükleme beklenir. Mesaj listede yoksa ve listenin
+  // en eskisinden eskiyse, mesajın biraz öncesinden (BAGLAM) listenin başına kadar olan mesajlar ileri doğru
+  // sayfa sayfa yüklenir: liste kesintisiz kalır (canlı mesaj, okundu, uzlaştırma eskisi gibi çalışır).
+  // Sonra v0.7'deki mesajaGit yolu kaydırır ve vurgular.
+  async function aramadanGit(id) {
+    if (id == null || kapandi) return
+    await ilkSozu
+    // Süren eski mesaj yüklemesi (yukarı kaydırma) önce biter
+    while (!kapandi && yukleniyor && yuklemeSozu) await yuklemeSozu
+    if (kapandi) return
+    if (!bul(id) && eskiVar && mesajlar.length && Number(id) < Number(mesajlar[0].id)) {
+      yukleniyor = true
+      const is = araligiGetir(Number(id)).finally(() => { yukleniyor = false; yuklemeSozu = null })
+      yuklemeSozu = is.then(() => {})
+      if (!(await is)) { if (!kapandi) toast('Mesaj çok eskide kaldı. Yukarı kaydırarak ulaşabilirsin.'); return }
+    }
+    return mesajaGit(id)
+  }
+  // hedef ile listenin en eskisi arasındaki mesajları getirir. Dönüş: aralık tamamlandı mı (çok uzaksa false:
+  // hiçbir şey eklenmez, listede boşluk olmasın).
+  async function araligiGetir(hedef) {
+    try {
+      const sinir = Number(mesajlar[0].id)
+      const once = await kaynak.fetch(hedef, { limit: BAGLAM }) // hedeften eski birkaç mesaj (bağlam)
+      if (kapandi) return true
+      const gelen = [...once]
+      let son = hedef - 1
+      let tamam = false
+      for (let sayfa = 0; sayfa < ARALIK_SAYFA_SAYISI && !kapandi; sayfa++) {
+        const g = await kaynak.fetch(null, { after: son, limit: ARALIK_SAYFA })
+        if (kapandi) return true
+        const icerde = g.filter((m) => Number(m.id) < sinir)
+        gelen.push(...icerde)
+        if (g.length < ARALIK_SAYFA || icerde.length < g.length) { tamam = true; break }
+        son = g.at(-1).id
+      }
+      if (!tamam || kapandi) return kapandi
+      if (once.length < BAGLAM) eskiVar = false // konuşmanın en başına ulaşıldı
+      await ekle(gelen, 'basa')
+      return true
+    } catch {
+      if (!kapandi) toast('Mesajlar yüklenemedi. Biraz sonra tekrar dene.', 'hata')
+      return true // hata zaten söylendi; mesajaGit "bulunamadı" der
+    }
+  }
+
   function duzenleBaslat(id) {
     const m = bul(id)
     if (!m || !duzenlenebilir(m) || kapandi) return
@@ -1248,8 +1299,8 @@ export function mountChat(container, { source = null, channel = null, profile, i
     getLastId: () => mesajlar.at(-1)?.id ?? null,
   })
 
-  // İlk yükleme
-  kaynak.fetch(null, { limit: SAYFA })
+  // İlk yükleme (aramadanGit bunu bekler)
+  const ilkSozu = kaynak.fetch(null, { limit: SAYFA })
     .then(async (gelen) => {
       if (kapandi) return // bu arada kanal değişti
       if (gelen.length < SAYFA) eskiVar = false
@@ -1261,6 +1312,8 @@ export function mountChat(container, { source = null, channel = null, profile, i
     // Okunmamış sayacı için: kullanıcı en altta mı, en son mesaj hangisi
     isAtBottom: () => enAltta(),
     getLastId: () => mesajlar.at(-1)?.id ?? null,
+    // Arama sonucundan mesaja git (v0.10.0): gerekirse aradaki mesajlar yüklenir, sonra kaydırılır ve vurgulanır
+    goToMessage: (id) => aramadanGit(id),
     // Profil değişince kendi mesajlarımız tazelensin
     updateProfile(p) { profile = p; profiller.set(p.id, p); ciz() },
     // Kanal başka istemcide yeniden adlandırıldı: yalnız adın görüldüğü yerler güncellenir

@@ -52,6 +52,8 @@ import {
 } from '../data/groups.js'
 import { openCreateGroupDialog, openAddMemberDialog, openRenameGroupDialog, confirmLeaveGroup, renderGroupPanel } from './groupDm.js'
 import { createGroupCallFlow, mountGroupCallPanel, grupAramaGorunumu, createGroupCallButton, GRUP_ARAMA_METINLERI } from './groupCall.js'
+import { createMessageSearch } from './messageSearch.js'
+import { searchMessages } from '../data/search.js'
 
 // Son seçilen sunucu/kanal tarayıcıda hatırlanır (sadece kolaylık için).
 function sonuOku() {
@@ -134,6 +136,16 @@ export async function startApp(root, profile, { email = '' } = {}) {
   main.append(baslikAlani, aramaAlani, grupAramaAlani, goruntuAlani, sohbetAlani)
   // Sohbet başlığının sağındaki "Üyeler" düğmesi: tek düğme, her kanal açılışında başlığa taşınır
   const uyeDugmesi = createMemberToggle(uyePaneli)
+  // Mesaj arama (v0.10.0): başlıktaki 🔍 kutusu (tek öğe, görünüm değişince başlığa taşınır) ve sonuç paneli
+  // (ana alanın sağında; açıkken CSS üye panelini gizler). Kapsam: sunucudayken o sunucu, Ana sayfada DM'ler.
+  const mesajArama = createMessageSearch({
+    ara: (cozum, { oncesi }) => searchMessages(anaSayfa ? { tur: 'dm' } : { tur: 'sunucu', id: sunucuId }, cozum, { oncesi }),
+    kapsam: () => (anaSayfa ? 'dm' : 'sunucu'),
+    bilgi: () => aramaOneriBilgisi(),
+    onOpen: (sonuc) => { aramaSonucunuAc(sonuc).catch(() => { /* açılamadı: toast zaten gösterildi */ }) },
+  })
+  main.after(mesajArama.panel)
+  let aramaKapsami = null // kutunun son kapsamı ('dm' ya da 's:<sunucu>'); değişince kutu boşalır
   let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
   let uyeler = []
   let cubukDurumu = '' // çubuktaki durum satırının son çizilen hâli (bkz. cubukDurumunuYenile)
@@ -738,6 +750,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     varlik.stop()
     clearTimeout(uyeZamanlayici)
     uyeDugmesi.dispose()
+    document.removeEventListener('keydown', aramaKisayolu)
+    mesajArama.destroy()
     if (aktifDurdur === varligiDurdur) aktifDurdur = null
     if (aktifUygulama === buUygulama) aktifUygulama = null
   }
@@ -971,6 +985,57 @@ export async function startApp(root, profile, { email = '' } = {}) {
   }
   document.addEventListener('visibilitychange', okunduIsaretle)
 
+  // ---- Mesaj arama: Ctrl+F (⌘F) kutuya odaklar ----
+  // Kutu görünürken (sunucu ya da Ana sayfa) ve açık bir pencere yokken; yoksa tarayıcının bul penceresi çalışır.
+  function aramaKisayolu(e) {
+    if (durduruldu || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || String(e.key).toLowerCase() !== 'f') return
+    if (!mesajArama.kutu.isConnected || document.querySelector('.modal-back')) return
+    e.preventDefault()
+    mesajArama.odakla()
+  }
+  document.addEventListener('keydown', aramaKisayolu)
+  // Kapsam değişince (başka sunucu, Sunucu <-> Ana sayfa) kutu boşalır, panel kapanır
+  function aramaKapsaminiDenetle() {
+    const k = anaSayfa ? 'dm' : `s:${sunucuId ?? ''}`
+    if (k === aramaKapsami) return
+    aramaKapsami = k
+    mesajArama.sifirla()
+  }
+  // Öneri listesi için adlar: sunucuda üyeler ve metin kanalları; Ana sayfada DM kişileri ve grup üyeleri
+  function aramaOneriBilgisi() {
+    if (!anaSayfa) {
+      return {
+        kisiler: uyeler.map((u) => u.username).filter(Boolean),
+        kanallar: kanallar.filter((k) => k.kind === 'text').map((k) => k.name),
+      }
+    }
+    const adlar = new Set([profile.username])
+    for (const t of dmListesi) {
+      if (t.isGroup) for (const u of t.members ?? []) { if (u?.username) adlar.add(u.username) }
+      else if (t.other?.username) adlar.add(t.other.username)
+    }
+    return { kisiler: [...adlar], kanallar: [] }
+  }
+  // Sonuca tıklandı: konuşmayı aç (gerekirse sunucuya geç), sonra mesaja git (chatView goToMessage)
+  async function aramaSonucunuAc(s) {
+    if (durduruldu || !s) return
+    if (s.tur === 'channel') {
+      if (!servers.some((v) => v.id === s.server_id)) return
+      if (anaSayfa || sunucuId !== s.server_id || !kanallar.some((k) => k.id === s.channel_id)) await sunucuSec(s.server_id, s.channel_id)
+      else if (yaziliId !== s.channel_id) kanalSec(s.channel_id)
+      if (durduruldu || anaSayfa || sunucuId !== s.server_id || acikSohbetId !== s.channel_id) return
+    } else {
+      // Listede yoksa (gizlenmiş bire bir konuşma) sonucun bilgisiyle açılır; liste tazelenince güncellenir
+      const thread = dmListesi.find((t) => t.id === s.thread_id) ?? (s.is_group
+        ? { id: s.thread_id, isGroup: true, name: s.yer_adi ?? null, members: [], unread: 0, canSend: true }
+        : { id: s.thread_id, other: { id: s.other_id, username: s.yer_adi ?? '', color: null, avatar_url: null }, createdAt: null, lastMessageAt: null, unread: 0, canSend: true })
+      if (!(anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id)) openDmView(thread)
+      if (!dmListesi.some((t) => t.id === s.thread_id)) sosyalTazele()
+      if (durduruldu || acikSohbetId !== `dm:${s.thread_id}`) return
+    }
+    await sohbet?.goToMessage?.(s.id)
+  }
+
   // ---- Masaüstü bildirimleri (src/notify.js) ----
   // Kararı shouldNotify verir; yeni abonelik açılmaz: DM'ler dmMesajiGeldi'den, kanal mesajları
   // okunmamış sayacının tek aboneliğinden (onMessage) gelir.
@@ -1108,6 +1173,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Hiç sunucu yoksa sohbet yerine karşılama kartı çizilir (acikSohbetId = 'karsilama');
   // sunucular yüklenemediyse hata kutusu ve "Yeniden dene" (acikSohbetId = 'hata').
   function cizMain() {
+    aramaKapsaminiDenetle()
     if (anaSayfa) { cizAnaSayfaMain(); return }
     const kanal = kanallar.find((k) => k.id === yaziliId && k.kind === 'text')
     let anahtar = kanal?.id ?? null
@@ -1126,7 +1192,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     } else if (anahtar === 'hata') {
       sohbetAlani.appendChild(renderLoadError('Sunucular yüklenemedi. Bağlantını kontrol edip yeniden dene.', yenidenDene))
     } else if (kanal) {
-      sohbet = mountChat(sohbetAlani, { channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id, headerActions: [uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(), members: uyeSunucusu === sunucuId ? uyeler : [] })
+      sohbet = mountChat(sohbetAlani, { channel: kanal, profile, isOwner: servers.find((s) => s.id === sunucuId)?.owner_id === profile.id, headerActions: [mesajArama.kutu, uyeDugmesi.button], headerHost: baslikAlani, onBottom: () => okunduIsaretle(), members: uyeSunucusu === sunucuId ? uyeler : [] })
     }
   }
 
@@ -1337,12 +1403,13 @@ export async function startApp(root, profile, { email = '' } = {}) {
         peerStatus: thread.isGroup ? 'offline' : kisiDurumu(varlikHaritasi, thread.other?.id),
         onBottom: () => okunduIsaretle(),
         // 📞 Sesli arama başlat (grupta: Grubu ara / Aramaya katıl (N))
-        headerActions: [thread.isGroup ? grupAramaDugmesi.button : aramaDugmesi.button],
+        headerActions: [mesajArama.kutu, thread.isGroup ? grupAramaDugmesi.button : aramaDugmesi.button],
       })
     } else {
       const sayfa = arkadasSayfasiniAl()
       arkadasSayfasiniGuncelle() // Ana sayfa dışındayken güncellenmedi: son veriyle çiz
       baslikAlani.appendChild(sayfa.header)
+      sayfa.header.appendChild(mesajArama.kutu) // Arkadaşlar sayfasında da DM'lerde arama
       sohbetAlani.appendChild(sayfa.body)
     }
   }

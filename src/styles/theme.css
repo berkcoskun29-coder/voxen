@@ -25,6 +25,7 @@
   --mention-bg-hover: rgba(181, 227, 59, 0.11); /* üzerine gelince biraz daha belirgin */
   --viewer-bg: rgba(8, 9, 11, 0.92);           /* tam boy resim görüntüleyicinin koyu katmanı */
   --drop-bg: rgba(22, 24, 29, 0.88);           /* "Göndermek için bırak" katmanı */
+  --search-mark: rgba(227, 195, 74, 0.3);      /* arama sonucunda eşleşen kelimenin sarı zemini */
 
   /* Yazı boyutu ölçeği: sayfadaki tüm yazılar bu 5 boydan birini kullanır.
      Kullanımı: font-size: var(--fs-sm); */
@@ -1198,3 +1199,63 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .group-call-person { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); width: 72px; }
 .group-call-person .call-avatar { width: 56px; height: 56px; font-size: var(--fs-lg); }
 .group-call-name { font-size: var(--fs-xs); max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ===== Mesaj arama (v0.10.0) ===== */
+/* Başlıktaki kutu: 🔍 simgesi + yazı alanı; altında öneri listesi açılır */
+.search-box { position: relative; display: flex; align-items: center; }
+/* Arkadaşlar sayfasının başlığında en sağa yaslanır (sohbet başlığında .header-actions zaten sağda) */
+.friends-header > .search-box { margin-left: auto; }
+.search-icon { position: absolute; left: var(--sp-2); font-size: var(--fs-xs); pointer-events: none; }
+.search-input {
+  width: 160px; height: 28px; margin: 0; padding: 0 var(--sp-2) 0 26px;
+  background: var(--server-rail); color: var(--text); border: 1px solid transparent; border-radius: 4px;
+  font-size: var(--fs-sm); font-weight: 400; transition: width 0.15s;
+}
+.search-input:focus { width: 240px; border-color: var(--accent); }
+.search-input::placeholder { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .search-input { transition: none; } }
+.search-suggest {
+  position: absolute; top: calc(100% + var(--sp-1)); right: 0; width: 280px; z-index: 20;
+  padding: var(--sp-1); border-radius: 8px; font-weight: 400;
+  background: var(--channel-panel); border: 1px solid var(--selected); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.search-suggest-title { margin: var(--sp-1) var(--sp-2); font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.search-suggest ul { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; }
+.search-option {
+  display: flex; flex-direction: column; gap: 2px; padding: var(--sp-1) var(--sp-2);
+  border-radius: 4px; font-size: var(--fs-sm); cursor: pointer;
+}
+.search-option[aria-selected='true'], .search-option:hover { background: var(--selected); }
+.search-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-option-desc { font-size: var(--fs-xs); color: var(--muted); }
+/* Sonuç paneli: ana alanın sağında; açıkken üye paneli (ya da DM profil kartı) gizlenir */
+.search-panel {
+  width: 360px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  background: var(--channel-panel); border-left: 1px solid var(--server-rail);
+}
+.search-panel:not([hidden]) ~ .member-panel { display: none; }
+.search-panel-head {
+  display: flex; align-items: center; justify-content: space-between; min-height: 52px;
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--server-rail);
+}
+.search-panel-head h2 { margin: 0; font-size: 16px; }
+.search-status { margin: var(--sp-3) var(--sp-4) var(--sp-2); color: var(--muted); font-size: var(--fs-sm); }
+.search-status:empty { display: none; }
+.search-results { flex: 1 1 auto; min-height: 0; list-style: none; margin: 0; padding: 0 var(--sp-2) var(--sp-2); overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-2); }
+.search-result-go {
+  width: 100%; display: flex; flex-direction: column; gap: var(--sp-1); margin: 0; padding: var(--sp-2) var(--sp-3);
+  background: var(--input); color: var(--text); text-align: left; border-radius: 8px; font: inherit; cursor: pointer;
+}
+.search-result-go:hover { background: var(--selected); }
+.search-result-head { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); }
+.search-result-author { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-place { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-date { margin-left: auto; flex: none; color: var(--muted); font-size: var(--fs-xs); }
+.search-result-text { font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.search-result-text mark { background: var(--search-mark); color: var(--text); border-radius: 2px; }
+.search-more { margin: 0 var(--sp-4) var(--sp-4); padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); }
+/* Dar pencerede panel sohbetin üstüne biner (sağdan tam yükseklik) */
+@media (max-width: 1099px) {
+  .search-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(360px, 100vw); z-index: 30; box-shadow: -4px 0 16px rgba(0, 0, 0, 0.4); }
+  .search-input:focus { width: 180px; }
+}
