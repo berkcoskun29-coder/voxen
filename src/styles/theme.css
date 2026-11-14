@@ -1136,3 +1136,65 @@ button.small { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .drop-overlay[hidden] { display: none; }
 .drop-overlay-text { font-size: var(--fs-lg); font-weight: 700; color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .att-viewer, .drop-overlay, .attachment-card { transition: none; animation: none; } }
+
+/* ===== Grup DM (v0.9.0) ===== */
+/* Grup rozeti: ilk iki üyenin baş harfleri üst üste biner (32px kutuda iki 20px daire) */
+.group-badge { position: relative; display: inline-block; flex: none; width: 32px; height: 32px; }
+.group-badge.dm-avatar { display: inline-block; }
+.group-badge-part {
+  position: absolute; width: 20px; height: 20px; border-radius: 50%; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; font-size: var(--fs-xs); font-weight: 700;
+  box-shadow: 0 0 0 2px var(--channel-panel);
+}
+.group-badge-part:first-child { left: 0; top: 0; }
+.group-badge-part:nth-child(2) { right: 0; bottom: 0; }
+.group-badge.header-avatar { width: 24px; height: 24px; }
+.group-badge.header-avatar .group-badge-part { width: 16px; height: 16px; font-size: 9px; } /* istisna: başlıkta küçük rozet */
+.group-badge.group-badge-large { width: 40px; height: 40px; }
+.group-badge.group-badge-large .group-badge-part { width: 28px; height: 28px; font-size: var(--fs-sm); }
+/* Sessizdeki grup: soluk */
+.dm-item.muted { opacity: 0.6; }
+/* DM başlığındaki "+" (Grup oluştur) */
+.dm-group-create { width: 24px; height: 24px; color: var(--muted); }
+.dm-group-create:hover, .dm-group-create:focus-visible { color: var(--text); }
+/* "Aramaya katıl (N)": grup satırının altında yeşil küçük düğme */
+.dm-row-group { flex-wrap: wrap; }
+.dm-join-call {
+  flex-basis: 100%; display: inline-flex; align-items: center; gap: var(--sp-1);
+  margin: 0 var(--sp-2) var(--sp-1) 52px; padding: 2px var(--sp-2); border-radius: 4px;
+  background: var(--accent); color: var(--on-accent); font-size: var(--fs-xs); font-weight: 600; width: fit-content;
+}
+.dm-join-call:hover { background: var(--accent-strong); }
+/* Grup başlığındaki "Aramaya katıl (N)" yazılı düğme */
+.group-call-start.join { width: auto; gap: var(--sp-1); padding: 0 var(--sp-2); color: var(--accent); }
+.group-call-join-text { font-size: var(--fs-sm); font-weight: 600; }
+/* Grup sistem satırı: "berk, ayla'yı ekledi." */
+.message.system-log { font-style: italic; }
+/* Sağ panel: üyeler ve grup işleri */
+.group-panel { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); }
+.group-panel-title { display: flex; align-items: center; gap: var(--sp-3); font-weight: 700; color: var(--text); }
+.group-panel-title > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-members { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.group-member { display: flex; align-items: center; gap: var(--sp-2); }
+.group-member .member-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-owner { font-size: var(--fs-xs); }
+.group-remove { padding: 2px var(--sp-2); font-size: var(--fs-xs); }
+.group-actions { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-3); }
+.group-action { text-align: left; padding: var(--sp-1) var(--sp-2); border-radius: 4px; background: none; color: var(--muted); font-size: var(--fs-sm); }
+.group-action:hover:not(:disabled), .group-action:focus-visible { background: var(--selected); color: var(--text); }
+.group-action.danger { color: var(--danger); background: none; }
+.group-action.danger:hover { background: var(--selected); color: var(--danger); }
+.group-action:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Grup oluştur / üye ekle penceresi: onay kutulu arkadaş listesi */
+.group-picker { border: none; margin: var(--sp-2) 0 0; padding: 0; max-height: 280px; overflow-y: auto; }
+.group-picker legend { font-size: var(--fs-xs); color: var(--muted); margin-bottom: var(--sp-1); font-weight: 700; }
+.group-picker-row { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1); border-radius: 4px; cursor: pointer; }
+.group-picker-row:hover { background: var(--selected); }
+.group-picker-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; display: flex; align-items: center; justify-content: center; font-weight: 600; }
+.group-picker-row .status-dot { display: none; }
+.group-hint, .group-count { font-size: var(--fs-xs); color: var(--muted); margin: var(--sp-1) 0 0; }
+/* Grup araması paneli: katılımcı ızgarası */
+.group-call-grid { display: flex; flex-wrap: wrap; gap: var(--sp-4); justify-content: center; max-width: 640px; }
+.group-call-person { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); width: 72px; }
+.group-call-person .call-avatar { width: 56px; height: 56px; font-size: var(--fs-lg); }
+.group-call-name { font-size: var(--fs-xs); max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

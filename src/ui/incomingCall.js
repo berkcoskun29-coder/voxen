@@ -57,29 +57,33 @@ export function createIncomingCall(deps) {
     kabulde = bu // kart kapandı ama arama henüz bizim değil: bu arada meşgul sayılırız
     onChange?.()
     let sonuc = null
-    try { sonuc = await answerCall(k.callId) } catch { /* arama bu arada bitti */ }
+    try { sonuc = await (k.answer ?? answerCall)(k.callId) } catch { /* arama bu arada bitti */ }
     if (kabulde === bu) kabulde = null
     if (kapandi) {
       // Kabul sürerken uygulama kapandı ama arama açıldı: karşı taraf boşuna beklemesin
-      if (sonuc?.status === 'active') Promise.resolve(endCall(k.callId, 'hangup')).catch(() => { /* bayatlık kuralı bitirir */ })
+      if (sonuc?.status === 'active') Promise.resolve((k.leave ?? endCall)(k.callId, 'hangup')).catch(() => { /* bayatlık kuralı bitirir */ })
       return
     }
     if (sonuc?.status !== 'active') { toast?.(GELEN_ARAMA_METINLERI.bitti); onChange?.(); return }
-    onAccept?.({ id: k.callId, status: 'active' }, k.thread)
+    ;(k.onAccept ?? onAccept)?.({ id: k.callId, status: 'active', ...(k.isGroup ? { isGroup: true } : {}) }, k.thread)
   }
 
   function reddet() {
     const k = kapatYerel()
     if (!k) return
+    if (k.isGroup) return // grup araması: reddetmek yalnız kartı kapatır (arama diğerleri için sürer)
     Promise.resolve(endCall(k.callId, 'decline')).catch(() => { /* arayanın zaman aşımı ya da bayatlık kuralı bitirir */ })
   }
 
   // Gelen aramayı gösterir. Zaten bir kart açıksa (başka arama) gösterilmez: false döner.
-  function goster({ callId, thread, zil = true }) {
+  // Grup araması (group verilirse): { title: "Grup adı · berk arıyor", person: rozet kişisi, answer(id), leave(id, reason),
+  //   onAccept(call, thread) }. Kabul answer ile (joinGroupCall), Reddet sunucuya bir şey göndermez.
+  function goster({ callId, thread, zil = true, group = null }) {
     if (kapandi || !callId) return false
     if (kart) return kart.callId === callId
     const ad = thread?.other?.username || GELEN_ARAMA_METINLERI.bilinmeyen
-    const el = kartiKur(ad, thread?.other, ++siradaki)
+    const el = kartiKur(group ? (group.person?.username || GELEN_ARAMA_METINLERI.bilinmeyen) : ad,
+      group ? group.person : thread?.other, ++siradaki, group?.title ?? null)
     el.querySelector('.incoming-accept').onclick = () => kabul()
     el.querySelector('.incoming-decline').onclick = () => reddet()
     host().prepend(el) // bildirimlerin üstünde
@@ -89,6 +93,10 @@ export function createIncomingCall(deps) {
       el,
       zilDurdur: zil ? (startRing?.() ?? null) : null,
       zamanlayici: setTimeout(() => kapatYerel(), incomingTiming.ringMs),
+      isGroup: !!group,
+      answer: group?.answer ?? null,
+      leave: group?.leave ?? null,
+      onAccept: group?.onAccept ?? null,
     }
     return true
   }
@@ -120,7 +128,7 @@ export function createIncomingCall(deps) {
 // Sesli okuma: kart, aria-live="polite" bildirim kutusuna eklendiği için kutu onu bir kez okur ("ali seni arıyor,
 // Kabul et, Reddet"). role="alertdialog" kartın ne olduğunu söyler; kart odak almadığı için ekran okuyucu onu
 // diyalog olarak ayrıca açıp okumaz. Kartta ayrıca aria-live yok (ikinci duyuru olmasın).
-function kartiKur(ad, kisi, no) {
+function kartiKur(ad, kisi, no, baslikYazisi = null) {
   const el = document.createElement('div')
   el.className = 'incoming-call'
   el.setAttribute('role', 'alertdialog')
@@ -142,7 +150,7 @@ function kartiKur(ad, kisi, no) {
   const baslik = document.createElement('div')
   baslik.className = 'incoming-call-title'
   baslik.id = baslikId
-  baslik.textContent = seniAriyorMetni(ad)
+  baslik.textContent = baslikYazisi ?? seniAriyorMetni(ad)
 
   const dugmeler = document.createElement('div')
   dugmeler.className = 'incoming-call-buttons'

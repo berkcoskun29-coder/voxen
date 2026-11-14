@@ -58,6 +58,7 @@ export function createVoiceSession({ channelId, topic, userId, muted = false, de
   let kameraCihazi = null // açık kameranın cihazı (null = varsayılan)
   let ekran = null // açık paylaşım: { video, audio, stop() }
   let mesh = null
+  let izinliEsler // grup araması: izinli eşler (undefined = hiç verilmedi, null = herkes)
   let bitti = false // leave() çağrıldı mı
   let sayac = 0
   let durumSayaci = 0 // shareState: durumun düzenli yeniden gönderimi
@@ -225,6 +226,7 @@ export function createVoiceSession({ channelId, topic, userId, muted = false, de
     if (bitrate != null) mesh.setBitrate(bitrate)
     if (uploadMbps != null) mesh.setUploadMbps?.(uploadMbps)
     if (odadaEkran) mesh.setRoomScreenOn?.(true)
+    if (izinliEsler !== undefined) mesh.setAllowedPeers?.(izinliEsler)
     mesh.setDeafened(state.deafened)
     mesh.on('ready', () => { baglandik = true; durumuGonder(); durumuGuncelle() })
     mesh.on('peer-joined', ({ userId: id, stream }) => {
@@ -499,6 +501,11 @@ export function createVoiceSession({ channelId, topic, userId, muted = false, de
     connectedPeers: () => [...bagliEsler],
     // shareState: karşının bildirdiği { muted, deafened, camera, screen } (henüz bildirmediyse null)
     getPeerState: (peerId) => karsiDurumlari.get(peerId) ?? null,
+    // Grup araması: yalnız bu kişilerle bağlan (null = herkes). Örgü henüz kurulmadıysa kurulunca uygulanır.
+    setAllowedPeers(ids) {
+      izinliEsler = ids == null ? null : [...ids]
+      mesh?.setAllowedPeers?.(izinliEsler)
+    },
     // olay: 'change' (durum/susturma/hata), 'speaking' (konuşanlar kümesi)
     // ya da 'tracks' (karşının kamera/ekran izleri ya da bir eşin bağlantısı değişti)
     on(olay, cb) {

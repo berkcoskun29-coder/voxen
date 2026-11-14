@@ -14,6 +14,7 @@ import { rpcHatasi } from './friends.js'
 import { etkilesimHatasi } from './reactions.js'
 import { DM_MESAJ_SECIMI } from './sorgular.js'
 import { sendDmWithAttachments, fetchAttachments, removeFiles } from './attachments.js'
+import { grupAdi } from './groups.js'
 
 // DM mesaj sorgusu: tepkiler, sabit bilgisi ve ekler gömülü (messages.js MESAJ_SECIMI'nin DM karşılığı)
 export { DM_MESAJ_SECIMI }
@@ -217,9 +218,9 @@ export function resetDmReads() { dmOkuma.reset() }
 
 // Arama kaydı satırı mı ("📞 Cevapsız arama" / "📞 Arama · 12:34"; yalnız sunucu yazar)?
 export const aramaSatiri = (msg) => msg?.kind === 'call'
-// Sistem satırı mı (arama kaydı ya da "… bir mesajı sabitledi."; yalnız sunucu yazar)?
-// Düzenlenemez, silinemez; tepki, yanıt ve sabitleme almaz.
-export const sistemSatiri = (msg) => msg?.kind === 'call' || msg?.kind === 'pin'
+// Sistem satırı mı (arama kaydı, "… bir mesajı sabitledi." ya da grup satırı "berk, ayla'yı ekledi.";
+// yalnız sunucu yazar)? Düzenlenemez, silinemez; tepki, yanıt ve sabitleme almaz.
+export const sistemSatiri = (msg) => msg?.kind === 'call' || msg?.kind === 'pin' || msg?.kind === 'system'
 
 // ---------- chatView kaynağı ----------
 // thread: fetchDmList()'ten gelen konuşma (id + other.username) ya da en az { id, other: { username } }.
@@ -230,16 +231,21 @@ export const sistemSatiri = (msg) => msg?.kind === 'call' || msg?.kind === 'pin'
 //    joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg),
 //    react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg),
 //    ekKlasoru, sendWithAttachments(content, ekler, { replyTo }), fetchAttachments(ids), removeFiles(yollar) }
+// Grup (thread.isGroup, 011): başlık grubun adı, group: { members, ownerId } (chatView @bahsetmeyi açar),
+// other null. Mesaj, tepki, sabit ve ek yolları bire bir ile AYNI (sunucu üyeliğe göre denetler).
 export function dmSource(thread, selfProfile) {
   const id = thread.id
-  const ad = thread.other?.username ?? ''
+  const grup = !!thread.isGroup
+  const ad = grup ? grupAdi(thread, selfProfile.id) : (thread.other?.username ?? '')
   const yazabilir = thread.canSend !== false
   return {
     kind: 'dm',
     id,
     title: ad,
-    placeholder: `@${ad} kişisine mesaj gönder`,
-    other: thread.other ?? null,
+    placeholder: grup ? `${ad} grubuna mesaj gönder` : `@${ad} kişisine mesaj gönder`,
+    other: grup ? null : (thread.other ?? null),
+    // Yalnız grupta: bire bir kaynağın anahtarları kanal kaynağıyla aynı kalır
+    ...(grup ? { group: { members: thread.members ?? [], ownerId: thread.ownerId ?? null } } : {}),
     // Engel varsa (dm_list can_send=false) yazı kutusu kapanır; eski mesajlar görünür kalır
     canSend: yazabilir,
     fetch: (beforeId, { after, limit } = {}) => fetchDmMessages(id, { before: beforeId ?? undefined, after, limit }),

@@ -45,6 +45,13 @@ import { yetimleriTemizle } from '../data/attachments.js'
 import { mentionsUser } from '../mentions.js'
 import { shouldNotify, shouldNotifyCall, createNotifier, getNotifySettings, requestNotifyPermission, bildirimBasligi, bildirimMetni } from '../notify.js'
 import { renderHomeSidebar, createFriendsPage, sortDms, dmUnreadTotal, kisiDurumu } from './home.js'
+import {
+  fetchGroupList, createGroup, addGroupMember, removeGroupMember, leaveGroup, renameGroup, muteDm, unmuteDm,
+  startGroupCall, joinGroupCall, leaveGroupCall, pingGroupCall, parseGroupCallEvent, grupAdi, grupAriyorMetni,
+  fetchCallParticipants,
+} from '../data/groups.js'
+import { openCreateGroupDialog, openAddMemberDialog, openRenameGroupDialog, confirmLeaveGroup, renderGroupPanel } from './groupDm.js'
+import { createGroupCallFlow, mountGroupCallPanel, grupAramaGorunumu, createGroupCallButton, GRUP_ARAMA_METINLERI } from './groupCall.js'
 
 // Son seçilen sunucu/kanal tarayıcıda hatırlanır (sadece kolaylık için).
 function sonuOku() {
@@ -117,11 +124,14 @@ export async function startApp(root, profile, { email = '' } = {}) {
   baslikAlani.className = 'header-host'
   const aramaAlani = document.createElement('div')
   aramaAlani.className = 'call-host'
+  // Grup araması paneli (011): ayrı kutu (bire bir panelle aynı kutuyu paylaşmasın)
+  const grupAramaAlani = document.createElement('div')
+  grupAramaAlani.className = 'call-host group-call-host'
   const goruntuAlani = document.createElement('div')
   goruntuAlani.className = 'video-host'
   const sohbetAlani = document.createElement('div')
   sohbetAlani.className = 'chat-host'
-  main.append(baslikAlani, aramaAlani, goruntuAlani, sohbetAlani)
+  main.append(baslikAlani, aramaAlani, grupAramaAlani, goruntuAlani, sohbetAlani)
   // Sohbet başlığının sağındaki "Üyeler" düğmesi: tek düğme, her kanal açılışında başlığa taşınır
   const uyeDugmesi = createMemberToggle(uyePaneli)
   let goruntu = null // açık görüntü bölmesi (sesli kanaldayken)
@@ -188,19 +198,158 @@ export async function startApp(root, profile, { email = '' } = {}) {
   function aramaArayuzunuCiz() {
     if (durduruldu) return
     const bilgi = aramaAkisi.bilgi()
+    const grupBilgi = grupAramaAkisi.bilgi()
     const dm = anaSayfa && anaGorunum.tur === 'dm' ? anaGorunum.thread : null
     // "Aramadasın" yalnız aramadaki kişinin DM'inde; başka DM'de "Zaten bir aramadasın."
     const kabul = gelenArama.kabulEdiliyor() // gelen arama kabul ediliyor (answerCall sürüyor)
-    const aramaKonusu = bilgi?.thread?.id ?? arama?.thread?.id ?? kabul?.thread?.id ?? null
+    const aramaKonusu = bilgi?.thread?.id ?? grupBilgi?.thread?.id ?? arama?.thread?.id ?? kabul?.thread?.id ?? null
+    const aramada = !!bilgi || !!grupBilgi || !!arama || !!kabul
     aramaDugmesi.update({
       canSend: dm?.canSend !== false,
-      inCall: !!bilgi || !!arama || !!kabul,
+      inCall: aramada,
       withPeer: !!dm && aramaKonusu === dm.id,
     })
     aramaPaneli.ciz(bilgi && dm && bilgi.thread?.id === dm.id ? aramaGorunumu(bilgi, profile) : null)
+    // Grup: başlıktaki düğme (Grubu ara / Aramaya katıl (N) / Aramadasın) ve grubun üstündeki panel
+    if (dm?.isGroup) {
+      const buArama = aramaKonusu === dm.id
+      grupAramaDugmesi.update({ call: buArama ? null : (dm.call ?? null), inThisCall: buArama, inOtherCall: aramada && !buArama })
+    }
+    const grupGorunum = grupBilgi && dm && grupBilgi.thread?.id === dm.id
+      ? grupAramaGorunumu(grupBilgi, profile, guncelGrup(dm.id)?.members ?? dm.members ?? [])
+      : null
+    grupAramaPaneli.ciz(grupGorunum)
     // Aramanın görüntü bölmesi de yalnız aramanın DM'i açıkken görünür (arama ve görüntü arkada sürer).
     // Sesli kanalın bölmesi her zaman görünür (aynı anda ikisi olmaz: tek aktif ses).
     goruntuAlani.hidden = !!arama && !(dm && dm.id === arama.thread?.id)
+  }
+  // ---- Grup araması (groupCall.js, 011): başlıktaki düğme, grubun üstündeki panel ve akış ----
+  const grupAramaDugmesi = createGroupCallButton({
+    onStart: () => { if (anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.isGroup) grupAramaAkisi.baslat(anaGorunum.thread) },
+    onJoin: (call) => { if (anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.isGroup) grupAramaAkisi.katil(anaGorunum.thread, call.id) },
+  })
+  const grupAramaPaneli = mountGroupCallPanel(grupAramaAlani, {
+    onLeave: () => grupAramaAkisi.kapat(),
+    onToggleMute: () => susturmayiDegistir(),
+    onToggleDeafen: () => sagirlastirmayiDegistir(),
+    onToggleCamera: () => arama?.oturum.toggleCamera(),
+    onToggleScreen: () => arama?.oturum.toggleScreenShare(),
+  })
+  const grupAramaAkisi = createGroupCallFlow({
+    selfId: profile.id,
+    startGroupCall,
+    joinGroupCall,
+    leaveGroupCall,
+    pingGroupCall,
+    // Sunucu başka aramadaysak ALREADY_IN_CALL der: önce bire bir arama / gelen kart kapanır
+    beforeJoin: async () => {
+      const giden = aramaAkisi.bilgi()
+      if (gelenArama.acik()) gelenArama.reddet()
+      if (giden && giden.faz !== 'konusma') {
+        aramaAkisi.iptal()
+        if (giden.call?.id) await endCall(giden.call.id, 'cancel').catch(() => {})
+      }
+      if (arama) await aramadanCik('hangup', { ciz: false })
+    },
+    enter: (call, thread) => aramayaGir(call, thread),
+    exit: (reason) => aramadanCik(reason),
+    toast: (metin, tur) => toast(metin, tur),
+    beep: (ad) => playBeep(ad),
+    startTone: () => startLoop('bekleme'),
+    onChange: () => aramaArayuzunuCiz(),
+  })
+  // Listede grubun en güncel satırı (üyeler/ad değişmiş olabilir)
+  function guncelGrup(id) {
+    return dmListesi.find((t) => t.id === id && t.isGroup) ?? null
+  }
+  const grupKartlari = new Set() // kartı bir kez gösterilen (ya da reddedilen) grup aramaları
+  // Engellediğim kişi mi (arkadaş verisindeki engel listesi; grupta bildirim ve zil için)
+  function engelledim(id) {
+    return !!id && !!arkadasVerisi?.blocked?.some((k) => k.id === id)
+  }
+  // Grup aramasındaki bağlantıları sunucunun katılımcı listesine uydurur (011 düzeltme turu 1, I1):
+  //  - Listede varsam: yalnız listedekilerle bağlı kalırım (gruptan çıkarılan/çıkmış sayılan eşin bağlantısı kapanır,
+  //    sinyalleri yok sayılır).
+  //  - Listede yoksam: sunucuya sorulur (sırası kaymış eski bir olay olabilir); ping false ise aramadan çıkılır.
+  //    Gruptan çıkarıldıysam liste tazelenince sosyalTek "Gruptan çıkarıldın." der.
+  function katilimcilariUzlastir(callId, ids) {
+    if (durduruldu || !arama?.call?.isGroup || arama.call.id !== callId || !Array.isArray(ids)) return
+    if (ids.includes(profile.id)) {
+      arama.oturum.setAllowedPeers?.(ids.filter((id) => id !== profile.id))
+      return
+    }
+    pingGroupCall(callId).then(async (surdu) => {
+      if (surdu || durduruldu || arama?.call.id !== callId) return
+      try { await sosyalTazele() } catch { /* liste alınamadı */ }
+      if (durduruldu || arama?.call.id !== callId) return // sosyalTek çıkardı
+      aramadanCik(null)
+      toast(ARAMA_METINLERI.baglantiKoptu, 'hata')
+    }).catch(() => { /* ağ hatası: canlılık kuralı bakar */ })
+  }
+  // Katılınca ve user: kanalı yeniden bağlanınca: katılımcılar veritabanından okunur
+  function katilimcilariOku(callId) {
+    fetchCallParticipants(callId).then((ids) => katilimcilariUzlastir(callId, ids)).catch(() => { /* bir sonraki olayda */ })
+  }
+  // "user:<uid>" konusundaki "grup_arama" olayları: listedeki "Aramaya katıl (N)", akış ve gelen kart
+  function grupAramaOlayi(payload) {
+    if (durduruldu) return
+    const ev = parseGroupCallEvent(payload)
+    if (!ev) return
+    const bitti = ev.status === 'ended'
+    const t = guncelGrup(ev.threadId)
+    if (t) {
+      const yeni = bitti || ev.count <= 0 ? null : { id: ev.callId, count: ev.count }
+      dmListesi = dmListesi.map((x) => (x.id === t.id ? { ...x, call: yeni } : x))
+      if (anaGorunum.tur === 'dm' && anaGorunum.thread.id === t.id) anaGorunum = { tur: 'dm', thread: guncelGrup(t.id) }
+      if (ilkCizimYapildi && anaSayfa) cizKanalPaneli()
+    } else if (!bitti) sosyalTazele() // grup listede yok (yeni eklendik): liste tazelenir
+    grupAramaAkisi.olay(ev)
+    if (!bitti && ev.participants) katilimcilariUzlastir(ev.callId, ev.participants)
+    if (bitti) {
+      gelenArama.kapat(ev.callId)
+      grupKartlari.delete(ev.callId)
+      if (arama?.call.id === ev.callId) aramadanCik(null)
+    } else if (ev.status === 'ringing' && ev.caller !== profile.id) grupAramasiGeldi(ev)
+    aramaArayuzunuCiz()
+  }
+  // Başkasının başlattığı grup araması: kart "Grup adı · berk arıyor". Meşgulsek ya da kart bir kez
+  // gösterildiyse çıkmaz (liste/başlıktaki "Aramaya katıl" yine görünür). Sessizdeki grupta zil çalmaz.
+  async function grupAramasiGeldi(ev) {
+    if (grupKartlari.has(ev.callId)) return
+    if (aramadaMesgul(ev) || grupAramaAkisi.bilgi()) return
+    grupKartlari.add(ev.callId)
+    // Engellediğim kişinin başlattığı grup araması kart ve zil çıkarmaz ("Aramaya katıl" listede kalır)
+    if (engelledim(ev.caller)) return
+    let t = guncelGrup(ev.threadId)
+    if (!t) {
+      try { await sosyalTazele() } catch { /* liste alınamadı */ }
+      t = guncelGrup(ev.threadId)
+    }
+    if (!t || durduruldu || aramadaMesgul(ev) || grupAramaAkisi.bilgi()) return
+    const arayan = t.members.find((u) => u.id === ev.caller) ?? { id: ev.caller, username: GELEN_ARAMA_METINLERI.bilinmeyen }
+    const durum = bildirimDurumu()
+    const ayarlar = getNotifySettings()
+    const gosterildi = gelenArama.goster({
+      callId: ev.callId,
+      thread: t,
+      zil: !t.muted && zilCalsinMi({ durum, ayarlar }),
+      group: {
+        title: grupAriyorMetni(grupAdi(t, profile.id), arayan.username),
+        person: arayan,
+        answer: (id) => joinGroupCall(id),
+        leave: (id, neden) => leaveGroupCall(id, neden),
+        onAccept: (call, thread) => {
+          if (durduruldu) { leaveGroupCall(call.id, 'hangup').catch(() => {}); return }
+          grupAramaAkisi.baglan({ ...call, caller: ev.caller }, guncelGrup(thread.id) ?? thread)
+          openDmView(guncelGrup(thread.id) ?? thread)
+        },
+      },
+    })
+    if (gosterildi && !t.muted && shouldNotifyCall({ odakta: pencereOdakta(), durum, ayarlar })) {
+      // Bildirim metni kartla aynı: "Grup adı · berk arıyor"
+      const kapat = bildirimci.bildirArama({ id: ev.callId, ad: grupAdi(t, profile.id), metin: grupAriyorMetni(grupAdi(t, profile.id), arayan.username) })
+      gelenArama.bildirimEkle(ev.callId, kapat)
+    }
   }
   // ---- Gelen arama (incomingCall.js): sağ altta kart, zil ve masaüstü bildirimi ----
   const gelenArama = createIncomingCall({
@@ -224,7 +373,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Meşgul miyiz: aramadayız ya da birini arıyoruz (ya da başka bir gelen arama kartı açık)
   // Kabul et'e basılıp answerCall beklenirken de meşgulüz (kart kapandı ama arama henüz açılmadı).
   function aramadaMesgul(ev) {
-    return !!arama || !!aramaAkisi.bilgi() || !!gelenArama.kabulEdiliyor() ||
+    return !!arama || !!aramaAkisi.bilgi() || !!grupAramaAkisi.bilgi() || !!gelenArama.kabulEdiliyor() ||
       (gelenArama.acik() != null && gelenArama.acik() !== ev.callId)
   }
   // 'ringing': başkasından gelen arama. Meşgulsek kart çıkmadan reddedilir.
@@ -294,8 +443,9 @@ export async function startApp(root, profile, { email = '' } = {}) {
     dusenPencereleriTemizle()
     odadakiEkraniBildir() // ekran paylaşan çevrimdışı olduysa kural kalkar
     const dmAcik = anaSayfa && anaGorunum.tur === 'dm'
-    const dmKisi = dmKaynak?.other ?? (dmAcik ? anaGorunum.thread.other : null)
-    const iz = dmKisi ? dmKisiIziHesapla(dmKisi) : null
+    const grupAcik = dmAcik && !!anaGorunum.thread.isGroup
+    const dmKisi = grupAcik ? null : (dmKaynak?.other ?? (dmAcik ? anaGorunum.thread.other : null))
+    const iz = grupAcik ? grupIziHesapla(anaGorunum.thread) : dmKisi ? dmKisiIziHesapla(dmKisi) : null
     const dmKisiDegisti = iz !== dmKisiIzi
     dmKisiIzi = iz
     if (!dmAcik || dmKisiDegisti) cizUyeler()
@@ -545,6 +695,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     aramaAkisi.iptal() // "Aranıyor…" iken: arama iptal (sayaç ve bekleme tonu durur)
     aramadanCik('hangup', { ciz: false })
     aramaPaneli.ciz(null)
+    grupAramaPaneli.ciz(null)
+    grupKartlari.clear()
     gelenArama.destroy() // kart kapanır, zil ve 30 sn sayacı durur
     gelenBekleyen.clear()
     sesAbonelikleriniKapat()
@@ -607,6 +759,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
   //  bakılmaz: bu fonksiyon varlık dinleyicisi kurulurken, sunucuId tanımlanmadan önce de çağrılır.)
   // DM açıkken panelde üye listesi yerine karşı tarafın profil kartı durur (bkz. cizDmProfili).
   function cizUyeler() {
+    if (anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.isGroup) { cizGrupPaneli(); return }
     if (anaSayfa && anaGorunum.tur === 'dm') { cizDmProfili(); return }
     renderMemberList(uyePaneli, { members: uyeler, presence: varlikHaritasi })
   }
@@ -621,6 +774,28 @@ export async function startApp(root, profile, { email = '' } = {}) {
     const kart = buildProfileCard({ person: kisi, ...bilgi })
     kart.classList.add('dm-profile-card')
     uyePaneli.replaceChildren(kart)
+  }
+
+  // Grup açıkken sağ panel: üyeler (kurucuya "Çıkar") ve grup işleri (groupDm.js)
+  function cizGrupPaneli() {
+    const thread = anaGorunum.thread
+    dmKisiIzi = grupIziHesapla(thread)
+    renderGroupPanel(uyePaneli, {
+      thread,
+      selfId: profile.id,
+      presence: varlikHaritasi,
+      handlers: {
+        onAdd: () => uyeEkle(thread),
+        onRemove: (kisi) => uyeCikar(thread, kisi),
+        onRename: () => grubuAdlandir(thread),
+        onToggleMute: () => grupSessiz(thread),
+        onLeave: () => gruptanAyril(thread),
+      },
+    })
+  }
+  // Grup panelinin durum izi: üyelerin durumları değişince yeniden çizilir
+  function grupIziHesapla(thread) {
+    return JSON.stringify((thread.members ?? []).map((u) => [u.id, kisiDurumu(varlikHaritasi, u.id)]))
   }
 
   // DM'deki kişinin kartta görünen durum bilgisi (karşılaştırma için tek metin)
@@ -771,6 +946,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
   // Masaüstü bildirimleri de bu tek noktaya bağlıdır (dmBildirimi).
   function dmMesajiGeldi(m) {
     if (durduruldu) return
+    // Grup sistem satırı (ekleme, ayrılma, çıkarma, ad): üyeler ya da ad değişti, liste yeniden alınır
+    if (m.kind === 'system') sosyalTazele()
     const t = dmListesi.find((x) => x.id === m.thread_id)
     if (!t) {
       // Yeni ya da gizlenmiş konuşma: listede yeniden görünsün; gelince bildirimi de gösterilir
@@ -819,10 +996,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
       tur,
     })
   }
-  // DM: başlık karşı tarafın adı
+  // DM: başlık karşı tarafın adı (grupta grubun adı). Sessizdeki grupta yalnız seni anan mesaj bildirim
+  // verir; grup sistem satırları ve engellediğim kişinin grup mesajları (anma dahil) bildirim vermez.
   function dmBildirimi(m, thread) {
     if (durduruldu || !bildirimGelsinMi(m, 'dm')) return
-    const ad = thread.other?.username ?? ''
+    if (thread.isGroup && (m.kind === 'system' || engelledim(m.author_id) || (thread.muted && !mentionsUser(m.content, profile.username)))) return
+    const ad = thread.isGroup ? grupAdi(thread, profile.id) : (thread.other?.username ?? '')
     bildirimci.bildir({
       hedef: { type: 'dm', id: thread.id },
       ad,
@@ -1032,10 +1211,69 @@ export async function startApp(root, profile, { email = '' } = {}) {
     try { await hideDm(thread.id) } catch (e) { toast(e?.message || ISLEM_BASARISIZ, 'hata'); return }
     if (durduruldu) return
     dmListesi = dmListesi.filter((t) => t.id !== thread.id)
+    sonGruplar = sonGruplar.filter((t) => t.id !== thread.id)
     if (anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id) anaGorunum = { tur: 'arkadaslar' }
     if (anaSayfa) cizHepsi()
     else cizSerit()
     sosyalTazele()
+  }
+
+  // ---- Grup işleri (groupDm.js pencereleri; hatalar pencerede yazar) ----
+  const arkadaslarim = () => arkadasVerisi?.friends ?? []
+  // "+" Grup oluştur: kurulunca grup açılır
+  function grupOlustur() {
+    openCreateGroupDialog({
+      friends: arkadaslarim(),
+      onCreate: async (ids, ad) => {
+        const id = await createGroup(ids, ad)
+        await sosyalTazele()
+        if (durduruldu) return
+        const t = guncelGrup(id)
+        if (t) openDmView(t)
+      },
+    })
+  }
+  function uyeEkle(thread) {
+    const uyeIdleri = new Set((thread.members ?? []).map((u) => u.id))
+    openAddMemberDialog({
+      candidates: arkadaslarim().filter((k) => !uyeIdleri.has(k.id)),
+      onAdd: async (id) => { await addGroupMember(thread.id, id); sosyalTazele() },
+    })
+  }
+  async function uyeCikar(thread, kisi) {
+    try { await removeGroupMember(thread.id, kisi.id) } catch (e) { toast(e?.message || ISLEM_BASARISIZ, 'hata'); return }
+    sosyalTazele()
+  }
+  function grubuAdlandir(thread) {
+    openRenameGroupDialog({
+      current: thread.name ?? '',
+      onRename: async (ad) => { await renameGroup(thread.id, ad); await sosyalTazele() },
+    })
+  }
+  async function grupSessiz(thread) {
+    try {
+      if (thread.muted) await unmuteDm(thread.id)
+      else await muteDm(thread.id)
+    } catch (e) { toast(hataMetni(e), 'hata'); return }
+    await sosyalTazele()
+    if (!durduruldu && anaSayfa && anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id) cizUyeler()
+  }
+  function gruptanAyril(thread) {
+    confirmLeaveGroup({
+      ad: grupAdi(thread, profile.id),
+      onLeave: async () => {
+        // Bu grubun aramasındaysak önce oradan çıkılır (sunucu da çıkarır; ses hemen kapansın)
+        if (arama?.thread?.id === thread.id) await aramadanCik(null)
+        await leaveGroup(thread.id)
+        if (durduruldu) return
+        dmListesi = dmListesi.filter((t) => t.id !== thread.id)
+        sonGruplar = sonGruplar.filter((t) => t.id !== thread.id)
+        if (anaGorunum.tur === 'dm' && anaGorunum.thread.id === thread.id) anaGorunum = { tur: 'arkadaslar' }
+        if (anaSayfa) cizHepsi()
+        else cizSerit()
+        sosyalTazele()
+      },
+    })
   }
 
   // Satır düğmeleri: iş bitince listeler yeniden alınır; hata toast ile söylenir
@@ -1096,9 +1334,10 @@ export async function startApp(root, profile, { email = '' } = {}) {
         source: dmKaynak,
         profile,
         headerHost: baslikAlani,
-        peerStatus: kisiDurumu(varlikHaritasi, thread.other?.id),
+        peerStatus: thread.isGroup ? 'offline' : kisiDurumu(varlikHaritasi, thread.other?.id),
         onBottom: () => okunduIsaretle(),
-        headerActions: [aramaDugmesi.button], // 📞 Sesli arama başlat
+        // 📞 Sesli arama başlat (grupta: Grubu ara / Aramaya katıl (N))
+        headerActions: [thread.isGroup ? grupAramaDugmesi.button : aramaDugmesi.button],
       })
     } else {
       const sayfa = arkadasSayfasiniAl()
@@ -1110,15 +1349,24 @@ export async function startApp(root, profile, { email = '' } = {}) {
 
   // Ana sayfanın sol sütunu (kanal panelinin içinde, kullanıcı çubuğunun üstünde)
   function anaSayfaSolSutun() {
+    // İçinde olduğumuz grup aramasının satırında "Aramaya katıl" çıkmaz
+    const icindeki = arama?.call?.isGroup ? arama.thread?.id : null
     return renderHomeSidebar({
-      dms: dmListesi,
+      dms: icindeki ? dmListesi.map((t) => (t.id === icindeki ? { ...t, call: null } : t)) : dmListesi,
       presence: varlikHaritasi,
       view: anaGorunum,
       pending: arkadasVerisi?.incoming?.length ?? 0,
+      selfId: profile.id,
       handlers: {
         onFriends: () => anaSayfayaGec({ tur: 'arkadaslar' }),
         onOpenDm: (thread) => openDmView(thread),
         onHideDm: (thread) => dmGizle(thread),
+        onCreateGroup: () => grupOlustur(),
+        onJoinCall: (thread) => {
+          if (!thread.call) return
+          openDmView(thread)
+          grupAramaAkisi.katil(thread, thread.call.id)
+        },
       },
     })
   }
@@ -1141,22 +1389,44 @@ export async function startApp(root, profile, { email = '' } = {}) {
     }
     return sosyalIsi
   }
+  let sonGruplar = [] // grup listesi alınamazsa eskisi kalır (bire bir liste yine güncellenir)
   async function sosyalTek() {
-    const [dm, ark] = await Promise.allSettled([fetchDmList(), fetchFriends(profile.id)])
+    const [dm, ark, gr] = await Promise.allSettled([fetchDmList(), fetchFriends(profile.id), fetchGroupList()])
     if (durduruldu) return
     let dmYenidenKur = false
+    if (gr.status === 'fulfilled') sonGruplar = gr.value
     if (dm.status === 'fulfilled') {
-      dmListesi = sortDms(dm.value)
+      dmListesi = sortDms([...dm.value, ...sonGruplar])
       // Açık ve okunan DM'in işareti henüz yazılmamış olabilir: sunucudaki eski sayıyı gösterme
       if (dmKaynak && dmOkunuyor(dmKaynak.id)) dmListesi = dmListesi.map((t) => (t.id === dmKaynak.id ? { ...t, unread: 0 } : t))
       // Açık DM'de engel durumu değiştiyse (engellendi / kaldırıldı) sohbet yeni duruma göre yeniden kurulur
       const acikDm = anaGorunum.tur === 'dm' ? dmListesi.find((t) => t.id === anaGorunum.thread.id) : null
       if (acikDm) {
         dmYenidenKur = anaSayfa && acikDm.canSend !== (anaGorunum.thread.canSend !== false)
+        // Grup: adı değiştiyse başlık yeniden kurulur; üyeler değiştiyse @ önerisi güncellenir
+        if (acikDm.isGroup) {
+          if (grupAdi(acikDm, profile.id) !== grupAdi(anaGorunum.thread, profile.id)) dmYenidenKur = anaSayfa
+          else sohbet?.setMembers?.(acikDm.members)
+        }
         anaGorunum = { tur: 'dm', thread: acikDm }
+      } else if (anaGorunum.tur === 'dm' && anaGorunum.thread.isGroup && gr.status === 'fulfilled') {
+        // Gruptan ayrıldık ya da çıkarıldık: Arkadaşlar sayfasına dönülür
+        anaGorunum = { tur: 'arkadaslar' }
+        dmYenidenKur = anaSayfa
+        if (anaSayfa) sagPaneliAyarla()
       }
     }
     if (ark.status === 'fulfilled') { arkadasVerisi = ark.value; arkadasHatasi = false } else if (!arkadasVerisi) arkadasHatasi = true
+    // Grup aramasındayım ama grup listemde yok: çıkarıldım ya da ayrıldım (gizlenen grup da listede olmaz:
+    // sunucuya sorulur). Ping false ise aramadan hemen çıkılır.
+    if (gr.status === 'fulfilled' && arama?.call?.isGroup && !sonGruplar.some((t) => t.id === arama.thread?.id)) {
+      const callId = arama.call.id
+      pingGroupCall(callId).then((surdu) => {
+        if (surdu || durduruldu || arama?.call.id !== callId) return
+        aramadanCik(null)
+        toast(GRUP_ARAMA_METINLERI.cikarildin)
+      }).catch(() => { /* ağ hatası: canlılık kuralı bakar */ })
+    }
     basligiGuncelle()
     if (!ilkCizimYapildi) return
     cizSerit()
@@ -1203,12 +1473,12 @@ export async function startApp(root, profile, { email = '' } = {}) {
       // DM aramasındaysak "Aramada · Ad" satırı: tıklayınca o DM, Kapat aramayı bitirir
       call: arama
         ? {
-            peerName: arama.thread.other?.username ?? '',
+            peerName: arama.thread.isGroup ? grupAdi(guncelGrup(arama.thread.id) ?? arama.thread, profile.id) : (arama.thread.other?.username ?? ''),
             video: { camera: !!arama.oturum.getState().camera, screen: !!arama.oturum.getState().screen },
             handlers: {
               onToggleCamera: () => arama?.oturum.toggleCamera(),
               onToggleScreen: () => arama?.oturum.toggleScreenShare(),
-              onOpen: () => openDmView(arama.thread),
+              onOpen: () => openDmView(guncelGrup(arama.thread.id) ?? arama.thread),
               onHangup: () => { aramadanCik('hangup') },
             },
           }
@@ -1407,15 +1677,20 @@ export async function startApp(root, profile, { email = '' } = {}) {
     goruntu?.dispose()
     goruntu = mountVideoPane(goruntuAlani, {
       getPeers: () => {
-        const karsi = thread?.other
+        // Grup araması: bağlı olduğumuz bütün üyeler (çok kişi; videoPane zaten destekliyor)
+        const kisiler = thread?.isGroup
+          ? (guncelGrup(thread.id)?.members ?? thread.members ?? [])
+              .filter((u) => u.id !== profile.id && (oturum.connectedPeers?.() ?? []).includes(u.id))
+          : (thread?.other ? [thread.other] : [])
         const durumlar = new Map()
-        if (karsi) durumlar.set(karsi.id, oturum.getPeerState(karsi.id) ?? {})
-        return buildVideoPeers({ self: profile, members: karsi ? [karsi] : [], voiceStates: durumlar, session: oturum })
+        for (const k of kisiler) durumlar.set(k.id, oturum.getPeerState(k.id) ?? {})
+        return buildVideoPeers({ self: profile, members: kisiler, voiceStates: durumlar, session: oturum })
       },
       onHide: (id, gizli) => { oturum.setScreenHidden(id, gizli); goruntu?.update() },
       onVolume: (id, v) => oturum.setScreenVolume(id, v),
     })
     goruntu.update()
+    if (call.isGroup) katilimcilariOku(call.id) // grup: yalnız aramadakilerle bağlan
     oturum.on('notice', (metin) => { if (arama?.oturum === oturum) toast(metin) })
     // Kayıtlı ayarları oturuma uygula; kapı bas-konuşta kapalı başlar (tuşa basılana kadar)
     const s = getSettings()
@@ -1448,9 +1723,13 @@ export async function startApp(root, profile, { email = '' } = {}) {
     goruntuAlani.hidden = false
     guncellemeBandi?.refresh()
     aramaAkisi.sesKapandi(call.id) // panel ve arama sayaçları (kopma, canlılık, süre) kapanır
-    const is = reason
-      ? endCall(call.id, reason).catch(() => { /* olmazsa sunucudaki bayatlık kuralı bitirir */ })
-      : Promise.resolve()
+    grupAramaAkisi.sesKapandi(call.id)
+    // Grup aramasında yalnız biz ayrılırız (leaveGroupCall); 'decline' grupta yok, 'hangup' sayılır
+    const is = !reason
+      ? Promise.resolve()
+      : call.isGroup
+        ? leaveGroupCall(call.id, ['hangup', 'cancel', 'timeout', 'lost'].includes(reason) ? reason : 'hangup').catch(() => { /* bayatlık kuralı çıkarır */ })
+        : endCall(call.id, reason).catch(() => { /* olmazsa sunucudaki bayatlık kuralı bitirir */ })
     if (ciz && !durduruldu) cizKanalPaneli()
     aramaArayuzunuCiz()
     return is
@@ -1815,7 +2094,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (durduruldu) return
     sosyalTazele()
     if (p?.yeniden) aramaAkisi.yenidenDenetle() // kopukken "arama" olayı kaçmış olabilir
-  }, { onCall: aramaOlayi, onReaction: (p) => tepkiOlayi(p), onPin: (p) => sabitOlayi(p) })
+    if (p?.yeniden && arama?.call?.isGroup) katilimcilariOku(arama.call.id) // "grup_arama" da kaçmış olabilir
+  }, { onCall: aramaOlayi, onGroupCall: grupAramaOlayi, onReaction: (p) => tepkiOlayi(p), onPin: (p) => sabitOlayi(p) })
   // Bütün DM'lerin mesajları (okunmamış sayıları): tek abonelik; yeniden bağlanınca sayılar düzeltilir
   dmAboneligi = subscribeAllDmMessages({
     onInsert: dmMesajiGeldi,

@@ -2500,3 +2500,190 @@ describe('tepki ve sabit olayları (v0.7.0)', () => {
     fake.userHandlers.sabit({ payload: { thread_id: 't9', message_id: 1, islem: 'INSERT' } })
   })
 })
+
+describe('grup DM ve grup araması (v0.9.0)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const can = { id: 'u3', username: 'can', color: null, avatar_url: null }
+  const grupSatir = (ek = {}) => ({
+    thread_id: 'g1', name: null, owner_id: 'u1', members: [profil, ali, can], created_at: '2026-11-01T00:00:00Z',
+    last_message_at: null, unread: 0, muted: false, call_id: null, call_count: 0, ...ek,
+  })
+  let gruplar
+  function rpcKur() {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ad === 'dm_list') return { data: [], error: null }
+      if (ad === 'group_dm_list') return { data: gruplar, error: null }
+      if (ad === 'unread_counts') return { data: [], error: null }
+      if (ad === 'join_group_call') return { data: { id: arg.cid, status: 'active', caller: 'u2' }, error: null }
+      if (ad === 'start_group_call') return { data: { id: 'k9', status: 'ringing', caller: 'u1' }, error: null }
+      if (ad === 'ping_group_call') return { data: true, error: null }
+      return { data: null, error: null }
+    })
+  }
+  const cagrilar = (ad) => supabase.rpc.mock.calls.filter(([a]) => a === ad).map(([, x]) => x)
+  const grupSatiri = () => [...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === 'ali, can')
+  const grupDugmesi = () => document.querySelector('.header-host .group-call-start')
+  const grupPaneli = () => document.querySelector('.group-call-host .group-call-panel')
+  const kart = () => document.querySelector('.toast-stack .incoming-call')
+  const olay = (yuk) => fake.userHandlers.grup_arama({ payload: { thread_id: 'g1', caller: 'u2', reason: null, ...yuk } })
+  const sesKonulari = () => fake.channel.mock.calls.map(([ad]) => ad).filter((ad) => ad.startsWith('dm-voice:'))
+
+  beforeEach(() => {
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => true)
+    gruplar = [grupSatir()]
+    fake.userHandlers = {}
+    fake.donguler = []
+    fake.channel.mockClear()
+    localStorage.setItem('voxen.yer', 'ana')
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  async function grubuAc() {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    grupSatiri().click()
+    await bosalt()
+  }
+
+  it('grup listede (rozet + adlar); açınca başlıkta "Grubu ara", sağda üye paneli; tek user: aboneliği', async () => {
+    await grubuAc()
+    expect(fake.user).toBe(1)
+    expect(typeof fake.userHandlers.grup_arama).toBe('function')
+    expect(grupSatiri().querySelector('.group-badge')).not.toBeNull()
+    expect(grupDugmesi().getAttribute('aria-label')).toBe('Grubu ara')
+    expect(document.querySelector('.header-host .header-name').textContent).toBe('ali, can')
+    expect([...document.querySelectorAll('.group-members .member-name')].map((e) => e.textContent)).toEqual(['berk', 'ali', 'can'])
+  })
+
+  it('başkasının grup araması: kart "ali, can · ali arıyor"; sayı gelince "Aramaya katıl (2)"; katılınca dm-voice ve panel; Ayrıl', async () => {
+    await grubuAc()
+    olay({ call_id: 'k1', status: 'ringing', count: 1 })
+    await bosalt()
+    expect(kart().querySelector('.incoming-call-title').textContent).toBe('ali, can · ali arıyor')
+    // Reddet: yalnız kart kapanır (sunucuya gitmez); aynı aramanın sonraki olayı kartı yeniden açmaz
+    kart().querySelector('.incoming-decline').click()
+    olay({ call_id: 'k1', status: 'ringing', count: 1 })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(cagrilar('end_dm_call')).toEqual([])
+    olay({ call_id: 'k1', status: 'active', count: 2 })
+    await bosalt()
+    expect(grupDugmesi().getAttribute('aria-label')).toBe('Aramaya katıl (2)')
+    expect(document.querySelector('.dm-join-call').textContent).toBe('Aramaya katıl (2)')
+    grupDugmesi().click()
+    await bosalt()
+    expect(cagrilar('join_group_call')).toEqual([{ cid: 'k1' }])
+    expect(sesKonulari()).toEqual(['dm-voice:k1'])
+    expect(grupPaneli()).not.toBeNull()
+    expect(grupDugmesi().getAttribute('aria-label')).toBe('Aramadasın')
+    grupPaneli().querySelector('.call-hangup').click()
+    await bosalt()
+    expect(cagrilar('leave_group_call')).toEqual([{ cid: 'k1', reason: 'hangup' }])
+    expect(grupPaneli()).toBeNull()
+  })
+
+  it('📞 grubu arar: başlatan hemen sese girer; arama bitince olayla kapanır', async () => {
+    await grubuAc()
+    grupDugmesi().click()
+    await bosalt()
+    expect(cagrilar('start_group_call')).toEqual([{ tid: 'g1' }])
+    expect(sesKonulari()).toEqual(['dm-voice:k9'])
+    expect(grupPaneli().querySelector('.call-status').textContent).toBe('Aranıyor…')
+    olay({ call_id: 'k9', caller: 'u1', status: 'ended', count: 0 })
+    await bosalt()
+    expect(grupPaneli()).toBeNull()
+    expect(cagrilar('leave_group_call')).toEqual([]) // sunucu zaten bitirdi
+  })
+})
+
+describe('grup araması düzeltme turu 1 (I1, K6, K8)', () => {
+  const ali = { id: 'u2', username: 'ali', color: '#e05b5b', avatar_url: null }
+  const can = { id: 'u3', username: 'can', color: null, avatar_url: null }
+  const grupSatir = () => ({
+    thread_id: 'g1', name: null, owner_id: 'u2', members: [profil, ali, can], created_at: '2026-11-01T00:00:00Z',
+    last_message_at: null, unread: 0, muted: false, call_id: null, call_count: 0,
+  })
+  let gruplar
+  let ping
+  function rpcKur() {
+    supabase.rpc.mockImplementation(async (ad, arg) => {
+      if (ad === 'dm_list') return { data: [], error: null }
+      if (ad === 'group_dm_list') return { data: gruplar, error: null }
+      if (ad === 'unread_counts') return { data: [], error: null }
+      if (ad === 'join_group_call') return { data: { id: arg.cid, status: 'active', caller: 'u2' }, error: null }
+      if (ad === 'ping_group_call') return { data: ping, error: null }
+      return { data: null, error: null }
+    })
+  }
+  const grupSatiri = () => [...document.querySelectorAll('.dm-item')].find((b) => b.querySelector('.dm-name').textContent === 'ali, can')
+  const grupDugmesi = () => document.querySelector('.header-host .group-call-start')
+  const grupPaneli = () => document.querySelector('.group-call-host .group-call-panel')
+  const kart = () => document.querySelector('.toast-stack .incoming-call')
+  const toastlar = () => [...document.querySelectorAll('.toast')].map((t) => t.textContent)
+  const olay = (yuk) => fake.userHandlers.grup_arama({ payload: { thread_id: 'g1', caller: 'u2', reason: null, ...yuk } })
+
+  beforeEach(() => {
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => true)
+    gruplar = [grupSatir()]
+    ping = true
+    fake.userHandlers = {}
+    fake.donguler = []
+    fake.channel.mockClear()
+    localStorage.setItem('voxen.yer', 'ana')
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  async function aramaya() {
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    grupSatiri().click()
+    await bosalt()
+    olay({ call_id: 'k1', status: 'active', count: 2, participants: ['u2', 'u3'] })
+    await bosalt()
+    grupDugmesi().click()
+    await bosalt()
+    expect(grupPaneli()).not.toBeNull()
+  }
+
+  it('katılımcı listesi gelince yalnız listedekilerle bağlanılır (setAllowedPeers)', async () => {
+    await aramaya()
+    const izin = vi.spyOn(fake.oturum, 'setAllowedPeers')
+    olay({ call_id: 'k1', status: 'active', count: 2, participants: ['u1', 'u2'] })
+    await bosalt()
+    expect(izin).toHaveBeenLastCalledWith(['u2']) // can artık aramada değil: bağlantısı kapanır
+  })
+
+  it('gruptan çıkarılan: olay + liste tazelenmesi, ping false -> aramadan hemen çıkılır, "Gruptan çıkarıldın."', async () => {
+    await aramaya()
+    ping = false
+    gruplar = []
+    olay({ call_id: 'k1', status: 'active', count: 2, participants: ['u2', 'u3'] })
+    fake.userHandlers.degisti({ payload: { tablo: 'dm_members', islem: 'DELETE' } })
+    await bosalt()
+    await bosalt()
+    expect(grupPaneli()).toBeNull()
+    expect(toastlar()).toContain('Gruptan çıkarıldın.')
+    expect(toastlar().filter((t) => t === 'Gruptan çıkarıldın.')).toHaveLength(1)
+  })
+
+  it('listede yokum ama sunucu "sürüyor" diyorsa (eski sıradaki olay) aramada kalınır', async () => {
+    await aramaya()
+    olay({ call_id: 'k1', status: 'active', count: 2, participants: ['u2', 'u3'] })
+    await bosalt()
+    expect(grupPaneli()).not.toBeNull()
+  })
+
+  it('K6: engellediğim kişinin başlattığı grup araması kart çıkarmaz; K8: bildirim metni kartla aynı', async () => {
+    fake.rows.blocks = [{ blocker: 'u1', blocked: 'u2', created_at: '2026-11-01T00:00:00Z' }]
+    rpcKur()
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    olay({ call_id: 'k1', status: 'ringing', count: 1, caller: 'u2', participants: ['u2'] })
+    await bosalt()
+    expect(kart()).toBeNull()
+    expect(document.querySelector('.dm-join-call').textContent).toBe('Aramaya katıl (1)') // katılma yine mümkün
+    fake.rows.blocks = []
+  })
+})

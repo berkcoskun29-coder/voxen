@@ -15,7 +15,9 @@ import { makeProfileOpener } from './profileOpener.js'
 import { sayiYazisi } from './unread.js'
 import { openMenu, closeMenu, menuAcikMi, herhangiMenuAcikMi, menuKapaninca } from './serverMenu.js'
 import { createModalShell } from './modal.js'
-import { usersIcon, messageIcon, moreIcon, checkIcon, closeIcon } from './icons.js'
+import { usersIcon, messageIcon, moreIcon, checkIcon, closeIcon, plusIcon, phoneIcon } from './icons.js'
+import { grupRozeti, GRUP_METINLERI } from './groupDm.js'
+import { grupAdi, aramayaKatilMetni } from '../data/groups.js'
 
 // Spec §1'in metinleri
 export const HOME_TEXTS = {
@@ -86,10 +88,13 @@ function bosYazi(metin) {
 
 // ---------- Sol sütun ----------
 
-// dms: fetchDmList() sonucu (sıralı ya da değil; burada sıralanır). presence: Map<userId, {status, statusText}>
+// dms: fetchDmList() (+ grup listesi) sonucu (sıralı ya da değil; burada sıralanır). presence: Map<userId, {status, statusText}>
 // view: { tur: 'arkadaslar' } | { tur: 'dm', thread }: seçili satır. pending: gelen istek sayısı.
-// handlers: { onFriends(), onOpenDm(thread), onHideDm(thread) }
-export function renderHomeSidebar({ dms = [], presence = new Map(), view = { tur: 'arkadaslar' }, pending = 0, handlers = {} }) {
+// selfId: giriş yapan kişi (grup adı ve rozetinde kendisi sayılmaz).
+// handlers: { onFriends(), onOpenDm(thread), onHideDm(thread), onCreateGroup(), onJoinCall(thread) }
+// Grup satırı (thread.isGroup): rozet + grubun adı; sessizse soluk; arama sürüyorsa "Aramaya katıl (N)".
+// "+" (Grup oluştur) yalnız onCreateGroup verilince çıkar.
+export function renderHomeSidebar({ dms = [], presence = new Map(), view = { tur: 'arkadaslar' }, pending = 0, selfId = null, handlers = {} }) {
   const kok = document.createElement('div')
   kok.className = 'home-nav'
 
@@ -115,6 +120,12 @@ export function renderHomeSidebar({ dms = [], presence = new Map(), view = { tur
   b.className = 'section-title'
   b.textContent = HOME_TEXTS.ozelMesajlar
   baslik.appendChild(b)
+  if (handlers.onCreateGroup) {
+    const arti = simgeDugme('dm-group-create', GRUP_METINLERI.olustur, plusIcon(16))
+    arti.dataset.odak = 'grup-olustur'
+    arti.onclick = () => handlers.onCreateGroup?.()
+    baslik.appendChild(arti)
+  }
 
   const liste = document.createElement('div')
   liste.className = 'dm-list'
@@ -128,23 +139,41 @@ export function renderHomeSidebar({ dms = [], presence = new Map(), view = { tur
     ac.className = 'dm-item' + (t.id === seciliId ? ' selected' : '') + (okunmamis ? ' unread' : '')
     ac.dataset.odak = `dm-${t.id}`
     if (t.id === seciliId) ac.setAttribute('aria-current', 'page')
+    const grup = !!t.isGroup
+    const adi = grup ? grupAdi(t, selfId) : t.other.username
+    if (grup) {
+      satir.classList.add('dm-row-group')
+      if (t.muted) ac.classList.add('muted')
+    }
     const isim = document.createElement('span')
     isim.className = 'dm-name'
-    isim.textContent = t.other.username
-    ac.append(avatarWithDot(t.other, kisiDurumu(presence, t.other.id), 'dm-avatar'), isim)
+    isim.textContent = adi
+    ac.append(grup ? grupRozeti(t, selfId, 'dm-avatar') : avatarWithDot(t.other, kisiDurumu(presence, t.other.id), 'dm-avatar'), isim)
     if (okunmamis) {
       const say = document.createElement('span')
       say.className = 'unread-count'
       say.textContent = sayiYazisi(okunmamis)
       ac.appendChild(say)
-      ac.setAttribute('aria-label', `${t.other.username}, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
+      ac.setAttribute('aria-label', `${adi}, ${sayiYazisi(okunmamis)} okunmamış mesaj`)
     }
     ac.onclick = () => handlers.onOpenDm?.(t)
     // × : DM listeden gizlenir (mesajlar silinmez; yeni mesaj gelince geri döner)
-    const gizle = simgeDugme('dm-hide', `${t.other.username} konuşmasını gizle`, closeIcon(14))
+    const gizle = simgeDugme('dm-hide', `${adi} konuşmasını gizle`, closeIcon(14))
     gizle.dataset.odak = `dm-gizle-${t.id}`
     gizle.onclick = () => handlers.onHideDm?.(t)
     satir.append(ac, gizle)
+    // Grupta arama sürüyor: "Aramaya katıl (N)" (satırın altında)
+    if (grup && t.call && handlers.onJoinCall) {
+      const katil = document.createElement('button')
+      katil.type = 'button'
+      katil.className = 'dm-join-call'
+      katil.dataset.odak = `dm-katil-${t.id}`
+      const yazi = document.createElement('span')
+      yazi.textContent = aramayaKatilMetni(t.call.count)
+      katil.append(phoneIcon(14), yazi)
+      katil.onclick = () => handlers.onJoinCall?.(t)
+      satir.appendChild(katil)
+    }
     liste.appendChild(satir)
   }
   kok.append(arkadas, baslik, liste)

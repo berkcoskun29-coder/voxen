@@ -90,6 +90,9 @@ export class PeerMesh {
     this.uploadMbps = AYAR_VARSAYILAN.uploadMbps // görüntü bütçesinin kaynağı (ayarlardan gelir)
     this.ekranModu = 'net'
     this.odadaEkran = false // kanalda BAŞKA biri ekran paylaşıyor mu (voice_states'ten, uygulama bildirir)
+    // İzinli eşler (grup araması): null = herkes (sesli kanal, bire bir arama). Set verilince listede olmayan
+    // eşin bağlantısı kapanır ve sinyalleri (bye dışında) yok sayılır (gruptan çıkarılan eş kalamasın).
+    this.izinliler = null
   }
 
   // ---- Dışa açık yöntemler ----
@@ -105,6 +108,24 @@ export class PeerMesh {
     if (!this.dinleyiciler.has(olay)) this.dinleyiciler.set(olay, new Set())
     this.dinleyiciler.get(olay).add(cb)
     return () => this.dinleyiciler.get(olay)?.delete(cb)
+  }
+
+  // Grup araması: yalnız bu kişilerle bağlantı kurulur (null = herkes). Listeden çıkanın bağlantısı hemen
+  // kapanır; yeni izin verilen ve henüz bağlı olmadığımız kişiye özel hello gider (onun hello'su biz
+  // izin vermeden geldiyse yok sayılmıştı).
+  setAllowedPeers(ids) {
+    const eski = this.izinliler
+    this.izinliler = ids == null ? null : new Set(ids)
+    if (!this.izinliler) return
+    for (const id of [...this.eslar.keys()]) if (!this.izinliler.has(id)) this._esiBirak(id)
+    for (const id of [...this.basarisizlar]) {
+      if (!this.izinliler.has(id) && this.basarisizlar.delete(id)) this._yay('failed-change')
+    }
+    if (!this.aktif) return
+    for (const id of this.izinliler) {
+      if (id === this.userId || this.eslar.has(id) || (eski && eski.has(id))) continue
+      this._gonder({ type: 'hello', to: id })
+    }
   }
 
   join() {
@@ -327,6 +348,7 @@ export class PeerMesh {
   _mesajGeldi(m) {
     if (!m || m.from === this.userId) return // kendi mesajımız
     if (m.to && m.to !== this.userId) return // başkasına gönderilmiş
+    if (this.izinliler && !this.izinliler.has(m.from) && m.type !== 'bye') return // izinli değil (grup araması)
     if (m.type === 'hello') this._helloGeldi(m)
     else if (m.type === 'offer') this._teklifGeldi(m)
     else if (m.type === 'answer') this._cevapGeldi(m)

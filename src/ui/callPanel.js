@@ -93,7 +93,7 @@ export function createCallButton({ onClick }) {
 
 // Avatar (resim ya da renkli baş harf). konusuyor: yeşil halka; nabiz: "Aranıyor…" atışı;
 // durum: { muted, deafened } -> köşede susturma/sağırlaştırma simgesi.
-function aramaAvatari(kisi, { konusuyor = false, nabiz = false, durum = null } = {}) {
+export function aramaAvatari(kisi, { konusuyor = false, nabiz = false, durum = null } = {}) {
   const kutu = document.createElement('span')
   kutu.className = 'call-avatar-wrap' + (konusuyor ? ' speaking' : '') + (nabiz ? ' nabiz' : '')
   kutu.dataset.id = kisi?.id ?? ''
@@ -116,7 +116,7 @@ function aramaAvatari(kisi, { konusuyor = false, nabiz = false, durum = null } =
 
 // Avatarı yerinde günceller (her saniyelik çizimde düğüm yeniden kurulmaz): konuşan halkası ve
 // köşedeki simge. Simge yalnız durum değişince değişir.
-function avatariGuncelle(kutu, { konusuyor = false, durum = null } = {}) {
+export function avatariGuncelle(kutu, { konusuyor = false, durum = null } = {}) {
   kutu.classList.toggle('speaking', !!konusuyor)
   const anahtar = durum?.deafened ? 'deafened' : durum?.muted ? 'muted' : ''
   if ((kutu.dataset.durum ?? '') === anahtar) return
@@ -131,7 +131,7 @@ function avatariGuncelle(kutu, { konusuyor = false, durum = null } = {}) {
   }
 }
 
-function yuvarlakDugme(ad, sinif, simge, onClick) {
+export function yuvarlakDugme(ad, sinif, simge, onClick) {
   const b = document.createElement('button')
   b.type = 'button'
   b.className = 'call-btn ' + sinif
@@ -145,7 +145,7 @@ function yuvarlakDugme(ad, sinif, simge, onClick) {
 }
 
 // Düğmenin adını ve pasifliğini yerinde ayarlar (bağlanırken pasif, bağlanınca yeniden etkin)
-function dugmeDurumu(b, { ad, pasif = false, neden = '' }) {
+export function dugmeDurumu(b, { ad, pasif = false, neden = '' }) {
   b.setAttribute('aria-label', ad)
   const ipucu = pasif && neden ? neden : ad
   b.dataset.tip = ipucu

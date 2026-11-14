@@ -6,6 +6,7 @@ import { toast } from './layout.js'
 import { linkliMetin } from './links.js'
 import { avatarTextColor } from './avatarColor.js'
 import { avatarWithDot } from './memberList.js'
+import { grupRozeti } from './groupDm.js'
 import { makeProfileOpener } from './profileOpener.js'
 import { eylemCubugu, duzenlendiEtiketi, duzenlemeKutusu, silmeOnayi } from './messageActions.js'
 import { bahsetmeliMetin, mountMentionSuggest } from './mentions.js'
@@ -17,8 +18,9 @@ import { YER_TUTUCU, EN_FAZLA_EK, KOTA, EK_METINLERI, ekDenetle, turYasakMi, res
 import { uploadFile, kullanimim, indir } from '../data/attachments.js'
 import { ekTepsisi, mesajEkleri, goruntuleyiciAc, goruntuleyiciyiKapat, birakmaKatmani, resimHazirla } from './attachments.js'
 
-// Sistem satırı (DM): arama kaydı ('call') ya da "… bir mesajı sabitledi." ('pin'). Yalnız sunucu yazar.
-const sistemMi = (m) => m?.kind === 'call' || m?.kind === 'pin'
+// Sistem satırı (DM): arama kaydı ('call'), "… bir mesajı sabitledi." ('pin') ya da grup satırı ('system':
+// "berk, ayla'yı ekledi."). Yalnız sunucu yazar.
+const sistemMi = (m) => m?.kind === 'call' || m?.kind === 'pin' || m?.kind === 'system'
 
 // Yönelme eki (Türkçe ünlü uyumu): "berk'e", "ayla'ya", "can'a", "kerem'e".
 // Brief'teki "**ad**'a yanıt veriyorsun" kalıbının doğru Türkçesi.
@@ -92,7 +94,7 @@ export function renderMessage(msg, profile, { grouped = false, izin = null, tik 
   // ve eylem simgeleri yok
   if (sistemMi(msg)) {
     const satir = document.createElement('div')
-    satir.className = 'message call-log' + (msg.kind === 'pin' ? ' pin-log' : '')
+    satir.className = 'message call-log' + (msg.kind === 'pin' ? ' pin-log' : '') + (msg.kind === 'system' ? ' system-log' : '')
     satir.dataset.id = String(msg.id)
     satir.textContent = msg.content
     return satir
@@ -242,17 +244,22 @@ const gunAnahtari = (iso) => new Date(iso).toDateString()
 export function mountChat(container, { source = null, channel = null, profile, isOwner = false, headerActions = [], headerHost = null, onBottom = null, peerStatus = 'offline', members = [] }) {
   const kaynak = source ?? channelSource(channel, { isOwner, selfId: profile.id })
   const dm = kaynak.kind === 'dm'
+  // Grup DM (011): başlıkta grup rozeti; @bahsetme kanaldaki gibi açık (üyeler kaynak.group.members)
+  const grup = dm && !!kaynak.group
+  const bahsetmeli = !dm || grup
   const yazabilir = kaynak.canSend !== false
   let mesajlar = [] // eskiden yeniye
   const idler = new Set() // aynı mesaj iki kez eklenmesin
   const profiller = new Map([[profile.id, profile]])
+  // Grupta üyelerin profilleri baştan bilinir (yazar adları için ayrı sorgu gerekmez)
+  if (grup) for (const u of kaynak.group.members ?? []) if (u?.id && u.id !== profile.id && u.username) profiller.set(u.id, u)
   let kapandi = false
   let eskiVar = true // daha eski mesaj olabilir mi
   let yukleniyor = false
   // Açık düzenleme: { id, ed }. ed (düzenleme kutusu öğesi) liste yeniden çizilince AYNEN yeniden konur,
   // böylece yeni mesaj ya da canlı güncelleme gelse de yazılan kaybolmaz.
   let duzenle = null
-  let uyeler = members // @bahsetme için sunucu üyeleri (yalnız kanalda)
+  let uyeler = grup ? (kaynak.group.members ?? []) : members // @bahsetme için sunucu (ya da grup) üyeleri
   // --- Tepki, yanıt, sabit (009) ---
   // Kaynak bu işleri desteklemiyorsa (eski/sahte kaynak) özellikler kapalı kalır.
   const tepkiVar = typeof kaynak.react === 'function'
@@ -325,7 +332,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
   const yaziyor = document.createElement('div')
   yaziyor.className = 'typing-line'
   // @ önerisi yalnız sunucu kanalında (DM'de iki kişisiniz). Kutunun Enter dinleyicisinden ÖNCE bağlanır.
-  const oneri = !dm && yazabilir ? mountMentionSuggest(kutu, { getMembers: () => uyeler, selfId: profile.id }) : null
+  const oneri = bahsetmeli && yazabilir ? mountMentionSuggest(kutu, { getMembers: () => uyeler, selfId: profile.id }) : null
   if (oneri) alt.appendChild(oneri.el)
   // Yanıt şeridi: "berk'e yanıt veriyorsun ✕" (yanıt yokken gizli). Ekran okuyucu değişimi duyar.
   const yanitSeridi = document.createElement('div')
@@ -388,6 +395,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
 
   // DM başlığındaki küçük avatar + durum noktası (durum değişince setPeerStatus yenisini koyar)
   function baslikAvatari(durum) {
+    if (grup) return grupRozeti({ members: kaynak.group.members }, profile.id, 'header-avatar header-dm-avatar')
     const av = avatarWithDot(kaynak.other ?? { username: kaynak.title, color: null }, durum, 'header-avatar')
     av.classList.add('header-dm-avatar')
     av.setAttribute('aria-hidden', 'true') // ad hemen yanında yazıyor
@@ -406,7 +414,10 @@ export function mountChat(container, { source = null, channel = null, profile, i
     simge.textContent = dm ? '@' : '#'
     const h = document.createElement('h2')
     const p = document.createElement('p')
-    if (dm) {
+    if (grup) {
+      h.textContent = adi
+      p.textContent = `${adi} grubunun başlangıcı.`
+    } else if (dm) {
       h.textContent = adi // textContent: kişi adı HTML olarak çalışmaz
       p.textContent = `@${adi} ile özel mesajlarının başlangıcı.`
     } else {
@@ -469,8 +480,8 @@ export function mountChat(container, { source = null, channel = null, profile, i
           onDelete: (shift) => silIste(m.id, shift),
         },
         editor: duzenle?.id === m.id ? duzenle.ed.el : null,
-        uyeler: dm ? null : uyeler,
-        anar: !dm && m.author_id !== profile.id && mentionsUser(m.content, profile.username),
+        uyeler: bahsetmeli ? uyeler : null,
+        anar: bahsetmeli && !sistemMi(m) && m.author_id !== profile.id && mentionsUser(m.content, profile.username),
         tepkiler: tepkiOzeti(m.id),
         tepkiAktif: tepkiVerilebilir(m),
         yanit: m.reply_to != null ? yanitBilgisi(m.reply_to) : null,
@@ -1264,7 +1275,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
     },
     // Sunucu üyeleri yüklendi/değişti: @ etiketleri yeniden çizilir (kanalda)
     setMembers(liste) {
-      if (dm) return
+      if (!bahsetmeli) return
       const anahtar = (l) => l.map((u) => `${u.id}:${u.username}`).join('\n')
       const ayni = anahtar(liste ?? []) === anahtar(uyeler)
       uyeler = liste ?? []
@@ -1272,7 +1283,7 @@ export function mountChat(container, { source = null, channel = null, profile, i
     },
     // DM: karşı tarafın durumu değişti (başlıktaki nokta). Kanalda bir şey yapmaz.
     setPeerStatus(durum) {
-      if (!dm) return
+      if (!dm || grup) return
       const yeni = baslikAvatari(durum)
       diyez.replaceWith(yeni)
       diyez = yeni

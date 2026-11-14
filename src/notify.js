@@ -143,10 +143,11 @@ export function createNotifier({ ac, deps = {} } = {}) {
   // Gelen arama: "Ad" / "Ad seni arıyor". Birleşmez, bildirim sesi çalmaz (zili kart çalar).
   // Tıklayınca pencere öne gelir ve ac({ type: 'call', id }) kartı gösterir; bildirimden kabul edilmez.
   // Dönen kapat(): kart kapanınca bildirim de kalkar (tarayıcıda; masaüstünde bildirim merkezinde kalır).
-  function bildirArama({ id, ad }) {
+  // metin verilirse (grup araması: "Grup adı · berk arıyor", kartla aynı) o yazılır.
+  function bildirArama({ id, ad, metin = null }) {
     if (kapandi || !id) return () => {}
     const hedef = { type: 'call', id }
-    const sonuc = goster({ id: yeniId(), baslik: ad, metin: aramaBildirimMetni(ad), hedef, etiket: `call:${id}`, tikla })
+    const sonuc = goster({ id: yeniId(), baslik: ad, metin: metin ?? aramaBildirimMetni(ad), hedef, etiket: `call:${id}`, tikla })
     return () => { try { sonuc?.close?.() } catch { /* zaten kapandı */ } }
   }
 

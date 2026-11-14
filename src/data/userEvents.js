@@ -12,8 +12,11 @@ import { openPrivateChannel } from './privateChannel.js'
 //   { call_id, thread_id, status, caller, reason }; ayrıştırma data/calls.js parseCallEvent). Yeni abonelik açılmaz.
 // onReaction(payload) / onPin(payload): DM tepki ve sabit yayınları (009_tepki_yanit_sabit.sql:
 //   { thread_id, message_id, emoji, user_id, islem } / { thread_id, message_id, islem, pinned_by }). Aynı konu.
+// onGroupCall(payload): grup araması yayınları (011_grup_dm.sql, olay adı "grup_arama":
+//   { call_id, thread_id, status, caller, reason, count }; ayrıştırma data/groups.js parseGroupCallEvent).
+//   Realtime yayınları olay adına göre süzer: bu ad ayrıca dinlenmezse hiç gelmez. Aynı konu, yeni abonelik yok.
 // Dönen: { close() -> Promise }
-export function subscribeUserEvents(userId, onChange, { onCall = null, onReaction = null, onPin = null } = {}) {
+export function subscribeUserEvents(userId, onChange, { onCall = null, onReaction = null, onPin = null, onGroupCall = null } = {}) {
   let kapali = false
   let baglanmaSayisi = 0
   const ozel = openPrivateChannel(
@@ -22,6 +25,11 @@ export function subscribeUserEvents(userId, onChange, { onCall = null, onReactio
       if (onCall) {
         k.on('broadcast', { event: 'arama' }, ({ payload }) => {
           if (!kapali) onCall(payload ?? {})
+        })
+      }
+      if (onGroupCall) {
+        k.on('broadcast', { event: 'grup_arama' }, ({ payload }) => {
+          if (!kapali) onGroupCall(payload ?? {})
         })
       }
       if (onReaction) {
