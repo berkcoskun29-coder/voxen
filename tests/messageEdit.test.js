@@ -102,15 +102,15 @@ beforeEach(() => {
 })
 
 describe('simgeler', () => {
-  it('kendi mesajında ✏️ ve 🗑️, başkasınınkinde hiçbiri', async () => {
+  it('kendi mesajında ✏️ ve 🗑️, başkasınınkinde yalnız 😊 ve ↩️ (sahip değilse 📌 yok)', async () => {
     await kur([ms(1, 'u1'), ms(2, 'u2')])
-    expect([...mesaj(1).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Düzenle', 'Sil'])
-    expect(mesaj(2).querySelector('.msg-actions')).toBeNull()
+    expect([...mesaj(1).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Tepki ekle', 'Yanıtla', 'Düzenle', 'Sil'])
+    expect([...mesaj(2).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Tepki ekle', 'Yanıtla'])
   })
-  it('sunucu sahibi başkasının mesajında yalnız 🗑️ görür', async () => {
+  it('sunucu sahibi başkasının mesajında ✏️ görmez; 📌 ve 🗑️ görür', async () => {
     await kur([ms(1, 'u1'), ms(2, 'u2')], { isOwner: true })
-    expect([...mesaj(2).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Sil'])
-    expect(mesaj(1).querySelectorAll('.msg-action')).toHaveLength(2)
+    expect([...mesaj(2).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Tepki ekle', 'Yanıtla', 'Sabitle', 'Sil'])
+    expect(mesaj(1).querySelectorAll('.msg-action')).toHaveLength(5)
   })
 })
 

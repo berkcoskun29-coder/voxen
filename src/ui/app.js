@@ -912,7 +912,8 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (durduruldu) return
     const idler = servers.map((s) => s.id)
     if (olaylar) olaylar.update(idler)
-    else olaylar = subscribeServerEvents(idler, sunucuOlayi)
+    // Aynı konudan tepki ve sabit olayları (009): açık sohbete iletilir, yeni abonelik yok
+    else olaylar = subscribeServerEvents(idler, sunucuOlayi, { onReaction: (_sid, p) => tepkiOlayi(p), onPin: (_sid, p) => sabitOlayi(p) })
   }
 
   // Ana alan: sohbet her zaman SON SEÇİLEN YAZILI kanalı gösterir (sesli kanala tıklamak onu değiştirmez).
@@ -1665,6 +1666,9 @@ export async function startApp(root, profile, { email = '' } = {}) {
 
   // Veritabanından "degisti" olayı (ya da yeniden bağlanma) geldi
   const ayrildimIdleri = new Set() // başka pencerede kendimizin ayrıldığı sunucular (bildirim metni için)
+  // Tepki/sabit olayı (server: ya da user: konusu): açık sohbet kendi konuşmasınınkini işler, gerisini yok sayar
+  function tepkiOlayi(p) { if (!durduruldu) sohbet?.applyReaction?.(p) }
+  function sabitOlayi(p) { if (!durduruldu) sohbet?.applyPin?.(p) }
   function sunucuOlayi(sid, payload) {
     if (durduruldu) return
     if (payload?.tablo === 'server_members' && payload?.islem === 'DELETE' && payload?.user_id === profile.id) ayrildimIdleri.add(sid)
@@ -1803,7 +1807,7 @@ export async function startApp(root, profile, { email = '' } = {}) {
     if (durduruldu) return
     sosyalTazele()
     if (p?.yeniden) aramaAkisi.yenidenDenetle() // kopukken "arama" olayı kaçmış olabilir
-  }, { onCall: aramaOlayi })
+  }, { onCall: aramaOlayi, onReaction: (p) => tepkiOlayi(p), onPin: (p) => sabitOlayi(p) })
   // Bütün DM'lerin mesajları (okunmamış sayıları): tek abonelik; yeniden bağlanınca sayılar düzeltilir
   dmAboneligi = subscribeAllDmMessages({
     onInsert: dmMesajiGeldi,

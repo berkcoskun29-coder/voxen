@@ -110,10 +110,10 @@ describe('mesajlar', () => {
     ]))
   })
 
-  it('fetchDmMessages: bütün sütunlar (008 kind dahil) seçilir, kind olduğu gibi gelir', async () => {
+  it('fetchDmMessages: bütün sütunlar (008 kind dahil) + gömülü tepki/sabit (009) seçilir, kind olduğu gibi gelir', async () => {
     fake.sonuc = { data: [{ id: 2, kind: 'call', content: '📞 Cevapsız arama' }], error: null }
     const m = await fetchDmMessages('t1')
-    expect(fake.sorgular[0].cagrilar[0]).toEqual(['select', '*'])
+    expect(fake.sorgular[0].cagrilar[0]).toEqual(['select', '*, reactions:dm_message_reactions(emoji, user_id), pin:dm_message_pins(pinned_at, pinned_by)'])
     expect(m[0].kind).toBe('call')
   })
 

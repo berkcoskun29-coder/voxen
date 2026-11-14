@@ -9,9 +9,12 @@ import { openPrivateChannel } from './privateChannel.js'
 //   { tablo: 'servers'|'channels'|'server_members', islem: 'INSERT'|'UPDATE'|'DELETE',
 //     server_id, channel_id, user_id }
 //   Bağlantı kopup yeniden kurulunca (kaçan olay olabilir) payload { yeniden: true } olur.
+// Seçenekler (009_tepki_yanit_sabit.sql; aynı konu, yeni abonelik yok):
+//   onReaction(serverId, payload): "tepki" yayını { channel_id, message_id, emoji, user_id, islem }
+//   onPin(serverId, payload): "sabit" yayını { channel_id, message_id, islem, pinned_by }
 // Dönen: { update(serverIds), close() }
 //   update: sunucu listesi değişince çağrılır; yeni sunucuların konusu açılır, çıkanlarınki kapanır.
-export function subscribeServerEvents(serverIds, onChange) {
+export function subscribeServerEvents(serverIds, onChange, { onReaction = null, onPin = null } = {}) {
   let kapali = false
   const acik = new Map() // serverId -> openPrivateChannel sonucu
 
@@ -23,6 +26,16 @@ export function subscribeServerEvents(serverIds, onChange) {
         k.on('broadcast', { event: 'degisti' }, ({ payload }) => {
           if (!kapali && acik.get(sid) === ozel) onChange?.(sid, payload ?? {})
         })
+        if (onReaction) {
+          k.on('broadcast', { event: 'tepki' }, ({ payload }) => {
+            if (!kapali && acik.get(sid) === ozel) onReaction(sid, payload ?? {})
+          })
+        }
+        if (onPin) {
+          k.on('broadcast', { event: 'sabit' }, ({ payload }) => {
+            if (!kapali && acik.get(sid) === ozel) onPin(sid, payload ?? {})
+          })
+        }
       },
       (durum) => {
         if (durum !== 'SUBSCRIBED') return

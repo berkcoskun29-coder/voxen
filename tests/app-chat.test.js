@@ -64,7 +64,7 @@ vi.mock('../src/lib/supabase.js', () => {
     const dmTumu = ad.startsWith('dm-messages-all:') // DM sayacı: tek abonelik (data/dms.js): sohbet sayılmaz
     const k = {
       on: (_t, f, cb) => {
-        if (srvKanal) fake.srvHandlers.push({ server: ad.slice(7), cb, k })
+        if (srvKanal) fake.srvHandlers.push({ server: ad.slice(7), cb, k, event: f.event })
         if (tumuKanal) fake.allHandlers[f.event] = cb
         if (ad === 'presence:voxen') fake.syncCb = cb
         if (kisiKanal) fake.userCb = cb
@@ -2465,5 +2465,38 @@ describe('gelen DM araması: kart, zil, bildirim (arama T4)', () => {
     stopApp()
     expect(kart()).toBeNull()
     expect(zil()[0].durdu).toBe(true)
+  })
+})
+
+describe('tepki ve sabit olayları (v0.7.0)', () => {
+  it('server: konusundaki tepki/sabit olayları açık kanal sohbetine işlenir; yeni abonelik açılmaz', async () => {
+    fake.rows.messages = [{ id: 7, channel_id: 'a', author_id: 'u2', content: 'selam', created_at: new Date().toISOString() }]
+    fake.rows.profiles = [{ id: 'u2', username: 'ali', color: '#e05b5b' }]
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.srv).toBe(1)
+    const olay = (ad, payload) => { for (const h of fake.srvHandlers) if (h.event === ad) h.cb({ payload }) }
+    olay('tepki', { channel_id: 'a', message_id: 7, emoji: '🔥', user_id: 'u2', islem: 'INSERT' })
+    await bosalt()
+    const satir = document.querySelector('.message[data-id="7"]')
+    expect(satir.querySelector('.reaction').textContent).toBe('🔥1')
+    olay('sabit', { channel_id: 'a', message_id: 7, islem: 'INSERT' })
+    expect(document.querySelector('.message[data-id="7"] .msg-pin')).not.toBeNull()
+    // Başka kanalın olayı yok sayılır
+    olay('tepki', { channel_id: 'b', message_id: 7, emoji: '👍', user_id: 'u2', islem: 'INSERT' })
+    expect(document.querySelectorAll('.message[data-id="7"] .reaction')).toHaveLength(1)
+    expect(fake.srv).toBe(1)
+    expect(fake.subs).toBe(1)
+  })
+
+  it('user: konusundaki tepki/sabit olayları dinlenir (tek abonelik)', async () => {
+    await startApp(document.querySelector('#app'), profil)
+    await bosalt()
+    expect(fake.user).toBe(1)
+    expect(typeof fake.userHandlers.tepki).toBe('function')
+    expect(typeof fake.userHandlers.sabit).toBe('function')
+    // Açık DM yokken olay sessizce yok sayılır
+    fake.userHandlers.tepki({ payload: { thread_id: 't9', message_id: 1, emoji: '👍', user_id: 'u2', islem: 'INSERT' } })
+    fake.userHandlers.sabit({ payload: { thread_id: 't9', message_id: 1, islem: 'INSERT' } })
   })
 })

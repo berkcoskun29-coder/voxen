@@ -7,9 +7,11 @@ const tamZaman = new Intl.DateTimeFormat('tr-TR', { day: 'numeric', month: 'long
 
 // Mesajın sağ üstündeki simgeler. Gizli durumu CSS'te opacity ile yapılır (display/visibility değil),
 // böylece klavyeyle Tab'a girer ve odaklanınca (focus-within) görünür.
-// izin: { duzenle: bool, sil: bool }, tik: { onEdit(), onDelete(shiftBasili) }
+// izin: { tepki, yanitla, sabitle, sabitli, duzenle, sil } (bool)
+// tik: { onReact(dugme), onReply(), onPin(), onEdit(), onDelete(shiftBasili) }
+// Sıra: 😊 Tepki ekle, ↩️ Yanıtla, 📌 Sabitle/Sabitlemeyi kaldır, ✏️ Düzenle, 🗑️ Sil.
 export function eylemCubugu(izin, tik) {
-  if (!izin.duzenle && !izin.sil) return null
+  if (!izin.tepki && !izin.yanitla && !izin.sabitle && !izin.duzenle && !izin.sil) return null
   const cubuk = document.createElement('div')
   cubuk.className = 'msg-actions'
   const dugme = (sinif, simge, yazi, eylem, fn) => {
@@ -22,6 +24,16 @@ export function eylemCubugu(izin, tik) {
     b.textContent = simge
     b.onclick = (e) => fn(e)
     return b
+  }
+  if (izin.tepki) {
+    const b = dugme('msg-action-tepki', '😊', 'Tepki ekle', 'tepki', (e) => tik.onReact?.(e.currentTarget))
+    b.setAttribute('aria-haspopup', 'dialog')
+    cubuk.appendChild(b)
+  }
+  if (izin.yanitla) cubuk.appendChild(dugme('msg-action-yanitla', '↩️', 'Yanıtla', 'yanitla', () => tik.onReply?.()))
+  if (izin.sabitle) {
+    const yazi = izin.sabitli ? 'Sabitlemeyi kaldır' : 'Sabitle'
+    cubuk.appendChild(dugme('msg-action-sabitle', '📌', yazi, 'sabitle', () => tik.onPin?.()))
   }
   if (izin.duzenle) cubuk.appendChild(dugme('msg-action-duzenle', '✏️', 'Düzenle', 'duzenle', () => tik.onEdit()))
   if (izin.sil) cubuk.appendChild(dugme('msg-action-sil', '🗑️', 'Sil', 'sil', (e) => tik.onDelete(e.shiftKey)))

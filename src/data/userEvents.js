@@ -10,8 +10,10 @@ import { openPrivateChannel } from './privateChannel.js'
 //   Bağlantı kopup yeniden kurulunca (kaçan olay olabilir) payload { yeniden: true } olur.
 // onCall(payload): verilirse aynı konudaki "arama" yayınları da iletilir (DM araması, 008_dm_arama.sql:
 //   { call_id, thread_id, status, caller, reason }; ayrıştırma data/calls.js parseCallEvent). Yeni abonelik açılmaz.
+// onReaction(payload) / onPin(payload): DM tepki ve sabit yayınları (009_tepki_yanit_sabit.sql:
+//   { thread_id, message_id, emoji, user_id, islem } / { thread_id, message_id, islem, pinned_by }). Aynı konu.
 // Dönen: { close() -> Promise }
-export function subscribeUserEvents(userId, onChange, { onCall = null } = {}) {
+export function subscribeUserEvents(userId, onChange, { onCall = null, onReaction = null, onPin = null } = {}) {
   let kapali = false
   let baglanmaSayisi = 0
   const ozel = openPrivateChannel(
@@ -20,6 +22,16 @@ export function subscribeUserEvents(userId, onChange, { onCall = null } = {}) {
       if (onCall) {
         k.on('broadcast', { event: 'arama' }, ({ payload }) => {
           if (!kapali) onCall(payload ?? {})
+        })
+      }
+      if (onReaction) {
+        k.on('broadcast', { event: 'tepki' }, ({ payload }) => {
+          if (!kapali) onReaction(payload ?? {})
+        })
+      }
+      if (onPin) {
+        k.on('broadcast', { event: 'sabit' }, ({ payload }) => {
+          if (!kapali) onPin(payload ?? {})
         })
       }
       k.on('broadcast', { event: 'degisti' }, ({ payload }) => {

@@ -2,16 +2,22 @@
 import { supabase } from '../lib/supabase.js'
 import { joinTyping } from './typing.js'
 import { markRead } from './reads.js'
+import { etkilesimHatasi } from './reactions.js'
 
 export const MAX_UZUNLUK = 2000
 export const SAYFA = 50
+
+// Mesaj sorgusu tepkileri ve sabit bilgisini de gömer (009): ek sorgu yok.
+//   reactions: [{ emoji, user_id }]   pin: { pinned_at, pinned_by } | null
+// Ayrıştırma: reactions.js gomuluTepkiler / gomuluSabit.
+export const MESAJ_SECIMI = '*, reactions:message_reactions(emoji, user_id), pin:message_pins(pinned_at, pinned_by)'
 
 // Kanalın mesajları, ESKİDEN YENİYE sıralı.
 // before verilirse yalnızca o id'den daha eski mesajlar gelir (yukarı kaydırma için).
 // after verilirse o id'den SONRAKİ ilk mesajlar gelir (bağlantı kopunca kaçanları almak için).
 // Silinmiş mesajlar (deleted_at dolu) hiç gelmez.
 export async function fetchMessages(channelId, { before, after, limit = SAYFA } = {}) {
-  let sorgu = supabase.from('messages').select('*').eq('channel_id', channelId).is('deleted_at', null)
+  let sorgu = supabase.from('messages').select(MESAJ_SECIMI).eq('channel_id', channelId).is('deleted_at', null)
   if (after != null) {
     // after'dan hemen sonraki mesajlar: id artan sırada doğrudan gelir
     const { data, error } = await sorgu.gt('id', after).order('id', { ascending: true }).limit(limit)
@@ -26,15 +32,18 @@ export async function fetchMessages(channelId, { before, after, limit = SAYFA } 
 }
 
 // Mesaj gönderir. Boşluklar kırpılır.
+// replyTo: yanıtlanan mesajın id'si (aynı kanalda olmalı; veritabanı denetler). Yoksa alan hiç yazılmaz.
 // Dönüş: { ok: true, message } | { ok: false, warning } (boş ya da çok uzunsa hiç gönderilmez).
 // Veritabanı hatasında Error fırlatır.
-export async function sendMessage(channelId, content, authorId) {
+export async function sendMessage(channelId, content, authorId, { replyTo = null } = {}) {
   const metin = String(content ?? '').trim()
   if (metin.length === 0) return { ok: false, warning: '' }
   if (metin.length > MAX_UZUNLUK) return { ok: false, warning: 'Mesaj en fazla 2000 karakter olabilir' }
+  const satir = { channel_id: channelId, author_id: authorId, content: metin }
+  if (replyTo != null) satir.reply_to = replyTo
   const { data, error } = await supabase
     .from('messages')
-    .insert({ channel_id: channelId, author_id: authorId, content: metin })
+    .insert(satir)
     .select()
     .single()
   if (error) throw new Error(error.message)
@@ -58,6 +67,53 @@ export async function editMessage(id, content) {
 export async function deleteMessage(id) {
   const { error } = await supabase.rpc('delete_message', { id })
   if (error) throw new Error(error.message)
+}
+
+// ---------- Tepki, sabitleme, yanıt alıntısı (009) ----------
+
+// Tepki ekler (ekle = true) ya da kendi tepkini kaldırır. İki yön de tekrarlanabilir.
+// Hata: Türkçe metinli Error (reactions.js etkilesimHatasi).
+export async function reactMessage(mid, emoji, ekle) {
+  const { error } = await supabase.rpc('react_message', { mid, tepki: emoji, ekle: !!ekle })
+  if (error) throw etkilesimHatasi(error)
+}
+
+// Sabitler / sabitlemeyi kaldırır (yalnız yetkili: can_pin). 50'yi aşarsa "En fazla 50 mesaj sabitlenebilir."
+export async function pinMessage(mid, sabitle) {
+  const { error } = await supabase.rpc('pin_message', { mid, sabitle: !!sabitle })
+  if (error) throw etkilesimHatasi(error)
+}
+
+// Sabitlenmiş mesajlar (en yeni sabit üstte, en çok 50). Dönüş: mesaj satırları + pinned_at, pinned_by.
+// Silinmiş mesajın sabiti veritabanında zaten kalkar; yine de güvenlik için süzülür.
+export async function fetchPinnedMessages(channelId) {
+  const { data, error } = await supabase
+    .from('message_pins')
+    .select('pinned_at, pinned_by, message:messages(*)')
+    .eq('channel_id', channelId)
+    .order('pinned_at', { ascending: false })
+    .limit(50)
+  if (error) throw new Error(error.message)
+  return sabitSatirlari(data)
+}
+
+// message_pins / dm_message_pins satırlarını mesaj nesnelerine çevirir (dms.js de kullanır)
+export function sabitSatirlari(data) {
+  return (data ?? [])
+    .map((r) => {
+      const m = Array.isArray(r?.message) ? r.message[0] : r?.message
+      return m ? { ...m, pinned_at: r.pinned_at, pinned_by: r.pinned_by } : null
+    })
+    .filter((m) => m && !m.deleted_at)
+}
+
+// Yanıt alıntısı için mesajları id ile getirir (silinmişler DE gelir: alıntı "Mesaj silindi" der).
+export async function fetchMessagesByIds(ids) {
+  if (!ids?.length) return []
+  const { data, error } = await supabase
+    .from('messages').select('id, channel_id, author_id, content, created_at, deleted_at').in('id', ids)
+  if (error) throw new Error(error.message)
+  return data ?? []
 }
 
 // Kanala yeni mesaj düşünce onInsert(mesaj) çağrılır. Dönen fonksiyon aboneliği kapatır.
@@ -117,8 +173,9 @@ export async function fetchProfiles(ids) {
 // gösterir (DM karşılığı: dms.js dmSource). Kanal kaynağı buradaki fonksiyonları sarar.
 // channel: { id, name }. isOwner: sunucunun sahibi mi (başkasının mesajını da silebilir). selfId: kendi id'miz.
 // Dönen: { kind:'channel', id, title, placeholder, other:null, canSend, fetch(beforeId, { after, limit }),
-//   send(content), edit(id, content), remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
-//   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg) }
+//   send(content, { replyTo }), edit(id, content), remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
+//   joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg),
+//   react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg) }
 export function channelSource(channel, { isOwner = false, selfId } = {}) {
   const id = channel.id
   return {
@@ -129,7 +186,14 @@ export function channelSource(channel, { isOwner = false, selfId } = {}) {
     other: null,
     canSend: true,
     fetch: (beforeId, { after, limit } = {}) => fetchMessages(id, { before: beforeId ?? undefined, after, limit }),
-    send: (content) => sendMessage(id, content, selfId),
+    send: (content, { replyTo } = {}) => sendMessage(id, content, selfId, { replyTo }),
+    react: (mesajId, emoji, ekle) => reactMessage(mesajId, emoji, ekle),
+    pin: (mesajId, sabitle) => pinMessage(mesajId, sabitle),
+    fetchPinned: () => fetchPinnedMessages(id),
+    fetchByIds: (ids) => fetchMessagesByIds(ids),
+    // Kanalda her üye tepki verir. Sabitleme yalnız sunucu sahibine (veritabanında can_pin; roller v0.11.0)
+    canReact: (msg) => !!msg && !msg.deleted_at,
+    canPin: (msg) => !!msg && !msg.deleted_at && isOwner,
     edit: (mesajId, content) => editMessage(mesajId, content),
     remove: (mesajId) => deleteMessage(mesajId),
     subscribe: ({ onInsert, onUpdate, getLastId, onReconnect } = {}) =>

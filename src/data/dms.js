@@ -4,11 +4,17 @@
 // gönderme doğrudan INSERT (taraf + engel yok), düzenleme/silme RPC ile.
 // 008_dm_arama.sql: dm_messages.kind ('text' | 'call'). Arama kaydı satırlarını yalnız sunucu yazar;
 // düzenlenemez ve silinemez (dmSource.canEdit/canDelete false, RPC'ler de reddeder).
+// 009_tepki_yanit_sabit.sql: kind 'pin' ("berk bir mesajı sabitledi."; yalnız pin_dm_message yazar),
+// reply_to (yanıt), dm_message_reactions (tepki) ve dm_message_pins (sabit).
 import { supabase } from '../lib/supabase.js'
-import { MAX_UZUNLUK, SAYFA } from './messages.js'
+import { MAX_UZUNLUK, SAYFA, sabitSatirlari } from './messages.js'
 import { createReadMarker } from './reads.js'
 import { joinTyping } from './typing.js'
 import { rpcHatasi } from './friends.js'
+import { etkilesimHatasi } from './reactions.js'
+
+// DM mesaj sorgusu: tepkiler ve sabit bilgisi gömülü (messages.js MESAJ_SECIMI'nin DM karşılığı)
+export const DM_MESAJ_SECIMI = '*, reactions:dm_message_reactions(emoji, user_id), pin:dm_message_pins(pinned_at, pinned_by)'
 
 export const GONDEREMEZSIN = 'Bu kişiye mesaj gönderemezsin.'
 // DM bağlamında SELF'in istek cümlesi yanlış okunur
@@ -56,7 +62,7 @@ export async function hideDm(threadId) {
 // Silinmiş mesajlar (deleted_at dolu) hiç gelmez. '*' 008'deki kind sütununu da getirir
 // ('text' | 'call'; eski şemada yoksa undefined, düz mesaj sayılır).
 export async function fetchDmMessages(threadId, { before, after, limit = SAYFA } = {}) {
-  let sorgu = supabase.from('dm_messages').select('*').eq('thread_id', threadId).is('deleted_at', null)
+  let sorgu = supabase.from('dm_messages').select(DM_MESAJ_SECIMI).eq('thread_id', threadId).is('deleted_at', null)
   if (after != null) {
     const { data, error } = await sorgu.gt('id', after).order('id', { ascending: true }).limit(limit)
     if (error) throw new Error(error.message)
@@ -70,13 +76,16 @@ export async function fetchDmMessages(threadId, { before, after, limit = SAYFA }
 
 // Gönderir. Dönüş: { ok: true, message } | { ok: false, warning } (boş ya da çok uzunsa gönderilmez).
 // Veritabanı reddederse (engel: RLS) "Bu kişiye mesaj gönderemezsin." ile Error fırlatır.
-export async function sendDmMessage(threadId, content, authorId) {
+// replyTo: yanıtlanan mesajın id'si (aynı konuşmada, düz mesaj; veritabanı denetler). Yoksa alan yazılmaz.
+export async function sendDmMessage(threadId, content, authorId, { replyTo = null } = {}) {
   const metin = String(content ?? '').trim()
   if (metin.length === 0) return { ok: false, warning: '' }
   if (metin.length > MAX_UZUNLUK) return { ok: false, warning: 'Mesaj en fazla 2000 karakter olabilir' }
+  const satir = { thread_id: threadId, author_id: authorId, content: metin }
+  if (replyTo != null) satir.reply_to = replyTo
   const { data, error } = await supabase
     .from('dm_messages')
-    .insert({ thread_id: threadId, author_id: authorId, content: metin })
+    .insert(satir)
     .select()
     .single()
   if (error) {
@@ -101,6 +110,40 @@ export async function editDmMessage(id, content) {
 export async function deleteDmMessage(id) {
   const { error } = await supabase.rpc('delete_dm_message', { id })
   if (error) throw rpcHatasi(error)
+}
+
+// ---------- Tepki, sabitleme, yanıt alıntısı (messages.js karşılıkları) ----------
+
+// Tepki ekler/kaldırır. Engelde eklenemez (hata metni engeli ele vermez: "Bunu yapamazsın.").
+export async function reactDmMessage(mid, emoji, ekle) {
+  const { error } = await supabase.rpc('react_dm_message', { mid, tepki: emoji, ekle: !!ekle })
+  if (error) throw etkilesimHatasi(error)
+}
+
+// Sabitler/kaldırır (iki taraf da). Sabitleyince sohbete "… bir mesajı sabitledi." satırı düşer.
+export async function pinDmMessage(mid, sabitle) {
+  const { error } = await supabase.rpc('pin_dm_message', { mid, sabitle: !!sabitle })
+  if (error) throw etkilesimHatasi(error)
+}
+
+export async function fetchPinnedDmMessages(threadId) {
+  const { data, error } = await supabase
+    .from('dm_message_pins')
+    .select('pinned_at, pinned_by, message:dm_messages(*)')
+    .eq('thread_id', threadId)
+    .order('pinned_at', { ascending: false })
+    .limit(50)
+  if (error) throw new Error(error.message)
+  return sabitSatirlari(data)
+}
+
+// Yanıt alıntısı için (silinmişler de gelir)
+export async function fetchDmMessagesByIds(ids) {
+  if (!ids?.length) return []
+  const { data, error } = await supabase
+    .from('dm_messages').select('id, thread_id, author_id, content, created_at, deleted_at, kind').in('id', ids)
+  if (error) throw new Error(error.message)
+  return data ?? []
 }
 
 // Tek konuşmanın aboneliği (açık DM ekranı için; kanal aboneliğinin aynısı).
@@ -170,6 +213,9 @@ export function resetDmReads() { dmOkuma.reset() }
 
 // Arama kaydı satırı mı ("📞 Cevapsız arama" / "📞 Arama · 12:34"; yalnız sunucu yazar)?
 export const aramaSatiri = (msg) => msg?.kind === 'call'
+// Sistem satırı mı (arama kaydı ya da "… bir mesajı sabitledi."; yalnız sunucu yazar)?
+// Düzenlenemez, silinemez; tepki, yanıt ve sabitleme almaz.
+export const sistemSatiri = (msg) => msg?.kind === 'call' || msg?.kind === 'pin'
 
 // ---------- chatView kaynağı ----------
 // thread: fetchDmList()'ten gelen konuşma (id + other.username) ya da en az { id, other: { username } }.
@@ -177,10 +223,12 @@ export const aramaSatiri = (msg) => msg?.kind === 'call'
 // Dönen nesne kanal kaynağıyla aynı arayüzü sağlar (Task 3: mountChat({ source })):
 //  { kind:'dm', id, title, placeholder, other, canSend, fetch(beforeId, { after, limit }), send(content), edit(id, content),
 //    remove(id), subscribe({ onInsert, onUpdate, getLastId, onReconnect }) -> kapat,
-//    joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg) }
+//    joinTyping({ selfId, selfName, onChange }), markRead(id), canDelete(msg), canEdit(msg),
+//    react(id, emoji, ekle), pin(id, sabitle), fetchPinned(), fetchByIds(ids), canReact(msg), canPin(msg) }
 export function dmSource(thread, selfProfile) {
   const id = thread.id
   const ad = thread.other?.username ?? ''
+  const yazabilir = thread.canSend !== false
   return {
     kind: 'dm',
     id,
@@ -188,9 +236,16 @@ export function dmSource(thread, selfProfile) {
     placeholder: `@${ad} kişisine mesaj gönder`,
     other: thread.other ?? null,
     // Engel varsa (dm_list can_send=false) yazı kutusu kapanır; eski mesajlar görünür kalır
-    canSend: thread.canSend !== false,
+    canSend: yazabilir,
     fetch: (beforeId, { after, limit } = {}) => fetchDmMessages(id, { before: beforeId ?? undefined, after, limit }),
-    send: (content) => sendDmMessage(id, content, selfProfile.id),
+    send: (content, { replyTo } = {}) => sendDmMessage(id, content, selfProfile.id, { replyTo }),
+    react: (mesajId, emoji, ekle) => reactDmMessage(mesajId, emoji, ekle),
+    pin: (mesajId, sabitle) => pinDmMessage(mesajId, sabitle),
+    fetchPinned: () => fetchPinnedDmMessages(id),
+    fetchByIds: (ids) => fetchDmMessagesByIds(ids),
+    // İki taraf da tepki verir ve sabitler; engelde (canSend false) ikisi de kapalı. Sistem satırına olmaz.
+    canReact: (msg) => yazabilir && !!msg && !msg.deleted_at && !sistemSatiri(msg),
+    canPin: (msg) => yazabilir && !!msg && !msg.deleted_at && !sistemSatiri(msg),
     edit: (mesajId, content) => editDmMessage(mesajId, content),
     remove: (mesajId) => deleteDmMessage(mesajId),
     subscribe: ({ onInsert, onUpdate, getLastId, onReconnect } = {}) =>
@@ -199,7 +254,8 @@ export function dmSource(thread, selfProfile) {
     markRead: (mesajId) => markDmRead(id, mesajId),
     // DM'de sahip kavramı yok: yalnız kendi mesajın silinir. Arama kaydı satırı (kind 'call')
     // düzenlenemez ve silinemez (yazarı arayan olsa da).
-    canDelete: (msg) => msg?.author_id === selfProfile.id && !aramaSatiri(msg),
-    canEdit: (msg) => msg?.author_id === selfProfile.id && !aramaSatiri(msg),
+    // Sabit satırı (kind 'pin') da aynı kurala uyar.
+    canDelete: (msg) => msg?.author_id === selfProfile.id && !sistemSatiri(msg),
+    canEdit: (msg) => msg?.author_id === selfProfile.id && !sistemSatiri(msg),
   }
 }

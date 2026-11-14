@@ -162,8 +162,9 @@ describe('DM sohbet ekranı', () => {
 
   it('düzenleme ve silme yalnız kendi mesajında', async () => {
     await dmKur([dmMesaj(1, 'u1'), dmMesaj(2, 'u2')])
-    expect([...mesaj(1).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Düzenle', 'Sil'])
-    expect(mesaj(2).querySelector('.msg-actions')).toBeNull()
+    expect([...mesaj(1).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Tepki ekle', 'Yanıtla', 'Sabitle', 'Düzenle', 'Sil'])
+    // Başkasının mesajında düzenleme/silme yok; tepki, yanıt ve sabitleme (iki taraf da) var
+    expect([...mesaj(2).querySelectorAll('.msg-action')].map((b) => b.getAttribute('aria-label'))).toEqual(['Tepki ekle', 'Yanıtla', 'Sabitle'])
   })
 
   it('gönderme dm_messages\'e thread_id ile yazar', async () => {
